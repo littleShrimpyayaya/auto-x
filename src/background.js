@@ -1,17 +1,16 @@
 /**
  * Standalone background service worker — decision engine + action executor.
- * All data is stored in chrome.storage.local. No backend needed.
+ * Firefox compatible: importScripts + self.autoxStore, no ES modules.
  */
-import * as store from "./lib/store.js";
+importScripts("./lib/store.js");
 
-const VERSION = "0.2.0";
+const store = self.autoxStore;
+const VERSION = "0.2.1";
 
 let connectedTabId = null;
 let data = null;
 let activeAction = null;
 let stopping = false;
-
-// ── Settings ──────────────────────────────────────────────────────
 
 const DEFAULT_SETTINGS = {
   followBackEnabled: true,
@@ -24,8 +23,6 @@ async function getSettings() {
   return { ...DEFAULT_SETTINGS, ...(cfg.autox_settings || {}) };
 }
 
-// ── Data management ───────────────────────────────────────────────
-
 async function loadData() {
   data = await store.load();
   store.checkDateRollover(data);
@@ -35,8 +32,6 @@ async function loadData() {
 async function persistData() {
   await store.save(data);
 }
-
-// ── Ingest ────────────────────────────────────────────────────────
 
 function ingestUsers(users, stream) {
   if (!users?.length) return 0;
@@ -53,35 +48,27 @@ function ingestUsers(users, stream) {
   return count;
 }
 
-// ── Decision ──────────────────────────────────────────────────────
-
 async function computeFollowBacks() {
   const settings = await getSettings();
   if (!settings.followBackEnabled) return [];
-
   const candidates = store.getNonMutualFollowers(data);
   const remaining = Math.max(0, settings.maxFollowsPerDay - data.stats.dailyFollows);
   return candidates.slice(0, Math.min(remaining, 5));
 }
 
-// ── Execution ─────────────────────────────────────────────────────
-
 async function executeAction(userId, username) {
   if (activeAction || !connectedTabId) return;
-
   const settings = await getSettings();
   if (data.stats.lastActionAt) {
     const elapsed = (Date.now() - new Date(data.stats.lastActionAt).getTime()) / 1000;
     if (elapsed < settings.minIntervalSec) return;
   }
   if (data.stats.dailyFollows >= settings.maxFollowsPerDay) return;
-
   activeAction = { userId, username };
-
   try {
     await chrome.tabs.sendMessage(connectedTabId, {
       type: "EXECUTE_ACTION",
-      actionId: `follow-${userId}`,
+      actionId: "follow-" + userId,
       actionType: "follow",
       targetUserId: userId,
     });
@@ -91,119 +78,112 @@ async function executeAction(userId, username) {
   }
 }
 
-// ── Result handling ───────────────────────────────────────────────
-
 async function onActionResult(msg) {
   if (!activeAction) return;
-  const { userId, username } = activeAction;
+  var uid = activeAction.userId, uname = activeAction.username;
   activeAction = null;
-
   if (msg.ok) {
-    if (data.followers[userId]) {
-      data.following[userId] = { ...data.followers[userId], _followedAt: new Date().toISOString() };
+    if (data.followers[uid]) {
+      data.following[uid] = { ...data.followers[uid], _followedAt: new Date().toISOString() };
       data.syncStatus.following.count = Object.keys(data.following).length;
     }
-    data.pendingActions = data.pendingActions.filter((a) => a.userId !== userId);
+    data.pendingActions = data.pendingActions.filter(function (a) { return a.userId !== uid; });
     data.stats.dailyFollows++;
     data.stats.lastActionAt = new Date().toISOString();
-    store.addToLog(data, { type: "follow", targetUser: `@${username}`, result: "ok" });
+    store.addToLog(data, { type: "follow", targetUser: "@" + uname, result: "ok" });
   } else {
-    store.addToLog(data, {
-      type: "follow", targetUser: `@${username}`,
-      result: `fail: ${msg.error || "unknown"}`,
-    });
+    store.addToLog(data, { type: "follow", targetUser: "@" + uname, result: "fail: " + (msg.error || "unknown") });
   }
   await persistData();
-  setTimeout(() => processQueue(), (await getSettings()).minIntervalSec * 1000);
+  var interval = (await getSettings()).minIntervalSec * 1000;
+  setTimeout(function () { processQueue(); }, interval);
 }
-
-// ── Queue processing ──────────────────────────────────────────────
 
 async function processQueue() {
   if (stopping || activeAction) return;
   await loadData();
-  const candidates = await computeFollowBacks();
+  var candidates = await computeFollowBacks();
   if (!candidates.length) return;
-
-  const next = candidates[0];
+  var next = candidates[0];
   data.pendingActions.push({ userId: next.id, queuedAt: new Date().toISOString() });
   await persistData();
   await executeAction(next.id, next.username);
 }
 
-// ── Sync ──────────────────────────────────────────────────────────
-
 async function startSync(stream) {
   if (!connectedTabId) return { ok: false, error: "请先打开 X.com" };
-  let username = "i";
+  var username = "i";
   try {
-    const resp = await chrome.tabs.sendMessage(connectedTabId, { type: "GET_SESSION" });
+    var resp = await chrome.tabs.sendMessage(connectedTabId, { type: "GET_SESSION" });
     if (resp?.user?.username) username = resp.user.username;
-  } catch {}
-
-  await chrome.tabs.update(connectedTabId, {
-    url: `https://x.com/${username}/${stream}`,
-    active: true,
-  });
-  try {
-    await chrome.tabs.sendMessage(connectedTabId, { type: "START_WALK", stream });
-  } catch {}
+  } catch (e) {}
+  await chrome.tabs.update(connectedTabId, { url: "https://x.com/" + username + "/" + stream, active: true });
+  try { await chrome.tabs.sendMessage(connectedTabId, { type: "START_WALK", stream: stream }); } catch (e) {}
   return { ok: true };
 }
 
-// ── Message router ────────────────────────────────────────────────
+// ── Message router ──
 
-chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
-  (async () => {
+chrome.runtime.onMessage.addListener(function (msg, sender, sendResponse) {
+  (async function () {
     try {
-      if (msg.type === "HEARTBEAT") {
-        connectedTabId = sender.tab?.id ?? connectedTabId;
-        sendResponse({ ok: true });
-        processQueue();
-      } else if (msg.type === "SESSION_USER") {
-        await loadData();
-        sendResponse({ ok: true });
-      } else if (msg.type === "INGEST_BATCH") {
-        if (msg.users?.length) {
-          ingestUsers(msg.users, msg.walk?.stream || "followers");
-        }
-        sendResponse({ ok: true });
-        if (msg.walk?.stream === "followers") setTimeout(() => processQueue(), 3000);
-      } else if (msg.type === "WALK_ENDED") {
-        if (msg.walk?.stream) {
-          data.syncStatus[msg.walk.stream].lastSync = new Date().toISOString();
-          await persistData();
-        }
-        sendResponse({ ok: true });
-        setTimeout(() => processQueue(), 3000);
-      } else if (msg.type === "ACTION_COMPLETED") {
-        await onActionResult(msg);
-        sendResponse({ ok: true });
-      } else if (msg.type === "QUERY_LEARNED") {
-        const queries = (await chrome.storage.local.get("knownQueries")).knownQueries || {};
-        queries[msg.endpoint] = { hash: msg.hash, seenAt: Date.now() };
-        await chrome.storage.local.set({ knownQueries: queries });
-        sendResponse({ ok: true });
-      } else if (msg.type === "START_SYNC") {
-        sendResponse(await startSync(msg.stream));
-      } else if (msg.type === "GET_STATUS") {
-        await loadData();
-        sendResponse({
-          version: VERSION,
-          followers: data.syncStatus.followers,
-          following: data.syncStatus.following,
-          dailyFollows: data.stats.dailyFollows,
-          pendingActions: data.pendingActions.length,
-          lastActionAt: data.stats.lastActionAt,
-          recentLog: data.actionLog.slice(0, 10),
-        });
-      } else if (msg.type === "GET_SETTINGS") {
-        sendResponse(await getSettings());
-      } else if (msg.type === "SAVE_SETTINGS") {
-        await chrome.storage.local.set({ autox_settings: msg.settings });
-        sendResponse({ ok: true });
-      } else {
-        sendResponse({ ok: true });
+      switch (msg.type) {
+        case "HEARTBEAT":
+          connectedTabId = sender.tab?.id ?? connectedTabId;
+          sendResponse({ ok: true });
+          processQueue();
+          break;
+        case "SESSION_USER":
+          await loadData();
+          sendResponse({ ok: true });
+          break;
+        case "INGEST_BATCH":
+          if (msg.users?.length) ingestUsers(msg.users, msg.walk?.stream || "followers");
+          sendResponse({ ok: true });
+          if (msg.walk?.stream === "followers") setTimeout(function () { processQueue(); }, 3000);
+          break;
+        case "WALK_ENDED":
+          if (msg.walk?.stream) {
+            data.syncStatus[msg.walk.stream].lastSync = new Date().toISOString();
+            await persistData();
+          }
+          sendResponse({ ok: true });
+          setTimeout(function () { processQueue(); }, 3000);
+          break;
+        case "ACTION_COMPLETED":
+          await onActionResult(msg);
+          sendResponse({ ok: true });
+          break;
+        case "QUERY_LEARNED":
+          var queries = (await chrome.storage.local.get("knownQueries")).knownQueries || {};
+          queries[msg.endpoint] = { hash: msg.hash, seenAt: Date.now() };
+          await chrome.storage.local.set({ knownQueries: queries });
+          sendResponse({ ok: true });
+          break;
+        case "START_SYNC":
+          sendResponse(await startSync(msg.stream));
+          break;
+        case "GET_STATUS":
+          await loadData();
+          sendResponse({
+            version: VERSION,
+            followers: data.syncStatus.followers,
+            following: data.syncStatus.following,
+            dailyFollows: data.stats.dailyFollows,
+            pendingActions: data.pendingActions.length,
+            lastActionAt: data.stats.lastActionAt,
+            recentLog: data.actionLog.slice(0, 10),
+          });
+          break;
+        case "GET_SETTINGS":
+          sendResponse(await getSettings());
+          break;
+        case "SAVE_SETTINGS":
+          await chrome.storage.local.set({ autox_settings: msg.settings });
+          sendResponse({ ok: true });
+          break;
+        default:
+          sendResponse({ ok: true });
       }
     } catch (e) {
       console.error("[auto-x]", e);
@@ -213,25 +193,25 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   return true;
 });
 
-// ── Tab tracking ──────────────────────────────────────────────────
+// ── Tab tracking ──
 
-chrome.tabs.onRemoved.addListener((tabId) => {
+chrome.tabs.onRemoved.addListener(function (tabId) {
   if (tabId === connectedTabId) connectedTabId = null;
 });
 
-// ── Periodic tick ─────────────────────────────────────────────────
+// ── Periodic tick ──
 
 chrome.alarms.create("tick", { periodInMinutes: 1 });
-chrome.alarms.onAlarm.addListener(async (alarm) => {
+chrome.alarms.onAlarm.addListener(async function (alarm) {
   if (alarm.name !== "tick") return;
   await loadData();
   processQueue();
 });
 
-// ── Init ──────────────────────────────────────────────────────────
+// ── Init ──
 
-(async () => {
+(async function () {
   await loadData();
-  console.log(`[auto-x] v${VERSION} standalone — followers:${Object.keys(data.followers).length} following:${Object.keys(data.following).length}`);
+  console.log("[auto-x] v" + VERSION + " standalone — followers:" + Object.keys(data.followers).length + " following:" + Object.keys(data.following).length);
   processQueue();
 })();

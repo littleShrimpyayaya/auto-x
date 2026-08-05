@@ -1,11 +1,10 @@
 {
   "manifest_version": 3,
   "name": "auto-x",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "description": "X (Twitter) 自动回关 — 纯浏览器插件，无需后端",
   "background": {
-    "service_worker": "src/background.js",
-    "type": "module"
+    "service_worker": "src/background.js"
   },
   "action": {
     "default_popup": "src/popup/popup.html",
@@ -32,6 +31,12 @@
       "run_at": "document_idle"
     }
   ],
+  "browser_specific_settings": {
+    "gecko": {
+      "id": "autox@local",
+      "strict_min_version": "115.0"
+    }
+  },
   "icons": {
     "16": "icons/icon-16.png",
     "48": "icons/icon-48.png",
