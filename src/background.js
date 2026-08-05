@@ -8,7 +8,7 @@ if (typeof importScripts === "function") {
 
 const api = self.autoxBrowser || (typeof browser !== "undefined" ? browser : chrome);
 const store = self.autoxStore;
-const VERSION = "0.3.9"; // auto-follow ∥ graph sync (no mutual interrupt)
+const VERSION = "0.3.10";
 const PANEL_PATH = "src/panel/panel.html";
 
 let connectedTabId = null;
@@ -353,37 +353,43 @@ async function onActionResult(msg) {
 
   data.pendingActions = data.pendingActions.filter((a) => a.userId !== uid);
 
-  // Only count real verified follows — fake 403 "success" no longer gets ok:true
-  // IMPORTANT: only writes data.following — never mutates data.followers (sync list intact)
-  if (msg.ok && (msg.following === true || msg.verified === true || msg.alreadyFollowing)) {
+  // msg.ok from page is authoritative (content forwards full fields).
+  // IMPORTANT: only writes data.following — never mutates data.followers.
+  const isSuccess =
+    !!msg.ok &&
+    (msg.following === true ||
+      msg.verified === true ||
+      msg.alreadyFollowing === true ||
+      // ok:true alone — content used to drop following/verified; still accept
+      msg.error == null);
+
+  if (isSuccess) {
     const base = data.followers[uid] || data.followers[String(uid)] || {};
-    data.following[uid] = {
+    const finalName = msg.username || uname || base.username || null;
+    data.following[String(uid)] = {
       id: String(uid),
-      username: uname || base.username || null,
+      username: finalName,
       name: name || base.name || null,
       verified: base.verified,
       protected: base.protected,
       _followedAt: new Date().toISOString(),
       _fromAutoFollow: true,
     };
-    // Do not touch followers map or followers.lastSync — graph sync owns those
     if (data.syncStatus?.following) {
       data.syncStatus.following.count = Object.keys(data.following).length;
     }
-    // alreadyFollowing: still "ok" for queue progress but don't inflate daily if re-hit
     if (!msg.alreadyFollowing) {
       data.stats.dailyFollows = (data.stats.dailyFollows || 0) + 1;
     }
     data.stats.lastActionAt = new Date().toISOString();
     store.recordFollowResult(data, {
       ok: true,
-      username: uname,
+      username: finalName || uname,
       name,
-      error: msg.alreadyFollowing ? "已关注" : msg.pendingFollow ? "已请求关注(待通过)" : null,
     });
     store.addToLog(data, {
       type: "follow",
-      targetUser: "@" + uname,
+      targetUser: "@" + (finalName || uname),
       result: msg.alreadyFollowing
         ? "ok: already"
         : msg.pendingFollow
@@ -391,7 +397,7 @@ async function onActionResult(msg) {
           : "ok" + (msg.verified ? "+verified" : ""),
     });
     console.log(
-      "[auto-x] ✓ 成功关注 @" + uname + (name ? " (" + name + ")" : "") +
+      "[auto-x] ✓ 成功关注 @" + (finalName || uname) + (name ? " (" + name + ")" : "") +
         (msg.alreadyFollowing ? " (本来已关注)" : "") +
         (msg.pendingFollow ? " (待通过)" : "") +
         (msg.verified ? " [已校验]" : "") +
@@ -400,7 +406,7 @@ async function onActionResult(msg) {
     );
   } else {
     data.stats.lastActionAt = new Date().toISOString();
-    const err = msg.error || (msg.ok ? "未通过关注校验" : "unknown");
+    const err = msg.error || "unknown";
     store.recordFollowResult(data, { ok: false, username: uname, name, error: err });
     store.addToLog(data, {
       type: "follow",

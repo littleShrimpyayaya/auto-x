@@ -454,15 +454,23 @@
       const line =
         (msg.ok ? "[auto-x] ✓ ACTION ok " : "[auto-x] ✗ ACTION fail ") +
         (msg.actionId || "") +
-        (msg.error ? " " + msg.error : "");
+        (msg.error ? " " + msg.error : "") +
+        (msg.verified ? " [verified]" : "") +
+        (msg.method ? " via " + msg.method : "");
       console.log(line);
+      // Forward full result — missing following/verified was treating success as fail
       sendToBg({
         type: "ACTION_COMPLETED",
         actionId: msg.actionId,
-        ok: msg.ok,
-        error: msg.error,
-        alreadyFollowing: msg.alreadyFollowing,
-        pendingFollow: msg.pendingFollow,
+        ok: !!msg.ok,
+        error: msg.error || null,
+        following: msg.following === true,
+        verified: msg.verified === true,
+        alreadyFollowing: !!msg.alreadyFollowing,
+        pendingFollow: !!msg.pendingFollow,
+        method: msg.method || null,
+        username: msg.username || null,
+        warning: msg.warning || null,
       });
     }
     if (msg.type === "LEARNED_QUERY") {
