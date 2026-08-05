@@ -43,8 +43,10 @@
     <header>
       <h1>auto-x</h1>
       <span id="me" class="tag">—</span>
+      <span id="mode" class="tag">mode: …</span>
       <span id="wsState" class="tag">ws: …</span>
       <div class="row" style="margin-left:auto">
+        <button id="btnProbe" class="secondary">探测 X API</button>
         <button id="btnStart">启动自动化</button>
         <button id="btnStop" class="secondary">停止</button>
         <button id="btnSync" class="secondary">立即同步</button>
@@ -116,13 +118,20 @@ function handle(u) {
 
 async function refresh() {
   const me = await api('/api/v1/me');
+  const cap = await api('/api/v1/capabilities');
+  document.getElementById('mode').textContent =
+    'mode: ' + cap.mode + (cap.credentialsConfigured ? ' · keys ok' : ' · NO KEYS');
+  document.getElementById('mode').className = 'tag ' + (cap.mode === 'live' ? 'ok' : 'bad');
   document.getElementById('me').textContent = me.account
     ? ('@' + me.account.username + ' (' + me.account.id + ')')
-    : 'needs bootstrap';
+    : 'needs bootstrap — 点「探测 X API」';
+  const c = cap.capabilities || me.runtime?.capabilities || {};
   document.getElementById('runtime').innerHTML =
     '<div>automation: <b class="'+(me.runtime?.automation_enabled?'ok':'bad')+'">' + !!me.runtime?.automation_enabled + '</b></div>' +
     '<div>graph_consistent: ' + !!me.runtime?.graph_consistent + '</div>' +
-    '<div>needs_bootstrap: ' + !!me.runtime?.needs_bootstrap + '</div>';
+    '<div>needs_bootstrap: ' + !!me.runtime?.needs_bootstrap + '</div>' +
+    '<div>last_error: ' + (me.runtime?.last_error || '—') + '</div>' +
+    '<div>caps: me=' + !!c.me + ' followers=' + !!c.readFollowers + ' following=' + !!c.readFollowing + ' write=' + !!c.writeFollow + '</div>';
 
   const st = await api('/api/v1/stats');
   document.getElementById('stats').innerHTML = st.empty ? '无账号' :
@@ -194,6 +203,13 @@ document.getElementById('btnLogin').onclick = async () => {
 document.getElementById('btnStart').onclick = async () => { await api('/api/v1/control/start', { method:'POST' }); await refresh(); };
 document.getElementById('btnStop').onclick = async () => { await api('/api/v1/control/stop', { method:'POST' }); await refresh(); };
 document.getElementById('btnSync').onclick = async () => { await api('/api/v1/control/sync', { method:'POST' }); await refresh(); };
+document.getElementById('btnProbe').onclick = async () => {
+  try {
+    const r = await api('/api/v1/control/probe', { method:'POST' });
+    log('probe ' + JSON.stringify(r.capabilities || r).slice(0, 300));
+    await refresh();
+  } catch (e) { log('probe fail ' + e.message); }
+};
 document.getElementById('btnRefresh').onclick = () => refresh();
 </script>
 </body>

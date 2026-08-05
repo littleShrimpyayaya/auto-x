@@ -298,6 +298,48 @@ app.post("/api/v1/control/sync", async (c) => {
   return c.json({ ok: true });
 });
 
+/** Run live/mock capability probe immediately (worker also probes on boot). */
+app.post("/api/v1/control/probe", async (c) => {
+  const { createXClient, resetXClientForTests } = await import("@autox/x-client");
+  try {
+    // re-resolve mode/credentials each probe (env may be fixed without restart in dev)
+    resetXClientForTests();
+    const client = createXClient();
+    const capabilities = await client.probeCapabilities();
+    await setRuntime({
+      capabilities,
+      last_error: capabilities.me ? null : capabilities.errors.me ?? "probe failed",
+    });
+    if (capabilities.meUser) {
+      const { upsertAccount, upsertXUser } = await import("@autox/db");
+      await upsertXUser(capabilities.meUser);
+      await upsertAccount({
+        id: capabilities.meUser.id,
+        username: capabilities.meUser.username,
+        name: capabilities.meUser.name,
+      });
+      await setRuntime({ needs_bootstrap: false });
+    }
+    await logEvent("probe", `api probe mode=${capabilities.mode}`, capabilities);
+    await pgNotify(WS_CHANNEL, envelope("runtime.changed", { capabilities }));
+    return c.json({ ok: true, capabilities });
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e);
+    await setRuntime({ last_error: msg });
+    return c.json({ ok: false, error: msg }, 500);
+  }
+});
+
+app.get("/api/v1/capabilities", async (c) => {
+  const rt = await getRuntime();
+  const { resolveXClientMode, hasLiveCredentials } = await import("@autox/x-client");
+  return c.json({
+    mode: resolveXClientMode(),
+    credentialsConfigured: hasLiveCredentials(),
+    capabilities: rt?.capabilities ?? null,
+  });
+});
+
 // --- HTTP + WS on same port ---
 const port = Number(process.env.PORT ?? 3000);
 if (!process.env.DATABASE_URL) {

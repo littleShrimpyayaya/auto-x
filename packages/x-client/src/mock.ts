@@ -1,7 +1,9 @@
-import type { FollowResult, Page, XClient, XUser } from "./types.js";
+import type { FollowResult, Page, XCapabilities, XClient, XUser } from "./types.js";
 
-/** Deterministic mock graph for E2E without live X API. */
+/** Deterministic mock graph for offline dev only. */
 export class MockXClient implements XClient {
+  readonly mode = "mock" as const;
+
   me: XUser = {
     id: "100",
     username: "autox_me",
@@ -11,13 +13,9 @@ export class MockXClient implements XClient {
     following_count: 0,
   };
 
-  /** userId -> profile */
   users = new Map<string, XUser>();
-  /** me is followed by */
   followers = new Set<string>();
-  /** me follows */
   following = new Set<string>();
-  /** foaf samples: followerId -> their following ids */
   foafFollowing = new Map<string, string[]>();
 
   constructor() {
@@ -25,13 +23,13 @@ export class MockXClient implements XClient {
   }
 
   private seed() {
-    const mk = (
-      id: string,
-      username: string,
-      name: string,
-      verified = false,
-    ): XUser => ({ id, username, name, verified, protected: false });
-
+    const mk = (id: string, username: string, name: string, verified = false): XUser => ({
+      id,
+      username,
+      name,
+      verified,
+      protected: false,
+    });
     const u = [
       mk("101", "alice_dev", "Alice", false),
       mk("102", "bob_crypto", "Bob", true),
@@ -43,12 +41,8 @@ export class MockXClient implements XClient {
     ];
     for (const x of u) this.users.set(x.id, x);
     this.users.set(this.me.id, this.me);
-
-    // followers of me
     for (const id of ["101", "102", "103", "105"]) this.followers.add(id);
-    // I follow some (not alice — follow-back candidate; dave is one-way)
     for (const id of ["102", "103", "104"]) this.following.add(id);
-
     this.foafFollowing.set("102", ["201", "202", "101"]);
     this.foafFollowing.set("103", ["201", "105"]);
     this.refreshCounts();
@@ -80,19 +74,13 @@ export class MockXClient implements XClient {
   }
 
   async getFollowing(userId: string, token?: string | null, maxResults = 100) {
-    if (userId === this.me.id) {
-      return this.page([...this.following], token, maxResults);
-    }
-    const list = this.foafFollowing.get(userId) ?? [];
-    return this.page(list, token, maxResults);
+    if (userId === this.me.id) return this.page([...this.following], token, maxResults);
+    return this.page(this.foafFollowing.get(userId) ?? [], token, maxResults);
   }
 
   async follow(_source: string, target: string): Promise<FollowResult> {
-    if (this.following.has(target)) {
-      return { pendingFollow: false, alreadyFollowing: true };
-    }
-    // pending for id 105 only once
-    if (target === "105" && !this.following.has(target)) {
+    if (this.following.has(target)) return { pendingFollow: false, alreadyFollowing: true };
+    if (target === "105") {
       this.following.add(target);
       this.refreshCounts();
       return { pendingFollow: true };
@@ -105,5 +93,20 @@ export class MockXClient implements XClient {
   async unfollow(_source: string, target: string): Promise<void> {
     this.following.delete(target);
     this.refreshCounts();
+  }
+
+  async probeCapabilities(): Promise<XCapabilities> {
+    const me = await this.getMe();
+    return {
+      mode: "mock",
+      me: true,
+      readFollowers: true,
+      readFollowing: true,
+      writeFollow: true,
+      writeUnfollow: true,
+      probedAt: new Date().toISOString(),
+      errors: {},
+      meUser: me,
+    };
   }
 }

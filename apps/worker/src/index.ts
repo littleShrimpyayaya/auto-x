@@ -1,5 +1,5 @@
 /**
- * Worker: sync, follow-back, observer, expander, executor, reclaim.
+ * Worker: live X automation — bootstrap, sync, follow-back, observer, expander, executor.
  * Does NOT run migrations.
  */
 import {
@@ -24,7 +24,7 @@ import {
 } from "@autox/db";
 import { chargeFollow, chargeUnfollow, foafScore, shouldFollowBack } from "@autox/domain";
 import { envelope, settingsFromEnv, WS_CHANNEL } from "@autox/shared";
-import { createXClient } from "@autox/x-client";
+import { createXClient, type XCapabilities, XApiError } from "@autox/x-client";
 
 const workerId = process.env.WORKER_ID ?? "worker-1";
 const settings = settingsFromEnv();
@@ -32,79 +32,131 @@ const x = createXClient();
 
 let lastWriteAt = 0;
 let stopping = false;
+let caps: XCapabilities | null = null;
+let lastProbeAt = 0;
 
 function sleep(ms: number) {
   return new Promise((r) => setTimeout(r, ms));
 }
 
+async function probeAndStore() {
+  caps = await x.probeCapabilities();
+  lastProbeAt = Date.now();
+  await setRuntime({
+    capabilities: caps,
+    last_error: caps.me ? null : caps.errors.me ?? "probe failed",
+  });
+  await logEvent("probe", `mode=${caps.mode} me=${caps.me} followers=${caps.readFollowers} following=${caps.readFollowing} writes=${caps.writeFollow}`, caps);
+  await pgNotify(WS_CHANNEL, envelope("runtime.changed", { capabilities: caps }));
+  return caps;
+}
+
 async function ensureBootstrap() {
-  const rt = await getRuntime();
+  if (!caps || Date.now() - lastProbeAt > 30 * 60_000) {
+    await probeAndStore();
+  }
+  if (!caps?.me) {
+    throw new Error(`X API getMe failed: ${caps?.errors.me ?? "unknown"} — check OAuth credentials`);
+  }
+
   let account = await getPrimaryAccount();
+  const rt = await getRuntime();
   if (!account || rt?.needs_bootstrap) {
-    const me = await x.getMe();
+    const me = caps.meUser ?? (await x.getMe());
     await upsertXUser(me);
     await upsertAccount({ id: me.id, username: me.username, name: me.name });
     await setRuntime({ needs_bootstrap: false, last_error: null });
-    await logEvent("bootstrap", `account @${me.username} (${me.id})`);
+    await logEvent("bootstrap", `live account @${me.username} (${me.id}) mode=${x.mode}`);
     await pgNotify(WS_CHANNEL, envelope("runtime.changed", { needsBootstrap: false, me }));
     account = { id: me.id, username: me.username, name: me.name };
   }
   return account as { id: string; username: string; name?: string };
 }
 
-async function syncStream(
-  accountId: string,
-  stream: "followers" | "following",
-) {
+async function syncStream(accountId: string, stream: "followers" | "following") {
+  if (stream === "followers" && caps && !caps.readFollowers) {
+    await logEvent("sync", `skip followers — capability denied: ${caps.errors.readFollowers}`, {}, "warn");
+    return;
+  }
+  if (stream === "following" && caps && !caps.readFollowing) {
+    await logEvent("sync", `skip following — capability denied: ${caps.errors.readFollowing}`, {}, "warn");
+    return;
+  }
+
   const started = await startFullWalk(accountId, stream);
   const walkGen = started.walk_gen as number;
   let token: string | null = started.cursor ?? null;
-  let pages = started.cursor ? Number((await query(`SELECT pages_done FROM sync_cursors WHERE account_id=$1 AND stream=$2`, [accountId, stream])).rows[0]?.pages_done ?? 0) : 0;
+  const cur = await query(
+    `SELECT pages_done FROM sync_cursors WHERE account_id=$1 AND stream=$2`,
+    [accountId, stream],
+  );
+  let pages = started.cursor ? Number(cur.rows[0]?.pages_done ?? 0) : 0;
 
-  // eslint-disable-next-line no-constant-condition
-  while (true) {
-    if (stopping) return;
-    const page =
-      stream === "followers"
-        ? await x.getFollowers(accountId, token, 100)
-        : await x.getFollowing(accountId, token, 100);
+  try {
+    // eslint-disable-next-line no-constant-condition
+    while (true) {
+      if (stopping) return;
+      const page =
+        stream === "followers"
+          ? await x.getFollowers(accountId, token, settings.syncPageSize)
+          : await x.getFollowing(accountId, token, settings.syncPageSize);
 
-    for (const u of page.data) {
-      await upsertXUser(u);
-      await upsertEdge(stream, accountId, u.id, { syncGen: walkGen });
+      for (const u of page.data) {
+        await upsertXUser(u);
+        await upsertEdge(stream, accountId, u.id, { syncGen: walkGen });
+      }
+      pages += 1;
+      token = page.nextToken ?? null;
+      await query(
+        `UPDATE sync_cursors SET cursor=$3, pages_done=$4, updated_at=now()
+         WHERE account_id=$1 AND stream=$2`,
+        [accountId, stream, token, pages],
+      );
+      await pgNotify(
+        WS_CHANNEL,
+        envelope("sync.progress", {
+          stream,
+          phase: "full_in_progress",
+          pagesDone: pages,
+          walkGen,
+          cursorPresent: !!token,
+        }),
+      );
+      if (!token) break;
+      // be gentle on read rate limits between pages
+      if (x.mode === "live") await sleep(Number(process.env.SYNC_PAGE_DELAY_MS ?? 1100));
     }
-    pages += 1;
-    token = page.nextToken ?? null;
-    await query(
-      `UPDATE sync_cursors SET cursor=$3, pages_done=$4, updated_at=now()
-       WHERE account_id=$1 AND stream=$2`,
-      [accountId, stream, token, pages],
-    );
-    await pgNotify(
-      WS_CHANNEL,
-      envelope("sync.progress", {
-        stream,
-        phase: "full_in_progress",
-        pagesDone: pages,
-        walkGen,
-        cursorPresent: !!token,
-      }),
-    );
-    if (!token) break;
+    await completeFullWalk(accountId, stream, walkGen);
+    await logEvent("sync", `full ${stream} walk_gen=${walkGen} pages=${pages}`, { accountId });
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e);
+    // leave phase=full_in_progress + cursor for resume; do NOT soft-delete
+    await logEvent("sync", `interrupted ${stream}: ${msg}`, { walkGen, pages }, "error");
+    await setRuntime({ last_error: `sync ${stream}: ${msg}` });
+    if (e instanceof XApiError && e.kind === "rate_limit" && e.retryAfterMs) {
+      await sleep(Math.min(e.retryAfterMs, 300_000));
+    }
+    throw e;
   }
-  await completeFullWalk(accountId, stream, walkGen);
-  await logEvent("sync", `full ${stream} walk_gen=${walkGen} pages=${pages}`, { accountId });
 }
 
 async function runSync(accountId: string) {
-  await syncStream(accountId, "followers");
-  await syncStream(accountId, "following");
+  try {
+    await syncStream(accountId, "followers");
+    await syncStream(accountId, "following");
+  } catch {
+    // partial progress kept; will retry next loop
+  }
   await pgNotify(WS_CHANNEL, envelope("runtime.changed", await getRuntime()));
   await pgNotify(WS_CHANNEL, envelope("stats.updated", await stats(accountId)));
 }
 
 async function followBackScan(accountId: string) {
   if (!settings.followBackEnabled) return;
+  if (caps && !caps.writeFollow) {
+    await logEvent("follow_back", "skipped — writeFollow capability false", {}, "warn");
+    return;
+  }
   const r = await query(
     `SELECT f.user_id, u.username, u.name, u.verified
      FROM followers f
@@ -135,8 +187,8 @@ async function followBackScan(accountId: string) {
 async function observerScan(accountId: string) {
   const rt = await getRuntime();
   if (!rt?.graph_consistent) return;
+  if (caps && !caps.writeUnfollow) return;
 
-  // ensure observations for non-mutual following
   const following = await query(
     `SELECT g.user_id FROM following g
      LEFT JOIN followers f ON f.account_id=g.account_id AND f.user_id=g.user_id AND f.lost_at IS NULL
@@ -156,7 +208,6 @@ async function observerScan(accountId: string) {
     );
   }
 
-  // mutuals clear observation
   await query(
     `UPDATE observations o SET status='cleared_mutual', updated_at=now()
      FROM followers f, following g
@@ -166,14 +217,12 @@ async function observerScan(accountId: string) {
     [accountId],
   );
 
-  // due unfollows
   const due = await query(
     `SELECT o.user_id FROM observations o
      WHERE o.account_id=$1 AND o.status='watching' AND o.expires_at <= now()`,
     [accountId],
   );
   for (const row of due.rows) {
-    // cooldown
     const cool = await query(
       `SELECT 1 FROM jobs WHERE type='unfollow' AND status='done' AND target_user_id=$1
          AND finished_at > now() - ($2 || ' days')::interval LIMIT 1`,
@@ -200,7 +249,6 @@ async function observerScan(accountId: string) {
     });
   }
 
-  // recover promoted_unfollow without active job
   await query(
     `UPDATE observations o SET status='watching', updated_at=now()
      WHERE o.account_id=$1 AND o.status='promoted_unfollow'
@@ -214,33 +262,38 @@ async function observerScan(accountId: string) {
 
 async function expandScan(accountId: string) {
   if (!settings.mutualExpandEnabled) return;
-  // sample following of verified followers
+  if (caps && !caps.readFollowing) return;
+
   const seeds = await query(
     `SELECT f.user_id FROM followers f
      JOIN x_users u ON u.id=f.user_id
      WHERE f.account_id=$1 AND f.lost_at IS NULL
-     ORDER BY u.verified DESC LIMIT 5`,
+     ORDER BY u.verified DESC LIMIT 3`,
     [accountId],
   );
   const overlap = new Map<string, { count: number; verified: boolean; username: string; name: string | null }>();
   for (const s of seeds.rows) {
-    const page = await x.getFollowing(s.user_id, null, 20);
-    for (const u of page.data) {
-      if (u.id === accountId) continue;
-      await upsertXUser(u);
-      const cur = overlap.get(u.id) ?? {
-        count: 0,
-        verified: !!u.verified,
-        username: u.username,
-        name: u.name ?? null,
-      };
-      cur.count += 1;
-      cur.verified = cur.verified || !!u.verified;
-      overlap.set(u.id, cur);
+    try {
+      const page = await x.getFollowing(s.user_id, null, 20);
+      if (x.mode === "live") await sleep(1200);
+      for (const u of page.data) {
+        if (u.id === accountId) continue;
+        await upsertXUser(u);
+        const cur = overlap.get(u.id) ?? {
+          count: 0,
+          verified: !!u.verified,
+          username: u.username,
+          name: u.name ?? null,
+        };
+        cur.count += 1;
+        cur.verified = cur.verified || !!u.verified;
+        overlap.set(u.id, cur);
+      }
+    } catch (e) {
+      await logEvent("expand", `seed ${s.user_id}: ${e}`, {}, "warn");
     }
   }
   for (const [uid, info] of overlap) {
-    // skip already following / already follower
     const exists = await query(
       `SELECT 1 FROM following WHERE account_id=$1 AND user_id=$2 AND lost_at IS NULL
        UNION ALL
@@ -262,7 +315,7 @@ async function expandScan(accountId: string) {
         settings.candidateManualApproval ? "pending" : "approved",
       ],
     );
-    if (!settings.candidateManualApproval) {
+    if (!settings.candidateManualApproval && caps?.writeFollow) {
       await enqueueJobSafe({
         accountId,
         type: "follow",
@@ -277,15 +330,9 @@ async function expandScan(accountId: string) {
 async function quotaOk(accountId: string, type: "follow" | "unfollow") {
   const st = await stats(accountId);
   if (type === "follow") {
-    return (
-      st.dailyFollows < settings.maxFollowsPerDay &&
-      st.hourlyFollows < settings.maxFollowsPerHour
-    );
+    return st.dailyFollows < settings.maxFollowsPerDay && st.hourlyFollows < settings.maxFollowsPerHour;
   }
-  return (
-    st.dailyUnfollows < settings.maxUnfollowsPerDay &&
-    st.hourlyUnfollows < settings.maxUnfollowsPerHour
-  );
+  return st.dailyUnfollows < settings.maxUnfollowsPerDay && st.hourlyUnfollows < settings.maxUnfollowsPerHour;
 }
 
 async function executeOne(accountId: string) {
@@ -302,6 +349,21 @@ async function executeOne(accountId: string) {
   }
 
   const type = job.type as "follow" | "unfollow";
+  if (type === "follow" && caps && !caps.writeFollow) {
+    await query(
+      `UPDATE jobs SET status='dead', last_error='writeFollow not available on this API tier', finished_at=now(), updated_at=now() WHERE id=$1`,
+      [job.id],
+    );
+    return true;
+  }
+  if (type === "unfollow" && caps && !caps.writeUnfollow) {
+    await query(
+      `UPDATE jobs SET status='dead', last_error='writeUnfollow not available', finished_at=now(), updated_at=now() WHERE id=$1`,
+      [job.id],
+    );
+    return true;
+  }
+
   if (!(await quotaOk(accountId, type))) {
     await query(
       `UPDATE jobs SET status='pending', locked_at=NULL, locked_by=NULL,
@@ -321,13 +383,11 @@ async function executeOne(accountId: string) {
         `SELECT lost_at, pending_follow FROM following WHERE account_id=$1 AND user_id=$2`,
         [accountId, job.target_user_id],
       );
-      const wasLocalActive = !!(
-        edge.rows[0] && edge.rows[0].lost_at == null
-      );
+      const wasLocalActive = !!(edge.rows[0] && edge.rows[0].lost_at == null);
       const result = await x.follow(accountId, job.target_user_id);
       lastWriteAt = Date.now();
       const syncGen = await edgeSyncGenForUpsert(accountId, "following");
-      const doCharge = chargeFollow(wasLocalActive);
+      const doCharge = chargeFollow(wasLocalActive) && !result.alreadyFollowing;
 
       await withClient(async (c) => {
         await c.query("BEGIN");
@@ -427,7 +487,6 @@ async function executeOne(accountId: string) {
       });
     }
 
-    // hydrate username for WS
     const u = await query(`SELECT username, name FROM x_users WHERE id=$1`, [job.target_user_id]);
     await pgNotify(
       WS_CHANNEL,
@@ -438,30 +497,48 @@ async function executeOne(accountId: string) {
         targetUserId: job.target_user_id,
         username: u.rows[0]?.username,
         name: u.rows[0]?.name,
-        statsCharged: true,
       }),
     );
     await pgNotify(WS_CHANNEL, envelope("stats.updated", await stats(accountId)));
+    await logEvent("executor", `${type} ok ${job.target_user_id} @${u.rows[0]?.username ?? "?"}`);
   } catch (e) {
+    const xe = e instanceof XApiError ? e : null;
     const msg = e instanceof Error ? e.message : String(e);
-    const dead = job.attempts >= job.max_attempts;
+    if (xe?.kind === "rate_limit") {
+      await query(
+        `UPDATE jobs SET status='pending', locked_at=NULL, locked_by=NULL,
+           attempts = GREATEST(attempts-1,0),
+           next_run_at = now() + ($2 || ' milliseconds')::interval,
+           last_error=$3, updated_at=now()
+         WHERE id=$1`,
+        [job.id, String(xe.retryAfterMs ?? 60_000), msg],
+      );
+      await sleep(Math.min(xe.retryAfterMs ?? 60_000, 120_000));
+      return true;
+    }
+    const dead = job.attempts >= job.max_attempts || xe?.kind === "auth" || xe?.kind === "forbidden";
     await query(
       `UPDATE jobs SET status=$2, last_error=$3, locked_at=NULL, locked_by=NULL,
-         next_run_at = CASE WHEN $2='pending' THEN now() + interval '5 minutes' ELSE next_run_at END,
+         next_run_at = CASE WHEN $2='pending' THEN now() + interval '10 minutes' ELSE next_run_at END,
          finished_at = CASE WHEN $2='dead' THEN now() ELSE NULL END,
          updated_at=now()
        WHERE id=$1`,
       [job.id, dead ? "dead" : "pending", msg],
     );
-    await logEvent("executor", `job ${job.id} failed: ${msg}`, { jobId: job.id }, "error");
+    await logEvent("executor", `job ${job.id} failed: ${msg}`, { kind: xe?.kind }, "error");
   }
   return true;
 }
 
 async function mainLoop() {
-  console.log(`worker ${workerId} started mode=${process.env.X_CLIENT_MODE ?? "mock"}`);
-  // ensure pool
+  console.log(`worker ${workerId} started x.mode=${x.mode}`);
   getPool();
+
+  try {
+    await probeAndStore();
+  } catch (e) {
+    console.error("initial probe failed", e);
+  }
 
   while (!stopping) {
     try {
@@ -470,27 +547,28 @@ async function mainLoop() {
       const accountId = account.id as string;
 
       if (rt?.automation_enabled) {
-        // periodic full sync if never done or stale flags
         if (!rt.graph_consistent) {
           await runSync(accountId);
         }
         await followBackScan(accountId);
         await observerScan(accountId);
         await expandScan(accountId);
-        // drain some jobs
-        for (let i = 0; i < 5; i++) {
+        // live: fewer jobs per tick to respect write interval
+        const budget = x.mode === "live" ? 2 : 5;
+        for (let i = 0; i < budget; i++) {
           const did = await executeOne(accountId);
           if (!did) break;
         }
       } else {
-        // still reclaim
         await reclaimStaleJobs(settings.leaseTtlSec);
       }
     } catch (e) {
       console.error("worker loop error", e);
       await logEvent("worker", String(e), {}, "error").catch(() => {});
+      await setRuntime({ last_error: String(e) }).catch(() => {});
+      await sleep(5000);
     }
-    await sleep(2000);
+    await sleep(x.mode === "live" ? 5000 : 2000);
   }
   console.log("worker draining exit");
   process.exit(0);

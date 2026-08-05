@@ -11,9 +11,11 @@
     "dev:worker": "pnpm --filter @autox/worker dev",
     "build": "pnpm -r run build",
     "db:migrate": "pnpm --filter @autox/db db:migrate",
-    "typecheck": "pnpm -r run typecheck"
+    "typecheck": "pnpm -r run typecheck",
+    "live:probe": "tsx scripts/live-probe.ts"
   },
   "devDependencies": {
+    "tsx": "4.19.2",
     "typescript": "^5.7.3"
   }
 }

@@ -31,29 +31,46 @@ export type AppSettings = {
   unfollowCooldownDays: number;
   leaseTtlSec: number;
   expandPreferVerified: boolean;
+  syncPageSize: number;
 };
 
 export function settingsFromEnv(): AppSettings {
-  const n = (k: string, d: number) => Number(process.env[k] ?? d);
+  const n = (k: string, d: number) => {
+    const v = process.env[k];
+    if (v === undefined || v === "") return d;
+    const num = Number(v);
+    return Number.isFinite(num) ? num : d;
+  };
   const b = (k: string, d: boolean) => {
     const v = process.env[k];
     if (v === undefined) return d;
     return v === "1" || v.toLowerCase() === "true";
   };
-  const mock = (process.env.X_CLIENT_MODE ?? "mock").toLowerCase() === "mock";
+
+  // Live-safe defaults when credentials present / mode=live
+  const mode = (process.env.X_CLIENT_MODE ?? "auto").toLowerCase();
+  const hasCreds = !!(
+    process.env.X_API_KEY?.trim() &&
+    process.env.X_API_SECRET?.trim() &&
+    process.env.X_ACCESS_TOKEN?.trim() &&
+    process.env.X_ACCESS_SECRET?.trim()
+  );
+  const live = mode === "live" || (mode === "auto" && hasCreds) || (mode !== "mock" && hasCreds);
+
   return {
     observationDays: n("OBSERVATION_DAYS", 7),
-    maxFollowsPerDay: n("MAX_FOLLOWS_PER_DAY", 50),
-    maxUnfollowsPerDay: n("MAX_UNFOLLOWS_PER_DAY", 50),
-    maxFollowsPerHour: n("MAX_FOLLOWS_PER_HOUR", 8),
-    maxUnfollowsPerHour: n("MAX_UNFOLLOWS_PER_HOUR", 8),
-    // mock defaults faster for demo
-    writeMinIntervalMs: n("WRITE_MIN_INTERVAL_MS", mock ? 200 : 45000),
+    maxFollowsPerDay: n("MAX_FOLLOWS_PER_DAY", live ? 40 : 50),
+    maxUnfollowsPerDay: n("MAX_UNFOLLOWS_PER_DAY", live ? 40 : 50),
+    maxFollowsPerHour: n("MAX_FOLLOWS_PER_HOUR", live ? 6 : 8),
+    maxUnfollowsPerHour: n("MAX_UNFOLLOWS_PER_HOUR", live ? 6 : 8),
+    // Real X: conservative write spacing (default 45s). Mock can be fast.
+    writeMinIntervalMs: n("WRITE_MIN_INTERVAL_MS", live ? 45_000 : 200),
     followBackEnabled: b("FOLLOW_BACK_ENABLED", true),
     mutualExpandEnabled: b("MUTUAL_EXPAND_ENABLED", false),
     candidateManualApproval: b("CANDIDATE_MANUAL_APPROVAL", true),
     unfollowCooldownDays: n("UNFOLLOW_COOLDOWN_DAYS", 30),
     leaseTtlSec: n("LEASE_TTL_SEC", 120),
     expandPreferVerified: b("EXPAND_PREFER_VERIFIED", true),
+    syncPageSize: n("SYNC_PAGE_SIZE", 100),
   };
 }

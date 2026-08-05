@@ -19,10 +19,26 @@ export type FollowResult = {
   alreadyFollowing?: boolean;
 };
 
+/** What this credential set can actually do (from live probe). */
+export type XCapabilities = {
+  mode: "live" | "mock";
+  me: boolean;
+  readFollowers: boolean;
+  readFollowing: boolean;
+  writeFollow: boolean;
+  writeUnfollow: boolean;
+  probedAt: string;
+  errors: Partial<Record<keyof Omit<XCapabilities, "mode" | "probedAt" | "errors">, string>>;
+  meUser?: XUser;
+};
+
 export interface XClient {
+  readonly mode: "live" | "mock";
   getMe(): Promise<XUser>;
   getFollowers(userId: string, token?: string | null, maxResults?: number): Promise<Page<XUser>>;
   getFollowing(userId: string, token?: string | null, maxResults?: number): Promise<Page<XUser>>;
   follow(sourceUserId: string, targetUserId: string): Promise<FollowResult>;
   unfollow(sourceUserId: string, targetUserId: string): Promise<void>;
+  /** Non-destructive capability probe (live hits real API; mock returns all true). */
+  probeCapabilities(): Promise<XCapabilities>;
 }
