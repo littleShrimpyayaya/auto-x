@@ -11,7 +11,10 @@
   },
   "dependencies": {
     "@autox/config": "workspace:*",
+    "@autox/db": "workspace:*",
+    "@autox/domain": "workspace:*",
     "@autox/shared": "workspace:*",
+    "@autox/x-client": "workspace:*",
     "tsx": "^4.19.2"
   },
   "devDependencies": {

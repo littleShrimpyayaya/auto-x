@@ -11,13 +11,18 @@
   },
   "dependencies": {
     "@autox/config": "workspace:*",
+    "@autox/db": "workspace:*",
     "@autox/shared": "workspace:*",
     "@hono/node-server": "^1.13.7",
     "hono": "^4.6.16",
-    "tsx": "^4.19.2"
+    "pg": "^8.13.1",
+    "tsx": "^4.19.2",
+    "ws": "^8.18.0"
   },
   "devDependencies": {
     "@types/node": "^22.10.5",
+    "@types/pg": "^8.11.10",
+    "@types/ws": "^8.5.13",
     "typescript": "^5.7.3"
   }
 }

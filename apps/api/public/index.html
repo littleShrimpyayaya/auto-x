@@ -1,0 +1,200 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>auto-x Admin</title>
+  <style>
+    :root { --bg:#0f1419; --card:#1a2332; --fg:#e7ecf3; --mut:#8b9bb4; --acc:#1d9bf0; --ok:#00ba7c; --bad:#f4212e; }
+    * { box-sizing: border-box; }
+    body { margin:0; font-family: system-ui, sans-serif; background:var(--bg); color:var(--fg); }
+    header { padding:1rem 1.25rem; border-bottom:1px solid #243044; display:flex; gap:1rem; align-items:center; flex-wrap:wrap; }
+    h1 { font-size:1.1rem; margin:0; }
+    main { padding:1rem 1.25rem; display:grid; gap:1rem; grid-template-columns: repeat(auto-fit,minmax(280px,1fr)); }
+    .card { background:var(--card); border-radius:12px; padding:1rem; }
+    .card h2 { margin:0 0 .75rem; font-size:.95rem; color:var(--mut); font-weight:600; }
+    button, input { font: inherit; }
+    button { background:var(--acc); color:#fff; border:0; border-radius:999px; padding:.45rem .9rem; cursor:pointer; }
+    button.secondary { background:#2f3b4f; }
+    button.danger { background:var(--bad); }
+    input { background:#0b1017; border:1px solid #2f3b4f; color:var(--fg); border-radius:8px; padding:.5rem .7rem; width: min(320px,100%); }
+    table { width:100%; border-collapse: collapse; font-size:.85rem; }
+    th, td { text-align:left; padding:.35rem .25rem; border-bottom:1px solid #243044; }
+    .tag { display:inline-block; padding:.1rem .4rem; border-radius:6px; background:#243044; font-size:.75rem; }
+    .ok { color:var(--ok); } .bad { color:var(--bad); }
+    #login { max-width:420px; margin:10vh auto; padding:1.5rem; background:var(--card); border-radius:16px; }
+    #app { display:none; }
+    #log { font-family: ui-monospace, monospace; font-size:.75rem; max-height:220px; overflow:auto; white-space:pre-wrap; color:var(--mut); }
+    .row { display:flex; gap:.5rem; flex-wrap:wrap; align-items:center; }
+  </style>
+</head>
+<body>
+  <div id="login">
+    <h1>auto-x 管理端</h1>
+    <p style="color:var(--mut);font-size:.9rem">输入 ADMIN_TOKEN（仅保存在内存，不写 localStorage）</p>
+    <div class="row" style="margin-top:1rem">
+      <input id="token" type="password" placeholder="ADMIN_TOKEN" />
+      <button id="btnLogin">登录</button>
+    </div>
+    <p id="loginErr" class="bad" style="min-height:1.2rem"></p>
+  </div>
+
+  <div id="app">
+    <header>
+      <h1>auto-x</h1>
+      <span id="me" class="tag">—</span>
+      <span id="wsState" class="tag">ws: …</span>
+      <div class="row" style="margin-left:auto">
+        <button id="btnStart">启动自动化</button>
+        <button id="btnStop" class="secondary">停止</button>
+        <button id="btnSync" class="secondary">立即同步</button>
+        <button id="btnRefresh" class="secondary">刷新</button>
+      </div>
+    </header>
+    <main>
+      <section class="card">
+        <h2>统计</h2>
+        <div id="stats">—</div>
+      </section>
+      <section class="card">
+        <h2>运行时</h2>
+        <div id="runtime">—</div>
+      </section>
+      <section class="card" style="grid-column:1/-1">
+        <h2>任务队列（含 @username）</h2>
+        <div style="overflow:auto">
+          <table>
+            <thead><tr><th>ID</th><th>类型</th><th>状态</th><th>用户</th><th>来源</th></tr></thead>
+            <tbody id="jobs"></tbody>
+          </table>
+        </div>
+      </section>
+      <section class="card">
+        <h2>粉丝</h2>
+        <div id="followers"></div>
+      </section>
+      <section class="card">
+        <h2>关注中</h2>
+        <div id="following"></div>
+      </section>
+      <section class="card" style="grid-column:1/-1">
+        <h2>实时事件 / 日志</h2>
+        <div id="log"></div>
+      </section>
+    </main>
+  </div>
+<script>
+const API = (location.port === '3000' || location.hostname === 'localhost' && !location.port)
+  ? '' : '';
+// Prefer same-origin /api when behind nginx; direct :3000 for dev
+function apiBase() {
+  if (location.port === '3000') return '';
+  return '';
+}
+let token = '';
+let ws;
+
+function authHeaders() {
+  return { Authorization: 'Bearer ' + token, 'Content-Type': 'application/json' };
+}
+
+async function api(path, opts = {}) {
+  const r = await fetch(apiBase() + path, { ...opts, headers: { ...authHeaders(), ...(opts.headers||{}) } });
+  if (!r.ok) throw new Error(path + ' ' + r.status);
+  return r.json();
+}
+
+function log(line) {
+  const el = document.getElementById('log');
+  el.textContent = new Date().toISOString().slice(11,19) + ' ' + line + '\n' + el.textContent;
+}
+
+function handle(u) {
+  if (!u) return '@unknown';
+  return u.username ? ('@' + u.username + (u.name ? ' · ' + u.name : '')) : ('@unknown (' + (u.userId||u.targetUserId||'') + ')');
+}
+
+async function refresh() {
+  const me = await api('/api/v1/me');
+  document.getElementById('me').textContent = me.account
+    ? ('@' + me.account.username + ' (' + me.account.id + ')')
+    : 'needs bootstrap';
+  document.getElementById('runtime').innerHTML =
+    '<div>automation: <b class="'+(me.runtime?.automation_enabled?'ok':'bad')+'">' + !!me.runtime?.automation_enabled + '</b></div>' +
+    '<div>graph_consistent: ' + !!me.runtime?.graph_consistent + '</div>' +
+    '<div>needs_bootstrap: ' + !!me.runtime?.needs_bootstrap + '</div>';
+
+  const st = await api('/api/v1/stats');
+  document.getElementById('stats').innerHTML = st.empty ? '无账号' :
+    `粉丝 ${st.followers} · 关注 ${st.following} · 观察 ${st.watching}<br/>今日 follow ${st.dailyFollows} / unfollow ${st.dailyUnfollows}<br/>小时 follow ${st.hourlyFollows} / unfollow ${st.hourlyUnfollows}<br/>jobs ${JSON.stringify(st.jobs||{})}`;
+
+  const jobs = await api('/api/v1/jobs?limit=40');
+  document.getElementById('jobs').innerHTML = (jobs.jobs||[]).map(j =>
+    `<tr><td>${j.id}</td><td>${j.type}</td><td><span class="tag">${j.status}</span></td><td>${j.username?'@'+j.username:'@unknown'} ${j.name||''}</td><td>${j.source||''}</td></tr>`
+  ).join('') || '<tr><td colspan=5>空</td></tr>';
+
+  const fo = await api('/api/v1/followers');
+  document.getElementById('followers').innerHTML = (fo.items||[]).map(x =>
+    `<div class="tag" style="margin:.15rem">@${x.username}${x.verified?' ✓':''}</div>`
+  ).join('') || '—';
+
+  const fi = await api('/api/v1/following');
+  document.getElementById('following').innerHTML = (fi.items||[]).map(x =>
+    `<div class="tag" style="margin:.15rem">@${x.username}${x.verified?' ✓':''}${x.pendingFollow?' (pending)':''}</div>`
+  ).join('') || '—';
+}
+
+function connectWs() {
+  const proto = location.protocol === 'https:' ? 'wss' : 'ws';
+  const host = location.port === '3000' || location.port === ''
+    ? location.host
+    : location.hostname + (location.port ? ':'+location.port : '');
+  // when page is on :3000 or behind nginx same host
+  let url;
+  if (location.port === '3000') url = proto + '://' + location.host + '/api/v1/ws';
+  else url = proto + '://' + location.host + '/api/v1/ws';
+  // if opened as file or unknown, fall back
+  if (!location.host) url = 'ws://127.0.0.1:3000/api/v1/ws';
+
+  document.getElementById('wsState').textContent = 'ws: connecting';
+  ws = new WebSocket(url);
+  ws.onopen = () => {
+    ws.send(JSON.stringify({ type: 'auth', token }));
+  };
+  ws.onmessage = (ev) => {
+    try {
+      const msg = JSON.parse(ev.data);
+      document.getElementById('wsState').textContent = 'ws: ok';
+      log(msg.type + ' ' + JSON.stringify(msg.payload).slice(0,180));
+      if (['stats.updated','job.updated','runtime.changed','sync.progress'].includes(msg.type)) {
+        refresh().catch(()=>{});
+      }
+    } catch {}
+  };
+  ws.onclose = () => {
+    document.getElementById('wsState').textContent = 'ws: closed';
+    setTimeout(connectWs, 2000);
+  };
+  ws.onerror = () => document.getElementById('wsState').textContent = 'ws: err';
+}
+
+document.getElementById('btnLogin').onclick = async () => {
+  token = document.getElementById('token').value.trim();
+  try {
+    await api('/api/v1/me');
+    document.getElementById('login').style.display = 'none';
+    document.getElementById('app').style.display = 'block';
+    await refresh();
+    connectWs();
+  } catch (e) {
+    document.getElementById('loginErr').textContent = '登录失败: ' + e.message;
+  }
+};
+
+document.getElementById('btnStart').onclick = async () => { await api('/api/v1/control/start', { method:'POST' }); await refresh(); };
+document.getElementById('btnStop').onclick = async () => { await api('/api/v1/control/stop', { method:'POST' }); await refresh(); };
+document.getElementById('btnSync').onclick = async () => { await api('/api/v1/control/sync', { method:'POST' }); await refresh(); };
+document.getElementById('btnRefresh').onclick = () => refresh();
+</script>
+</body>
+</html>

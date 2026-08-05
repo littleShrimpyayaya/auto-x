@@ -9,10 +9,13 @@
     ".": "./src/index.ts"
   },
   "scripts": {
-    "typecheck": "tsc --noEmit",
-    "build": "tsc"
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "twitter-api-v2": "^1.19.0"
   },
   "devDependencies": {
+    "@types/node": "^22.10.5",
     "typescript": "^5.7.3"
   }
 }
