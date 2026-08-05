@@ -283,19 +283,48 @@ export async function logEvent(
   );
 }
 
+const RUNTIME_COLS = new Set([
+  "automation_enabled",
+  "graph_consistent",
+  "followers_sync_ok",
+  "following_sync_ok",
+  "needs_bootstrap",
+  "last_error",
+  "capabilities",
+]);
+
 export async function getRuntime(accountId = "default") {
   const r = await query(`SELECT * FROM runtime_state WHERE account_id=$1`, [accountId]);
-  return r.rows[0];
+  const row = r.rows[0];
+  if (!row) return null;
+  const meta = (row.meta && typeof row.meta === "object" ? row.meta : {}) as Record<string, unknown>;
+  // flatten meta for callers (x_rate, x_progress, …)
+  return { ...row, ...meta, meta };
 }
 
 export async function setRuntime(patch: Record<string, unknown>, accountId = "default") {
-  const keys = Object.keys(patch);
-  if (!keys.length) return;
-  const sets = keys.map((k, i) => `${k} = $${i + 2}`).join(", ");
-  await query(
-    `UPDATE runtime_state SET ${sets}, updated_at=now() WHERE account_id=$1`,
-    [accountId, ...keys.map((k) => patch[k])],
-  );
+  const cols: Record<string, unknown> = {};
+  const metaPatch: Record<string, unknown> = {};
+  for (const [k, v] of Object.entries(patch)) {
+    if (RUNTIME_COLS.has(k)) cols[k] = v;
+    else if (k !== "meta") metaPatch[k] = v;
+  }
+  if (Object.keys(cols).length) {
+    const keys = Object.keys(cols);
+    const sets = keys.map((k, i) => `${k} = $${i + 2}`).join(", ");
+    await query(
+      `UPDATE runtime_state SET ${sets}, updated_at=now() WHERE account_id=$1`,
+      [accountId, ...keys.map((k) => cols[k])],
+    );
+  }
+  if (Object.keys(metaPatch).length) {
+    await query(
+      `UPDATE runtime_state
+       SET meta = COALESCE(meta, '{}'::jsonb) || $2::jsonb, updated_at=now()
+       WHERE account_id=$1`,
+      [accountId, JSON.stringify(metaPatch)],
+    );
+  }
 }
 
 export async function getConfigMap(accountId = "default"): Promise<Record<string, unknown>> {
