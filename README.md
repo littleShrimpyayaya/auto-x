@@ -1,148 +1,39 @@
-# auto-x
+# auto-x — X (Twitter) 自动回关
 
-X（Twitter）关系网络自动化：**真实 API 落地**（OAuth 1.0a）— follow-back、观察期 unfollow、可选 FOAF 扩张。
+纯浏览器插件，无需后端，无需 API Key，完全免费。
 
-| 组件 | 技术 |
-|------|------|
-| DB | PostgreSQL 16 |
-| API | Hono + **WebSocket** + `LISTEN/NOTIFY` |
-| Worker | 同步图谱 / 入队 / 执行关注取关 |
-| 客户端 | 官方 **[@xdevplatform/xdk](https://docs.x.com/xdks/typescript/overview)** Live（OAuth 1.0a；mock 仅无密钥时回退） |
+## 原理
 
-> **风险**：自动化关注/取关可能违反 X 政策。请用小号、保守配额，并确认开发者套餐具备 follows 读/写权限。
+1. 你在 Chrome 里刷 X.com，插件在后台默默工作
+2. 拦截 X 的内部 API 获取粉丝和关注列表
+3. 自动比对：关注你的人你还没关注 → 回关
+4. 所有数据存在浏览器本地，不上传任何服务器
 
----
+## 安装
 
-## 1. 配置真实 X 密钥（必须）
+1. 打开 Chrome → `chrome://extensions/`
+2. 开启「开发者模式」
+3. 「加载已解压的扩展程序」→ 选择本目录
+4. 打开 `x.com`，插件自动开始工作
 
-官方 SDK 文档：[TypeScript XDK Overview](https://docs.x.com/xdks/typescript/overview) · [Authentication](https://docs.x.com/xdks/typescript/authentication)
+## 使用
 
-本项目 Live 路径使用：
+- **自动模式**：打开 X.com 后插件自动运行，每 60 秒回关一个新粉丝
+- **手动同步**：点击插件图标 → 「同步粉丝」「同步关注」→ 自动翻页采集数据
+- **设置**：右键插件图标 → 选项 → 调整回关间隔和每日上限
+- **暂停**：点击插件图标 → 「暂停」
 
-```ts
-import { Client, OAuth1 } from '@xdevplatform/xdk';
-// client.users.getMe / getFollowers / getFollowing / followUser / unfollowUser
-```
+## 设置项
 
-1. 打开 [X Developer Portal](https://developer.x.com/) → 创建 App  
-2. 权限：**Read and write**（至少能 follow）  
-3. 生成 **OAuth 1.0a** 的 API Key/Secret + Access Token/Secret  
-4. 写入 `.env`：
+| 设置 | 默认值 | 说明 |
+|------|--------|------|
+| 自动回关 | 启用 | 关闭后只采集数据不执行回关 |
+| 最小间隔 | 60 秒 | 两次回关之间的等待时间 |
+| 每日上限 | 50 | 每天最多回关多少人 |
 
-```bash
-cp .env.example .env
+## 注意
 
-# 填入真实值
-X_API_KEY=...
-X_API_SECRET=...
-X_ACCESS_TOKEN=...
-X_ACCESS_SECRET=...
-
-# 推荐显式 live
-X_CLIENT_MODE=live
-
-ADMIN_TOKEN=你的超长随机管理令牌
-POSTGRES_PASSWORD=...
-```
-
-`X_CLIENT_MODE=auto` 时：四元组齐全 → **自动 live**；缺密钥 → 才退回 mock。
-
----
-
-## 2. 启动
-
-```bash
-./scripts/start.sh
-# 或 make up
-# 跳过 nginx: START_NGINX=0 ./scripts/start.sh
-```
-
-服务：
-
-| 栈 | 容器 |
-|----|------|
-| 主栈 | `postgres` + **唯一** `migrate` + `api` + `worker` |
-| 反代 | **nginx**（`nginx/tools/**` 保留）**80 → 301 HTTPS**，**443** 静态 + `/api` 反代 |
-
-### 访问入口（推荐 HTTPS）
-
-| 入口 | URL |
-|------|-----|
-| 管理页 | **https://\<host\>/** （证书为自签时浏览器需信任/继续访问） |
-| HTTP | **http://\<host\>/** → **301** 到 HTTPS |
-| REST | `https://<host>/api/v1/*` |
-| WS | `wss://<host>/api/v1/ws`（首帧 `{ "type":"auth","token":"..." }`） |
-| 直连 API（调试） | `http://localhost:3000/health` |
-
-```bash
-# 仅启/停 nginx
-make nginx-up
-make nginx-down
-```
-
----
-
-## 3. 验证真实 API（不写关注）
-
-```bash
-set -a && source .env && set +a
-pnpm install
-pnpm live:probe
-```
-
-成功会打印 `getMe` 的 `@username` 与 capability（是否能读 followers/following）。
-
-或：
-
-```bash
-curl -s -X POST -H "Authorization: Bearer $ADMIN_TOKEN" \
-  http://127.0.0.1:3000/api/v1/control/probe | jq
-```
-
----
-
-## 4. 跑自动化
-
-1. 管理页登录（`ADMIN_TOKEN`）  
-2. 点 **启动自动化** → worker 会：
-   - `getMe` 写入 `accounts` + `x_users`（含 **@username**）  
-   - full sync followers/following → 本地 PG  
-   - 新粉丝 follow-back 入队 → 按 `WRITE_MIN_INTERVAL_MS` 真实 follow  
-   - 观察期后非互关 unfollow  
-3. **立即同步** 可强制重新 full sync  
-
-```bash
-curl -X POST -H "Authorization: Bearer $ADMIN_TOKEN" \
-  http://127.0.0.1:3000/api/v1/control/start
-```
-
----
-
-## 5. 能力与门禁
-
-| 探测项 | 失败时行为 |
-|--------|------------|
-| `getMe` | worker 报错，不跑业务 |
-| 读 followers | 跳过粉丝同步 / follow-back 受限 |
-| 读 following | 跳过关注同步 / 观察逻辑受限 |
-| 写 follow | follow 任务标记 dead |
-
-`X_ENABLE_WRITES=0`：只同步图谱，不发 follow/unfollow。
-
----
-
-## 6. 备份
-
-```bash
-./scripts/backup-db.sh
-```
-
----
-
-## 7. 设计文档
-
-`docs/design-auto-x.md`
-
-## 8. 保留
-
-`nginx/tools/**` 证书工具勿删。可选反代见 `nginx/docker-compose.yml`。
+- 首次使用建议先点「同步粉丝」「同步关注」建立本地数据库
+- 如果「Follow」按钮不生效，手动点一次关注让插件学习 API 地址
+- 自动化操作有被封号风险，建议保守设置
+- 所有数据存在 `chrome.storage.local`，清除浏览器数据会丢失

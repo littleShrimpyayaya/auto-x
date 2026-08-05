@@ -1,9 +1,0 @@
-*.crt
-*.key
-*.srl
-*.csr
-*.key
-*.pem
-certs/
-logs/
-web/

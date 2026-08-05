@@ -1,0 +1,55 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <title>auto-x</title>
+  <link rel="stylesheet" href="popup.css">
+</head>
+<body>
+  <div id="app">
+    <header>
+      <h1>auto-x</h1>
+      <span id="status-dot" class="dot offline"></span>
+    </header>
+
+    <section id="connection" class="card">
+      <div class="label">状态</div>
+      <div id="backend-status">就绪</div>
+    </section>
+
+    <section id="account" class="card hidden">
+      <div class="label">账号</div>
+      <div id="account-name">—</div>
+    </section>
+
+    <section id="sync" class="card hidden">
+      <div class="label">图谱同步</div>
+      <div id="sync-status">未同步</div>
+      <div class="actions">
+        <button id="btn-sync-followers" class="btn">同步粉丝</button>
+        <button id="btn-sync-following" class="btn">同步关注</button>
+      </div>
+    </section>
+
+    <section id="actions-section" class="card hidden">
+      <div class="label">待执行任务</div>
+      <div id="pending-count">0</div>
+    </section>
+
+    <section id="usage" class="card hidden">
+      <div class="label">今日用量</div>
+      <div id="usage-detail">—</div>
+    </section>
+
+    <section id="controls" class="card hidden">
+      <button id="btn-toggle" class="btn primary">启动自动化</button>
+    </section>
+
+    <footer>
+      <a href="#" id="open-options">设置</a>
+      <span id="device-info"></span>
+    </footer>
+  </div>
+  <script src="popup.js" type="module"></script>
+</body>
+</html>
