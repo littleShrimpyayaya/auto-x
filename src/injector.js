@@ -187,10 +187,19 @@
     return users;
   }
 
+  /**
+   * @returns {{ bottom: string|null, sawTimeline: boolean }}
+   * bottom: Bottom/ShowMore cursor value, or null if absent
+   * sawTimeline: true when we recognized a list timeline payload (can trust hasMore)
+   */
   function extractCursorFromResponse(json) {
+    let bottom = null;
+    let sawTimeline = false;
+    let sawAnyCursor = false;
     try {
       const instructions = getTimelineInstructions(json);
-      let bottom = undefined;
+      if (instructions.length) sawTimeline = true;
+
       for (const instr of instructions) {
         for (const entry of instr.entries ?? []) {
           const c = entry.content || entry;
@@ -200,44 +209,61 @@
             entryType === "TimelineTimelineCursor" ||
             cursorType === "Bottom" ||
             cursorType === "ShowMore" ||
+            cursorType === "Top" ||
             entry.content?.cursorType
           ) {
-            if (cursorType === "Bottom" || cursorType === "ShowMore" || !cursorType) {
+            sawAnyCursor = true;
+            if (cursorType === "Bottom" || cursorType === "ShowMore") {
               const val = c.value ?? entry.content?.value ?? null;
               if (val != null) bottom = val;
             }
           }
+          // Module / user entries mean this is a real list timeline
+          if (
+            entryType === "TimelineTimelineItem" ||
+            entryType === "TimelineTimelineModule" ||
+            c?.itemContent ||
+            c?.items
+          ) {
+            sawTimeline = true;
+          }
         }
-        // Some payloads put cursors on the instruction itself
-        if (instr.cursor?.value && (instr.cursor.cursorType === "Bottom" || !instr.cursor.cursorType)) {
-          bottom = instr.cursor.value;
+        if (instr.moduleItems?.length || instr.items?.length) sawTimeline = true;
+        if (instr.cursor?.value) {
+          sawAnyCursor = true;
+          if (instr.cursor.cursorType === "Bottom" || !instr.cursor.cursorType) {
+            bottom = instr.cursor.value;
+          }
         }
       }
-      // Deep fallback for cursor
-      if (bottom === undefined) {
+
+      // Deep fallback for Bottom cursor if instructions path missed it
+      if (bottom == null) {
         const walkCursor = (node, depth) => {
-          if (!node || depth > 12 || bottom !== undefined) return;
+          if (!node || depth > 12) return;
           if (Array.isArray(node)) {
             for (const n of node) walkCursor(n, depth + 1);
             return;
           }
           if (typeof node !== "object") return;
-          if (
-            (node.cursorType === "Bottom" || node.cursorType === "ShowMore") &&
-            typeof node.value === "string"
-          ) {
-            bottom = node.value;
-            return;
+          if (node.cursorType === "Bottom" || node.cursorType === "ShowMore") {
+            sawAnyCursor = true;
+            sawTimeline = true;
+            if (typeof node.value === "string") bottom = node.value;
+          } else if (node.cursorType === "Top") {
+            sawAnyCursor = true;
+            sawTimeline = true;
           }
           for (const k of Object.keys(node)) walkCursor(node[k], depth + 1);
         };
         walkCursor(json.data, 0);
       }
-      return bottom;
+
+      if (sawAnyCursor) sawTimeline = true;
     } catch {
       // ignore
     }
-    return undefined;
+    return { bottom, sawTimeline };
   }
 
   /** Recent GraphQL batches — replay if content script was not yet listening */
@@ -299,13 +325,15 @@
   }
 
   function isFollowersEndpoint(endpoint) {
-    return (
-      endpoint === "Followers" ||
-      endpoint === "Following" ||
-      endpoint === "BlueVerifiedFollowers" ||
-      endpoint === "FollowersYouKnow" ||
-      /Followers|Following/.test(endpoint)
-    );
+    if (!endpoint) return false;
+    // Strict: only real list endpoints (avoid matching random *Following* names on Home)
+    if (endpoint === "Following") return true;
+    if (endpoint === "BlueVerifiedFollowers") return true;
+    if (endpoint === "FollowersYouKnow") return true;
+    if (endpoint === "Followers") return true;
+    // Newer/variant names still start with Followers…
+    if (/^Followers\w*$/i.test(endpoint)) return true;
+    return false;
   }
 
   function handleGraphqlResponse(url, method, json) {
@@ -319,19 +347,25 @@
 
     try {
       const users = extractUsersFromResponse(json);
-      const cursor = extractCursorFromResponse(json);
-      // Always forward list responses (even empty) so walk can detect end-of-list
+      const { bottom, sawTimeline } = extractCursorFromResponse(json);
+      // hasMore:
+      //  - true  → Bottom cursor present, keep scrolling
+      //  - false → recognized timeline and no Bottom cursor (end of list)
+      //  - null  → inconclusive (don't stop on this alone)
+      let hasMore = null;
+      if (bottom != null) hasMore = true;
+      else if (sawTimeline) hasMore = false;
+
       const payload = {
         type: "GRAPHQL_DATA",
         endpoint,
         users,
-        cursor: cursor === undefined ? null : cursor,
-        hasMore: cursor != null,
+        cursor: bottom,
+        hasMore,
       };
       rememberGraphqlBatch(payload);
-      if (users.length || cursor != null) {
-        postToContent(payload);
-      }
+      // Always forward list responses (including empty final page) so walk can auto-stop
+      postToContent(payload);
     } catch {
       // ignore parse errors
     }

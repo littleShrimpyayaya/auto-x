@@ -192,7 +192,7 @@ async function refresh() {
         `<div class="hint" style="margin-top:4px">` +
         `粉丝: ${fmtTime(status.followers?.lastSync)} · 关注: ${fmtTime(status.following?.lastSync)}` +
         (walkActive
-          ? `<br><b style="color:#1d9bf0">正在同步${streamLabel}…</b> 点击红色按钮可停止`
+          ? `<br><b style="color:#1d9bf0">正在同步${streamLabel}…</b> 到底会自动停止，也可点红色按钮停止`
           : "") +
         `</div>`;
       updateSyncButtons(walkActive, walkStream);
@@ -201,14 +201,15 @@ async function refresh() {
       if (running) {
         btnAuto.textContent = "🛑 停止自动关注";
         btnAuto.className = "btn stop btn-lg";
-        autoHint.textContent = "这是停止自动任务，不是断开账户连接。";
+        autoHint.textContent =
+          "停止后会结束回关队列，并停止列表同步翻页；不会断开账户绑定。自动关注本身不滚动页面。";
       } else {
         btnAuto.textContent = "开始自动关注";
         btnAuto.className = "btn primary btn-lg";
         autoHint.textContent =
           fl === 0
             ? "建议先「同步粉丝 / 关注」建立名单，再开始自动关注。"
-            : "关闭弹窗不会停止；仅通过 API 关注，不抢夺你当前操作。";
+            : "关闭弹窗不会停止；仅通过 API 关注，不滚动页面、不抢操作。";
       }
 
       show(usageCard, true);

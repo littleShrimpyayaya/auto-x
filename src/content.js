@@ -1,6 +1,7 @@
 /**
  * ISOLATED world content script — bridge injector ↔ background.
- * Does not hijack the page unless user explicitly starts a list sync walk.
+ * Auto-scroll ONLY on explicit list sync, and ONLY while URL is the list page.
+ * Auto-follow is API-only and never scrolls the page.
  */
 (() => {
   const api = typeof browser !== "undefined" ? browser : chrome;
@@ -10,8 +11,10 @@
   let activeWalk = null;
   let batchBuffer = [];
   let batchTimer = null;
+  let scrollTimer = null;
+  let pathWatchTimer = null;
 
-  const BATCH_INTERVAL = 2000;
+  const BATCH_INTERVAL = 1200;
   const HEARTBEAT_INTERVAL = 8000;
   const BATCH_MAX = 100;
 
@@ -36,11 +39,11 @@
     ) {
       return true;
     }
-    // Login CTA in chrome
     if (document.querySelector('[data-testid="loginButton"], a[href="/login"]')) {
-      // Guest top bar often shows login — but also appears for logged-out only
-      if (!document.querySelector('[data-testid="SideNav_AccountSwitcher_Button"]') &&
-          !document.querySelector('a[data-testid="AppTabBar_Profile_Link"]')) {
+      if (
+        !document.querySelector('[data-testid="SideNav_AccountSwitcher_Button"]') &&
+        !document.querySelector('a[data-testid="AppTabBar_Profile_Link"]')
+      ) {
         return true;
       }
     }
@@ -61,7 +64,6 @@
   }
 
   function detectSessionUser() {
-    // Strong signal: account switcher
     try {
       const btn = document.querySelector('[data-testid="SideNav_AccountSwitcher_Button"]');
       if (btn) {
@@ -81,12 +83,10 @@
       /* ignore */
     }
 
-    // Profile tab link
     try {
       const profileLink = document.querySelector('a[data-testid="AppTabBar_Profile_Link"]');
       if (profileLink?.href) {
-        const m =
-          profileLink.href.match(/(?:x|twitter)\.com\/([^/?#]+)/i);
+        const m = profileLink.href.match(/(?:x|twitter)\.com\/([^/?#]+)/i);
         if (
           m &&
           m[1] &&
@@ -106,7 +106,6 @@
       /* ignore */
     }
 
-    // Embedded JSON (variable structure)
     try {
       const scripts = document.querySelectorAll("script[type='application/json']");
       for (const s of scripts) {
@@ -129,10 +128,8 @@
       /* ignore */
     }
 
-    // Cookie hint: ct0 present usually means logged-in session cookie set
     try {
       if (document.cookie.includes("ct0=")) {
-        // Logged in but username unknown yet
         return null;
       }
     } catch {
@@ -159,7 +156,6 @@
       loggedIn = true;
       return { loggedIn: true, user: sessionUser };
     }
-    // Has main app chrome without login CTAs?
     const hasApp =
       !!document.querySelector('[data-testid="AppTabBar_Home_Link"]') ||
       !!document.querySelector('[data-testid="primaryColumn"]');
@@ -190,20 +186,31 @@
   }
   setTimeout(tryDetect, 800);
 
-  // ── Batch ingest (passive — only stores data when lists load) ──
+  // ── Path helpers ───────────────────────────────────────────────
 
   function currentPathStream() {
-    if (location.pathname.includes("/followers")) return "followers";
-    if (location.pathname.includes("/following")) return "following";
+    const path = location.pathname || "";
+    // Prefer more specific segment at end: /user/followers, /user/following
+    if (/\/followers(?:\/|$)/.test(path)) return "followers";
+    if (/\/following(?:\/|$)/.test(path)) return "following";
     return null;
   }
+
+  function isOnListPageFor(stream) {
+    if (!stream) return false;
+    return currentPathStream() === stream;
+  }
+
+  // ── Batch ingest ───────────────────────────────────────────────
 
   function flushBatch() {
     if (!batchBuffer.length) return;
     const stream = activeWalk?.stream || currentPathStream();
-    if (!stream) return;
+    if (!stream) {
+      // Not on a list page and not walking — hold buffer briefly, do not drop yet
+      return;
+    }
 
-    // Drain entire buffer in chunks so stop/end never drops a partial page
     while (batchBuffer.length) {
       const batch = batchBuffer.splice(0, BATCH_MAX);
       sendToBg({
@@ -234,7 +241,7 @@
   function addToBatch(users) {
     const existing = new Set(batchBuffer.map((u) => u.id));
     for (const u of users) {
-      if (!u?.id || existing.has(u.id)) continue;
+      if (!u?.id || !u?.username || existing.has(u.id)) continue;
       batchBuffer.push(u);
       existing.add(u.id);
     }
@@ -249,6 +256,13 @@
     }
   }
 
+  function clearBatchTimer() {
+    if (batchTimer) {
+      clearTimeout(batchTimer);
+      batchTimer = null;
+    }
+  }
+
   // ── Messages from injector (MAIN world) ────────────────────────
 
   window.addEventListener("message", (event) => {
@@ -257,30 +271,85 @@
 
     if (msg.type === "GRAPHQL_DATA") {
       if (!sessionUser?.username) tryDetect();
-      if (msg.users?.length) addToBatch(msg.users);
-      // Track empty pages / end of list during walk
+
+      const pathStream = currentPathStream();
+      const walkStream = activeWalk?.stream || null;
+
+      // Only accept list data when walking that stream OR user is on that list page.
+      // Never ingest / scroll from Home / Explore noise.
+      if (!walkStream && !pathStream) {
+        return;
+      }
+
+      // If walking, ignore wrong-stream endpoints (e.g. Following while on Followers walk)
+      if (walkStream && msg.endpoint) {
+        const ep = String(msg.endpoint);
+        if (walkStream === "followers" && !/Follower/i.test(ep)) return;
+        if (walkStream === "following" && !/Following/i.test(ep)) return;
+      }
+
+      if (msg.users?.length) {
+        addToBatch(msg.users);
+        // First page must land quickly — flush immediately when we have a stream
+        if (activeWalk || pathStream) {
+          clearBatchTimer();
+          flushBatch();
+        }
+      }
+
       if (activeWalk) {
+        let newCount = 0;
         if (msg.users?.length) {
+          if (!activeWalk.seenIds) activeWalk.seenIds = new Set();
+          for (const u of msg.users) {
+            if (u?.id && !activeWalk.seenIds.has(u.id)) {
+              activeWalk.seenIds.add(u.id);
+              newCount++;
+            }
+          }
+        }
+
+        if (newCount > 0) {
           activeWalk.idlePages = 0;
+          activeWalk.consecutiveNoNew = 0;
           activeWalk.lastUsersAt = Date.now();
+          activeWalk.gotUsers = true;
+          activeWalk.noMore = false;
+          if (activeWalk.endTimer) {
+            clearTimeout(activeWalk.endTimer);
+            activeWalk.endTimer = null;
+          }
         } else {
           activeWalk.idlePages = (activeWalk.idlePages || 0) + 1;
+          activeWalk.consecutiveNoNew = (activeWalk.consecutiveNoNew || 0) + 1;
         }
-        if (msg.hasMore === false || (msg.cursor == null && !msg.users?.length)) {
+
+        // API says no more pages (ignore briefly after start — REPLAY may include stale last-page)
+        const canTrustEnd = Date.now() >= (activeWalk.ignoreEndUntil || 0);
+        if (msg.hasMore === false && canTrustEnd) {
+          clearBatchTimer();
+          flushBatch();
+          if (!msg.users?.length || newCount === 0) {
+            // Empty final page, or only duplicates → stop now
+            endWalkNatural("api-end");
+            return;
+          }
+          // Last page still had new users — flush them, then stop shortly
           activeWalk.noMore = true;
+          if (activeWalk.endTimer) clearTimeout(activeWalk.endTimer);
+          activeWalk.endTimer = setTimeout(() => {
+            if (activeWalk?.noMore) endWalkNatural("api-end-last-page");
+          }, 1200);
+        } else if (msg.hasMore === true) {
+          activeWalk.noMore = false;
+          if (activeWalk.endTimer) {
+            clearTimeout(activeWalk.endTimer);
+            activeWalk.endTimer = null;
+          }
         }
-      }
-      if (msg.cursor !== undefined) {
-        sendToBg({
-          type: "CURSOR_UPDATE",
-          walk: activeWalk || {
-            stream: currentPathStream() || "followers",
-          },
-          cursor: msg.cursor,
-          hasMore: msg.hasMore,
-        });
       }
     }
+
     if (msg.type === "ACTION_RESULT") {
       const line =
         (msg.ok ? "[auto-x] ✓ ACTION ok " : "[auto-x] ✗ ACTION fail ") +
@@ -301,48 +370,293 @@
     }
   });
 
+  // ── Walk / scroll control ──────────────────────────────────────
+
+  function stopAutoScroll() {
+    if (scrollTimer) {
+      clearTimeout(scrollTimer);
+      scrollTimer = null;
+    }
+  }
+
+  function stopPathWatch() {
+    if (pathWatchTimer) {
+      clearInterval(pathWatchTimer);
+      pathWatchTimer = null;
+    }
+  }
+
+  function hardStopWalk(reason, notifyBg) {
+    stopAutoScroll();
+    stopPathWatch();
+    clearBatchTimer();
+    if (activeWalk?.endTimer) {
+      clearTimeout(activeWalk.endTimer);
+      activeWalk.endTimer = null;
+    }
+    flushBatch();
+    const stream = activeWalk?.stream || null;
+    const seen = activeWalk?.seenIds?.size || 0;
+    if (notifyBg && stream) {
+      sendToBg({
+        type: "WALK_ENDED",
+        walk: { stream },
+        reason: reason || "stop",
+        seenCount: seen,
+      });
+    }
+    activeWalk = null;
+    // Drop orphan buffer that has no stream target (e.g. left list page)
+    if (!currentPathStream()) batchBuffer = [];
+    console.log("[auto-x] walk hard-stop:", reason || "", stream || "", "seen=", seen);
+  }
+
+  function endWalkNatural(reason) {
+    if (!activeWalk) return;
+    console.log(
+      "[auto-x] walk finished:",
+      activeWalk.stream,
+      reason || "",
+      "users=",
+      activeWalk.seenIds?.size || 0,
+    );
+    hardStopWalk(reason || "done", true);
+  }
+
+  /** DOM fallback: "You've reached the end" / empty list after scroll */
+  function looksLikeListEnd() {
+    try {
+      const text = (document.body?.innerText || "").slice(-2500);
+      if (/You.ve reached the end|已经到底|没有更多|Nothing to see here|暂无内容/i.test(text)) {
+        return true;
+      }
+    } catch {
+      /* ignore */
+    }
+    return false;
+  }
+
+  function ensurePathWatch() {
+    stopPathWatch();
+    pathWatchTimer = setInterval(() => {
+      if (!activeWalk) {
+        stopPathWatch();
+        return;
+      }
+      if (!isOnListPageFor(activeWalk.stream)) {
+        // User left followers/following — NEVER keep scrolling Home tweets
+        console.warn(
+          "[auto-x] left list page during walk, stopping scroll. path=",
+          location.pathname,
+        );
+        hardStopWalk("left-list-page", true);
+      }
+    }, 800);
+  }
+
+  function autoScroll() {
+    if (!activeWalk) return;
+
+    // Hard guard: never scroll unless on the correct list URL
+    if (!isOnListPageFor(activeWalk.stream)) {
+      hardStopWalk("wrong-page-scroll-guard", true);
+      return;
+    }
+
+    // API already said end of list
+    if (activeWalk.noMore) {
+      clearBatchTimer();
+      flushBatch();
+      endWalkNatural("api-end-scroll");
+      return;
+    }
+
+    const h = document.documentElement.scrollHeight || document.body.scrollHeight || 0;
+    const y = window.scrollY || document.documentElement.scrollTop || 0;
+    const nearBottom = y + window.innerHeight >= h - 80;
+
+    if (activeWalk.lastHeight && h <= activeWalk.lastHeight + 4) {
+      activeWalk.stuckScrolls = (activeWalk.stuckScrolls || 0) + 1;
+    } else {
+      activeWalk.stuckScrolls = 0;
+      activeWalk.lastHeight = h;
+    }
+
+    const idleMs = Date.now() - (activeWalk.lastUsersAt || activeWalk.startedAt || Date.now());
+    const gotUsers = !!activeWalk.gotUsers;
+    const noNew = activeWalk.consecutiveNoNew || 0;
+
+    // Reached end: height stable + near bottom + no new users for a bit
+    if (gotUsers && nearBottom && activeWalk.stuckScrolls >= 2 && idleMs > 5000) {
+      endWalkNatural("scroll-bottom-stable");
+      return;
+    }
+    if (gotUsers && activeWalk.stuckScrolls >= 3 && idleMs > 7000) {
+      endWalkNatural("scroll-stable");
+      return;
+    }
+    if (gotUsers && noNew >= 2 && activeWalk.stuckScrolls >= 2) {
+      endWalkNatural("no-new-users");
+      return;
+    }
+    if (gotUsers && looksLikeListEnd() && activeWalk.stuckScrolls >= 1 && idleMs > 3000) {
+      endWalkNatural("dom-end-marker");
+      return;
+    }
+    // Empty list edge case
+    if (!gotUsers && idleMs > 20000 && activeWalk.stuckScrolls >= 4) {
+      endWalkNatural("empty-or-stuck");
+      return;
+    }
+
+    window.scrollTo(0, h);
+    try {
+      window.scrollBy(0, 400);
+    } catch {
+      /* ignore */
+    }
+    scrollTimer = setTimeout(autoScroll, 2200);
+  }
+
+  function startAutoScroll() {
+    stopAutoScroll();
+    // Delay a bit so first-page GraphQL + replay can flush before scrolling
+    scrollTimer = setTimeout(autoScroll, 2000);
+  }
+
+  function beginWalk(stream) {
+    activeWalk = {
+      stream,
+      idlePages: 0,
+      noMore: false,
+      stuckScrolls: 0,
+      lastHeight: 0,
+      lastUsersAt: Date.now(),
+      startedAt: Date.now(),
+      gotUsers: false,
+      consecutiveNoNew: 0,
+      seenIds: new Set(),
+      endTimer: null,
+      // Don't treat REPLAY of a previous "last page" as end-of-list
+      ignoreEndUntil: Date.now() + 4500,
+    };
+    console.log("[auto-x] walk started:", stream, "path=", location.pathname);
+
+    // Replay first-page GraphQL that arrived before walk (or before content was ready)
+    window.postMessage(
+      { source: "autox-content", type: "REPLAY_GRAPHQL", stream },
+      "*",
+    );
+
+    // Force flush first page ASAP (replay is sync postMessage)
+    clearBatchTimer();
+    flushBatch();
+    setTimeout(() => {
+      if (activeWalk?.stream === stream) flushBatch();
+    }, 300);
+    setTimeout(() => {
+      if (activeWalk?.stream === stream) flushBatch();
+    }, 1200);
+
+    ensurePathWatch();
+    startAutoScroll();
+  }
+
+  // If user scrolls manually during walk, delay next auto-scroll
+  window.addEventListener(
+    "scroll",
+    () => {
+      if (!activeWalk) return;
+      if (!isOnListPageFor(activeWalk.stream)) {
+        hardStopWalk("scroll-on-wrong-page", true);
+        return;
+      }
+      if (scrollTimer) clearTimeout(scrollTimer);
+      scrollTimer = setTimeout(autoScroll, 5000);
+    },
+    { passive: true },
+  );
+
+  // SPA navigations (pushState) — stop if leaving list
+  const _pushState = history.pushState;
+  const _replaceState = history.replaceState;
+  function onUrlMaybeChanged() {
+    if (!activeWalk) return;
+    if (!isOnListPageFor(activeWalk.stream)) {
+      hardStopWalk("spa-navigation-away", true);
+    }
+  }
+  history.pushState = function (...args) {
+    const r = _pushState.apply(this, args);
+    setTimeout(onUrlMaybeChanged, 0);
+    return r;
+  };
+  history.replaceState = function (...args) {
+    const r = _replaceState.apply(this, args);
+    setTimeout(onUrlMaybeChanged, 0);
+    return r;
+  };
+  window.addEventListener("popstate", () => setTimeout(onUrlMaybeChanged, 0));
+
   // ── Messages from background ───────────────────────────────────
 
   api.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
     if (msg.type === "START_WALK") {
-      // Explicit sync only — auto-scroll is intentional and user-triggered.
-      // Heartbeat may re-dispatch; do not reset progress if already walking same stream.
-      if (activeWalk && activeWalk.stream === msg.stream) {
+      const stream = msg.stream;
+      if (stream !== "followers" && stream !== "following") {
+        sendResponse({ ok: false, error: "bad stream" });
+        return true;
+      }
+
+      // Refuse to scroll on Home / Explore / tweets — only list pages
+      if (!isOnListPageFor(stream)) {
+        console.warn(
+          "[auto-x] START_WALK refused — not on list page:",
+          location.pathname,
+          "want",
+          stream,
+        );
+        // Make sure we are not scrolling from a previous walk
+        if (activeWalk) hardStopWalk("start-refused-wrong-page", true);
+        else stopAutoScroll();
+        sendResponse({
+          ok: false,
+          wrongPage: true,
+          path: location.pathname,
+          stream,
+        });
+        return true;
+      }
+
+      // Heartbeat re-dispatch: keep walk, do not reset first-page progress
+      if (activeWalk && activeWalk.stream === stream) {
         if (!scrollTimer) startAutoScroll();
+        ensurePathWatch();
+        flushBatch();
         sendResponse({ ok: true, already: true });
         return true;
       }
-      activeWalk = {
-        stream: msg.stream,
-        idlePages: 0,
-        noMore: false,
-        stuckScrolls: 0,
-        lastHeight: 0,
-        lastUsersAt: Date.now(),
-        startedAt: Date.now(),
-      };
-      // Keep any users already captured on this page; do not wipe buffer
-      console.log("[auto-x] walk started:", msg.stream);
-      // Replay first-page GraphQL that may have arrived before content was ready
-      window.postMessage(
-        { source: "autox-content", type: "REPLAY_GRAPHQL", stream: msg.stream },
-        "*",
-      );
-      startAutoScroll();
+
+      if (activeWalk && activeWalk.stream !== stream) {
+        hardStopWalk("switch-stream", true);
+      }
+
+      beginWalk(stream);
       sendResponse({ ok: true });
     } else if (msg.type === "STOP_WALK") {
+      // User/background stop — flush then end (notify bg only if walk was active;
+      // bg often already cleared pendingWalk)
       stopAutoScroll();
-      if (batchTimer) {
-        clearTimeout(batchTimer);
-        batchTimer = null;
-      }
-      // Flush remaining users before ending — previously dropped ~1 page
+      stopPathWatch();
+      clearBatchTimer();
       flushBatch();
-      if (activeWalk) sendToBg({ type: "WALK_ENDED", walk: { stream: activeWalk.stream } });
+      const stream = activeWalk?.stream || null;
       activeWalk = null;
-      sendResponse({ ok: true });
+      if (!currentPathStream()) batchBuffer = [];
+      console.log("[auto-x] STOP_WALK", stream || "(idle)");
+      sendResponse({ ok: true, stream });
     } else if (msg.type === "EXECUTE_ACTION") {
-      // API-level follow via MAIN world — does not click DOM buttons
+      // API-level follow — never scrolls or clicks DOM
       window.postMessage(
         {
           source: "autox-content",
@@ -358,6 +672,10 @@
       sendResponse({
         loggedIn: state.loggedIn === true,
         user: state.user,
+        path: location.pathname,
+        pathStream: currentPathStream(),
+        walkActive: !!activeWalk,
+        walkStream: activeWalk?.stream || null,
       });
     } else if (msg.type === "SEED_QUERIES") {
       window.postMessage(
@@ -369,102 +687,42 @@
         "*",
       );
       sendResponse({ ok: true });
+    } else if (msg.type === "PING_WALK_STATE") {
+      sendResponse({
+        ok: true,
+        walkActive: !!activeWalk,
+        walkStream: activeWalk?.stream || null,
+        path: location.pathname,
+        pathStream: currentPathStream(),
+        scrolling: !!scrollTimer,
+      });
     } else {
       sendResponse({ ok: true });
     }
     return true;
   });
 
-  // ── Heartbeat (keeps background alive / session fresh; no UI impact) ──
+  // ── Heartbeat (session only — never starts scroll by itself) ───
 
   function heartbeat() {
     const state = evaluateLogin();
+    // Self-heal: if somehow scrolling without a walk or off list page, stop
+    if (scrollTimer && (!activeWalk || !isOnListPageFor(activeWalk.stream))) {
+      stopAutoScroll();
+      if (activeWalk) hardStopWalk("heartbeat-guard", true);
+    }
     sendToBg({
       type: "HEARTBEAT",
       tabUrl: window.location.href,
       loggedIn: state.loggedIn === true,
       user: state.user,
+      walkActive: !!activeWalk,
+      walkStream: activeWalk?.stream || null,
+      pathStream: currentPathStream(),
     });
   }
   setInterval(heartbeat, HEARTBEAT_INTERVAL);
   setTimeout(heartbeat, 500);
-
-  // ── Auto-scroll ONLY during explicit walk ──────────────────────
-
-  let scrollTimer = null;
-
-  function endWalkNatural(reason) {
-    if (!activeWalk) return;
-    console.log("[auto-x] walk finished:", activeWalk.stream, reason || "");
-    stopAutoScroll();
-    if (batchTimer) {
-      clearTimeout(batchTimer);
-      batchTimer = null;
-    }
-    flushBatch();
-    sendToBg({ type: "WALK_ENDED", walk: { stream: activeWalk.stream } });
-    activeWalk = null;
-  }
-
-  function autoScroll() {
-    if (!activeWalk) return;
-
-    const h = document.documentElement.scrollHeight || document.body.scrollHeight || 0;
-    if (activeWalk.lastHeight && h <= activeWalk.lastHeight + 8) {
-      activeWalk.stuckScrolls = (activeWalk.stuckScrolls || 0) + 1;
-    } else {
-      activeWalk.stuckScrolls = 0;
-      activeWalk.lastHeight = h;
-    }
-
-    // End when list stops growing and no new users for a while, or API says no more
-    const idleMs = Date.now() - (activeWalk.lastUsersAt || activeWalk.startedAt || Date.now());
-    if (
-      activeWalk.noMore ||
-      (activeWalk.stuckScrolls >= 4 && idleMs > 8000) ||
-      (activeWalk.idlePages >= 3 && activeWalk.stuckScrolls >= 2)
-    ) {
-      endWalkNatural(
-        activeWalk.noMore ? "no-more-cursor" : "scroll-stable",
-      );
-      return;
-    }
-
-    window.scrollTo(0, h);
-    // Also nudge a bit past bottom for virtualized lists
-    try {
-      window.scrollBy(0, 400);
-    } catch {
-      /* ignore */
-    }
-    scrollTimer = setTimeout(autoScroll, 2500);
-  }
-
-  function startAutoScroll() {
-    stopAutoScroll();
-    scrollTimer = setTimeout(autoScroll, 1500);
-  }
-
-  function stopAutoScroll() {
-    if (scrollTimer) {
-      clearTimeout(scrollTimer);
-      scrollTimer = null;
-    }
-  }
-
-  // If user scrolls manually during walk, delay next auto-scroll (don't fight them hard)
-  window.addEventListener(
-    "scroll",
-    () => {
-      if (!activeWalk) return;
-      if (scrollTimer) clearTimeout(scrollTimer);
-      scrollTimer = setTimeout(autoScroll, 5000);
-    },
-    { passive: true },
-  );
-
-  // Passive ingest when user opens lists themselves — NO auto-scroll (don't steal control)
-  // GraphQL hook still captures users as the user scrolls.
 
   console.log("[auto-x] content script ready");
 })();

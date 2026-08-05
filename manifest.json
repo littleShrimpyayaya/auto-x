@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "auto-x",
-  "version": "0.3.3",
+  "version": "0.3.5",
   "description": "X (Twitter) 自动回关 — 跨浏览器纯前端插件，无需后端",
   "background": {
     "service_worker": "src/background.js",

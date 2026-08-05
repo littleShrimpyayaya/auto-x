@@ -8,7 +8,7 @@ if (typeof importScripts === "function") {
 
 const api = self.autoxBrowser || (typeof browser !== "undefined" ? browser : chrome);
 const store = self.autoxStore;
-const VERSION = "0.3.3";
+const VERSION = "0.3.5";
 const PANEL_PATH = "src/panel/panel.html";
 
 let connectedTabId = null;
@@ -360,8 +360,10 @@ async function disconnectAccount() {
   await loadData();
   data.autoFollowRunning = false;
   data.connection = { connected: false, connectedAt: null, tabId: null };
+  data.pendingActions = [];
   await persistData();
   activeAction = null;
+  await stopSync();
   return { ok: true };
 }
 
@@ -399,9 +401,24 @@ async function stopAutoFollow() {
   await loadData();
   data.autoFollowRunning = false;
   activeAction = null;
+  data.pendingActions = [];
   await persistData();
+  // Also stop any list-sync scroll — "stop" must leave the page alone
+  await stopSync();
   console.log("[auto-x] 自动关注已停止 🛑");
   return { ok: true, running: false };
+}
+
+function listUrlMatchesStream(url, stream) {
+  if (!url || !stream) return false;
+  try {
+    const path = new URL(url).pathname || "";
+    if (stream === "followers") return /\/followers(?:\/|$)/.test(path);
+    if (stream === "following") return /\/following(?:\/|$)/.test(path);
+  } catch {
+    /* ignore */
+  }
+  return false;
 }
 
 async function stopSync() {
@@ -409,9 +426,21 @@ async function stopSync() {
   const tabId = pendingWalk?.tabId || connectedTabId;
   pendingWalk = null;
   await api.storage.local.remove("pendingWalk");
-  if (tabId) {
+  // Stop scroll on every X tab we can reach (content self-guards too)
+  const targets = new Set();
+  if (tabId) targets.add(tabId);
+  if (connectedTabId) targets.add(connectedTabId);
+  try {
+    const tabs = await findXTabs();
+    for (const t of tabs || []) {
+      if (t?.id != null) targets.add(t.id);
+    }
+  } catch {
+    /* ignore */
+  }
+  for (const id of targets) {
     try {
-      await api.tabs.sendMessage(tabId, { type: "STOP_WALK" });
+      await api.tabs.sendMessage(id, { type: "STOP_WALK" });
     } catch {
       /* tab may be gone */
     }
@@ -470,13 +499,27 @@ async function startSync(stream) {
   }
   if (!username) return { ok: false, error: "无法识别用户名，请重新连接" };
 
-  pendingWalk = { stream, tabId: connectedTabId };
+  const targetUrl = "https://x.com/" + username + "/" + stream;
+  pendingWalk = {
+    stream,
+    tabId: connectedTabId,
+    username,
+    targetUrl,
+    navAt: Date.now(),
+    dispatchOk: false,
+  };
   await api.storage.local.set({
-    pendingWalk: { stream, tabId: connectedTabId, at: Date.now() },
+    pendingWalk: {
+      stream,
+      tabId: connectedTabId,
+      username,
+      targetUrl,
+      at: Date.now(),
+      navAt: Date.now(),
+    },
   });
 
   // Navigating for sync is explicit user action from popup
-  const targetUrl = "https://x.com/" + username + "/" + stream;
   try {
     await api.tabs.update(connectedTabId, { url: targetUrl, active: true });
   } catch (e) {
@@ -487,15 +530,56 @@ async function startSync(stream) {
   return { ok: true, walkStream: stream };
 }
 
-async function tryDispatchWalk(tabId) {
+async function tryDispatchWalk(tabId, tabUrlFromHeartbeat) {
   if (!pendingWalk || pendingWalk.tabId !== tabId) return false;
+
+  let url = tabUrlFromHeartbeat || null;
+  if (!url) {
+    try {
+      const tab = await api.tabs.get(tabId);
+      url = tab?.url || null;
+    } catch {
+      return false;
+    }
+  }
+
+  // Never start auto-scroll on Home / tweets / other pages
+  if (!listUrlMatchesStream(url, pendingWalk.stream)) {
+    const now = Date.now();
+    const lastNav = pendingWalk.navAt || 0;
+    // Re-navigate to the list page at most every 12s while sync is pending
+    if (now - lastNav > 12000 && pendingWalk.username) {
+      pendingWalk.navAt = now;
+      const target =
+        pendingWalk.targetUrl ||
+        "https://x.com/" + pendingWalk.username + "/" + pendingWalk.stream;
+      try {
+        console.log("[auto-x] re-nav to list for walk:", target);
+        await api.tabs.update(tabId, { url: target });
+      } catch (e) {
+        console.warn("[auto-x] re-nav failed", e);
+      }
+    }
+    return false;
+  }
+
   try {
-    await api.tabs.sendMessage(tabId, {
+    const resp = await api.tabs.sendMessage(tabId, {
       type: "START_WALK",
       stream: pendingWalk.stream,
     });
-    console.log("[auto-x] walk dispatched:", pendingWalk.stream);
-    return true;
+    if (resp?.wrongPage) {
+      console.warn("[auto-x] walk refused wrong page:", resp.path);
+      return false;
+    }
+    if (resp?.ok) {
+      pendingWalk.dispatchOk = true;
+      if (!resp.already) {
+        console.log("[auto-x] walk dispatched:", pendingWalk.stream, "on", url);
+      }
+      return true;
+    }
+    return false;
   } catch {
     return false;
   }
@@ -573,11 +657,30 @@ api.runtime.onMessage.addListener((msg, sender, sendResponse) => {
             await persistData();
           }
 
+          // Only dispatch walk when tab is already on the list URL.
+          // Heartbeat must never cause Home timeline scrolling.
           if (tabId && pendingWalk?.tabId === tabId) {
-            await tryDispatchWalk(tabId);
+            await tryDispatchWalk(tabId, msg.tabUrl || null);
+          } else if (tabId && pendingWalk && pendingWalk.tabId !== tabId) {
+            // Content reports walk but bg thinks another tab — stop stray scroll
+            if (msg.walkActive) {
+              try {
+                await api.tabs.sendMessage(tabId, { type: "STOP_WALK" });
+              } catch {
+                /* ignore */
+              }
+            }
+          } else if (!pendingWalk && msg.walkActive) {
+            // Orphan walk in content (e.g. after SW restart) — stop it
+            try {
+              await api.tabs.sendMessage(tabId, { type: "STOP_WALK" });
+            } catch {
+              /* ignore */
+            }
           }
           sendResponse({ ok: true });
-          processQueue();
+          // Auto-follow queue is API-only; never coupled to page scroll
+          if (data?.autoFollowRunning) processQueue();
           break;
         }
         case "SESSION_USER": {
@@ -629,8 +732,9 @@ api.runtime.onMessage.addListener((msg, sender, sendResponse) => {
             pendingWalk = null;
             await api.storage.local.remove("pendingWalk");
           }
+          console.log("[auto-x] WALK_ENDED", msg.walk?.stream, msg.reason || "");
           sendResponse({ ok: true });
-          setTimeout(() => processQueue(), 3000);
+          if (data?.autoFollowRunning) setTimeout(() => processQueue(), 3000);
           break;
         }
         case "ACTION_COMPLETED":
@@ -733,13 +837,26 @@ api.tabs.onRemoved.addListener((tabId) => {
   if (liveSession?.tabId === tabId) liveSession = null;
 });
 
-api.tabs.onUpdated.addListener(async (tabId, info) => {
-  if (info.status !== "complete") return;
+api.tabs.onUpdated.addListener(async (tabId, info, tab) => {
+  if (info.status !== "complete" && !info.url) return;
   if (!pendingWalk || pendingWalk.tabId !== tabId) return;
-  setTimeout(async () => {
-    await pushKnownQueries(tabId);
-    await tryDispatchWalk(tabId);
-  }, 1500);
+  const url = info.url || tab?.url || null;
+  // If user navigates away from list during sync, stop pending walk (don't chase to Home)
+  if (url && isXUrl(url) && !listUrlMatchesStream(url, pendingWalk.stream)) {
+    // Allow brief redirects during initial navigation to list
+    const sinceNav = Date.now() - (pendingWalk.navAt || 0);
+    if (sinceNav > 8000) {
+      console.warn("[auto-x] tab left list page during sync, cancelling walk", url);
+      await stopSync();
+      return;
+    }
+  }
+  if (info.status === "complete") {
+    setTimeout(async () => {
+      await pushKnownQueries(tabId);
+      await tryDispatchWalk(tabId, url);
+    }, 1200);
+  }
 });
 
 // ── Periodic tick (works with popup closed) ──
@@ -879,10 +996,14 @@ if (api.runtime?.onInstalled) {
   // (requires NO default_popup — already removed from manifest)
   await loadData();
   if (data.connection?.tabId) connectedTabId = data.connection.tabId;
-  const pw = (await api.storage.local.get("pendingWalk")).pendingWalk;
-  if (pw?.stream && pw?.tabId && Date.now() - (pw.at || 0) < 10 * 60 * 1000) {
-    pendingWalk = { stream: pw.stream, tabId: pw.tabId };
+  // Do NOT auto-resume list scrolling after SW restart — stale walks were
+  // restarting scroll on whatever page the tab was on (including Home tweets).
+  try {
+    await api.storage.local.remove("pendingWalk");
+  } catch {
+    /* ignore */
   }
+  pendingWalk = null;
   console.log(
     "[auto-x] v" + VERSION +
       " | sidePanel=" + sidePanelReady +
