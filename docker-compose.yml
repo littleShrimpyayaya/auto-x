@@ -27,6 +27,8 @@ services:
 
   # K25: sole migrator — api/worker MUST NOT migrate on boot
   # PR1: packages/db migrate is a no-op stub that logs "PR1: no migrations yet" and exits 0
+  # DATABASE_URL embeds POSTGRES_PASSWORD without URL-encoding — use URL-safe passwords
+  # (no @ : / # ? % etc.) until an entrypoint encodes credentials (see .env.example).
   migrate:
     build:
       context: .

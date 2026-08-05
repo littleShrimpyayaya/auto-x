@@ -14,16 +14,20 @@ set -a
 source .env
 set +a
 
-if [[ -z "${ADMIN_TOKEN:-}" || "${#ADMIN_TOKEN}" -lt 16 || "${ADMIN_TOKEN}" == "change-me-to-long-random" ]]; then
-  echo "error: ADMIN_TOKEN must be set, length >= 16, and not the weak placeholder" >&2
+# Align with packages/config isAdminTokenWeak: trim, reject empty/placeholder/short.
+ADMIN_TOKEN_TRIMMED="$(printf '%s' "${ADMIN_TOKEN:-}" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')"
+if [[ -z "${ADMIN_TOKEN_TRIMMED}" || "${#ADMIN_TOKEN_TRIMMED}" -lt 16 || "${ADMIN_TOKEN_TRIMMED}" == "change-me-to-long-random" ]]; then
+  echo "error: ADMIN_TOKEN must be set (after trim), length >= 16, and not the weak placeholder" >&2
   exit 1
 fi
 
-if [[ -z "${POSTGRES_PASSWORD:-}" ]]; then
+POSTGRES_PASSWORD_TRIMMED="$(printf '%s' "${POSTGRES_PASSWORD:-}" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')"
+if [[ -z "${POSTGRES_PASSWORD_TRIMMED}" ]]; then
   echo "error: POSTGRES_PASSWORD must be set in .env" >&2
   exit 1
 fi
 
 echo "Starting auto-x stack (postgres → migrate → api + worker)..."
 docker compose up -d --build "$@"
-echo "Done. API: http://localhost:${PORT:-3000}/health"
+# Compose publishes host 3000:3000 (PORT in .env is for local non-compose runs).
+echo "Done. API: http://localhost:3000/health"

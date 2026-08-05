@@ -26,13 +26,13 @@ importers:
       hono:
         specifier: ^4.6.16
         version: 4.13.0
+      tsx:
+        specifier: ^4.19.2
+        version: 4.23.6
     devDependencies:
       '@types/node':
         specifier: ^22.10.5
         version: 22.20.1
-      tsx:
-        specifier: ^4.19.2
-        version: 4.23.6
       typescript:
         specifier: ^5.7.3
         version: 5.9.3
@@ -45,13 +45,13 @@ importers:
       '@autox/shared':
         specifier: workspace:*
         version: link:../../packages/shared
+      tsx:
+        specifier: ^4.19.2
+        version: 4.23.6
     devDependencies:
       '@types/node':
         specifier: ^22.10.5
         version: 22.20.1
-      tsx:
-        specifier: ^4.19.2
-        version: 4.23.6
       typescript:
         specifier: ^5.7.3
         version: 5.9.3
@@ -63,13 +63,14 @@ importers:
         version: 5.9.3
 
   packages/db:
+    dependencies:
+      tsx:
+        specifier: ^4.19.2
+        version: 4.23.6
     devDependencies:
       '@types/node':
         specifier: ^22.10.5
         version: 22.20.1
-      tsx:
-        specifier: ^4.19.2
-        version: 4.23.6
       typescript:
         specifier: ^5.7.3
         version: 5.9.3

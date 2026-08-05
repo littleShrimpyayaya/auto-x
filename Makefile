@@ -1,10 +1,15 @@
 # auto-x common targets
-.PHONY: up down logs build install migrate config ps
+.PHONY: up down stop logs build install migrate config ps
 
 up:
 	./scripts/start.sh
 
+# Remove containers/network (keeps named volume pgdata unless -v)
 down:
+	docker compose down
+
+# SIGTERM stop only (containers remain); matches scripts/stop.sh
+stop:
 	./scripts/stop.sh
 
 logs:

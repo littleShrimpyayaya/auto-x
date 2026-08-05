@@ -43,8 +43,8 @@ Admin UI will use REST for commands and **WebSocket** (`/api/v1/ws`) for live st
 
 Required in `.env`:
 
-- `ADMIN_TOKEN` — length ≥ 16; not empty; not `change-me-to-long-random` (API fail-fast)
-- `POSTGRES_PASSWORD` — non-empty
+- `ADMIN_TOKEN` — length ≥ 16 after trim; not empty; not `change-me-to-long-random` (start.sh + API fail-fast)
+- `POSTGRES_PASSWORD` — non-empty; **URL-safe** (no `@ : / # ? %` etc.) because compose embeds it raw in `DATABASE_URL`
 
 ## Quick start (Docker)
 
@@ -59,8 +59,9 @@ curl -s http://localhost:3000/health
 # {"ok":true}
 
 ./scripts/logs.sh
-./scripts/stop.sh
-# or: make down / make logs
+./scripts/stop.sh   # SIGTERM stop (containers remain)
+make down           # docker compose down (remove containers; keeps pgdata volume)
+# or: make logs
 ```
 
 ## Local dev (without full compose)
@@ -98,15 +99,16 @@ docs/             design-auto-x.md
 
 ## Makefile
 
-| Target     | Action                          |
-|------------|---------------------------------|
-| `make up`  | `./scripts/start.sh`            |
-| `make down`| `./scripts/stop.sh`             |
-| `make logs`| `./scripts/logs.sh`             |
-| `make build` | `docker compose build`        |
-| `make install` | `pnpm install`              |
-| `make migrate` | `pnpm db:migrate`           |
-| `make config`  | `docker compose config`     |
+| Target       | Action                                      |
+|--------------|---------------------------------------------|
+| `make up`    | `./scripts/start.sh`                        |
+| `make stop`  | `./scripts/stop.sh` (`docker compose stop`) |
+| `make down`  | `docker compose down` (keeps volume)        |
+| `make logs`  | `./scripts/logs.sh`                         |
+| `make build` | `docker compose build`                      |
+| `make install` | `pnpm install`                            |
+| `make migrate` | `pnpm db:migrate`                         |
+| `make config`  | `docker compose config`                   |
 
 ## License / status
 
