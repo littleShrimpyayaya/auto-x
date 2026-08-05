@@ -7,13 +7,22 @@ X（Twitter）关系网络自动化：**真实 API 落地**（OAuth 1.0a）— f
 | DB | PostgreSQL 16 |
 | API | Hono + **WebSocket** + `LISTEN/NOTIFY` |
 | Worker | 同步图谱 / 入队 / 执行关注取关 |
-| 客户端 | `twitter-api-v2` **Live**（mock 仅无密钥时回退） |
+| 客户端 | 官方 **[@xdevplatform/xdk](https://docs.x.com/xdks/typescript/overview)** Live（OAuth 1.0a；mock 仅无密钥时回退） |
 
 > **风险**：自动化关注/取关可能违反 X 政策。请用小号、保守配额，并确认开发者套餐具备 follows 读/写权限。
 
 ---
 
 ## 1. 配置真实 X 密钥（必须）
+
+官方 SDK 文档：[TypeScript XDK Overview](https://docs.x.com/xdks/typescript/overview) · [Authentication](https://docs.x.com/xdks/typescript/authentication)
+
+本项目 Live 路径使用：
+
+```ts
+import { Client, OAuth1 } from '@xdevplatform/xdk';
+// client.users.getMe / getFollowers / getFollowing / followUser / unfollowUser
+```
 
 1. 打开 [X Developer Portal](https://developer.x.com/) → 创建 App  
 2. 权限：**Read and write**（至少能 follow）  

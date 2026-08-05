@@ -12,7 +12,7 @@
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
-    "twitter-api-v2": "^1.19.0"
+    "@xdevplatform/xdk": "^0.6.6"
   },
   "devDependencies": {
     "@types/node": "^22.10.5",
