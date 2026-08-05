@@ -1,22 +1,17 @@
 /**
- * Options page — configure extension behavior.
+ * Options page — rate limits only (start/stop lives in popup).
  */
-const toggleEl = document.getElementById("toggle-followBack");
-const toggleLabel = document.getElementById("toggle-label");
+const api =
+  (typeof autoxBrowser !== "undefined" && autoxBrowser) ||
+  (typeof browser !== "undefined" ? browser : chrome);
+
 const minIntervalEl = document.getElementById("minIntervalSec");
 const maxFollowsEl = document.getElementById("maxFollowsPerDay");
 const statusEl = document.getElementById("status");
 
 async function load() {
   try {
-    const s = await chrome.runtime.sendMessage({ type: "GET_SETTINGS" });
-    if (s.followBackEnabled) {
-      toggleEl.classList.add("on");
-      toggleLabel.textContent = "已启用";
-    } else {
-      toggleEl.classList.remove("on");
-      toggleLabel.textContent = "已暂停";
-    }
+    const s = await api.runtime.sendMessage({ type: "GET_SETTINGS" });
     minIntervalEl.value = s.minIntervalSec || 60;
     maxFollowsEl.value = s.maxFollowsPerDay || 50;
   } catch {
@@ -25,23 +20,17 @@ async function load() {
   }
 }
 
-toggleEl.addEventListener("click", () => {
-  toggleEl.classList.toggle("on");
-  toggleLabel.textContent = toggleEl.classList.contains("on") ? "已启用" : "已暂停";
-});
-
 document.getElementById("btn-save").addEventListener("click", async () => {
   const settings = {
-    followBackEnabled: toggleEl.classList.contains("on"),
-    minIntervalSec: Math.max(30, parseInt(minIntervalEl.value) || 60),
-    maxFollowsPerDay: Math.min(200, Math.max(1, parseInt(maxFollowsEl.value) || 50)),
+    minIntervalSec: Math.max(30, parseInt(minIntervalEl.value, 10) || 60),
+    maxFollowsPerDay: Math.min(200, Math.max(1, parseInt(maxFollowsEl.value, 10) || 50)),
   };
   try {
-    await chrome.runtime.sendMessage({ type: "SAVE_SETTINGS", settings });
+    await api.runtime.sendMessage({ type: "SAVE_SETTINGS", settings });
     statusEl.textContent = "已保存 ✓";
     statusEl.className = "status ok";
   } catch (e) {
-    statusEl.textContent = "保存失败: " + e.message;
+    statusEl.textContent = "保存失败: " + (e.message || e);
     statusEl.className = "status";
   }
 });

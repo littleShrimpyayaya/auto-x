@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<html>
+<html lang="zh-CN">
 <head>
   <meta charset="utf-8">
   <title>auto-x</title>
@@ -8,20 +8,40 @@
 <body>
   <div id="app">
     <header>
-      <h1>auto-x</h1>
-      <span id="status-dot" class="dot offline"></span>
+      <div class="brand">
+        <img src="../../icons/icon-48.png" alt="" class="logo" width="28" height="28">
+        <h1>auto-x</h1>
+      </div>
+      <span id="status-dot" class="dot offline" title="状态"></span>
     </header>
 
-    <section id="connection" class="card">
-      <div class="label">状态</div>
-      <div id="backend-status">就绪</div>
+    <!-- Gate: login / connect -->
+    <section id="gate" class="card">
+      <div class="label">连接状态</div>
+      <div id="gate-status" class="gate-status">检测中…</div>
+      <div id="gate-hint" class="hint"></div>
+      <div class="actions col" id="gate-actions">
+        <button id="btn-login" class="btn primary hidden">登录 X 账户</button>
+        <button id="btn-connect" class="btn primary hidden">连接</button>
+        <button id="btn-open-x" class="btn hidden">打开 X.com</button>
+      </div>
     </section>
 
+    <!-- Connected account -->
     <section id="account" class="card hidden">
-      <div class="label">账号</div>
-      <div id="account-name">—</div>
+      <div class="label">已连接账户</div>
+      <div class="account-row">
+        <img id="account-avatar" class="avatar hidden" alt="">
+        <div class="account-meta">
+          <div id="account-name" class="account-name">—</div>
+          <div id="account-handle" class="account-handle">—</div>
+        </div>
+        <button id="btn-disconnect" class="btn btn-sm danger-outline" title="断开连接">断开</button>
+      </div>
+      <div id="account-extra" class="hint"></div>
     </section>
 
+    <!-- Sync graph -->
     <section id="sync" class="card hidden">
       <div class="label">图谱同步</div>
       <div id="sync-status">未同步</div>
@@ -29,27 +49,57 @@
         <button id="btn-sync-followers" class="btn">同步粉丝</button>
         <button id="btn-sync-following" class="btn">同步关注</button>
       </div>
+      <div class="hint">同步时会打开列表页并自动翻页；关闭弹窗不影响后台自动关注。</div>
     </section>
 
-    <section id="actions-section" class="card hidden">
-      <div class="label">待执行任务</div>
-      <div id="pending-count">0</div>
+    <!-- Main control -->
+    <section id="controls" class="card hidden">
+      <div class="label">自动回关</div>
+      <button id="btn-auto" class="btn primary btn-lg">开始自动关注</button>
+      <div id="auto-hint" class="hint">后台运行，关闭弹窗不会停止。</div>
     </section>
 
+    <!-- Usage -->
     <section id="usage" class="card hidden">
       <div class="label">今日用量</div>
       <div id="usage-detail">—</div>
+      <div id="pending-line" class="hint"></div>
     </section>
 
-    <section id="controls" class="card hidden">
-      <button id="btn-toggle" class="btn primary">启动自动化</button>
+    <!-- Results: success / fail -->
+    <section id="results" class="card hidden">
+      <div class="results-header">
+        <div class="label">关注结果</div>
+        <button id="btn-clear-results" class="btn btn-sm">清空</button>
+      </div>
+      <div class="stats-row">
+        <div class="stat ok">
+          <span class="stat-num" id="success-count">0</span>
+          <span class="stat-label">成功</span>
+        </div>
+        <div class="stat fail">
+          <span class="stat-num" id="fail-count">0</span>
+          <span class="stat-label">失败</span>
+        </div>
+      </div>
+      <div class="lists">
+        <div class="list-block">
+          <div class="list-title ok-text">成功名单</div>
+          <ul id="success-list" class="user-list"></ul>
+        </div>
+        <div class="list-block">
+          <div class="list-title fail-text">失败名单</div>
+          <ul id="fail-list" class="user-list"></ul>
+        </div>
+      </div>
     </section>
 
     <footer>
       <a href="#" id="open-options">设置</a>
-      <span id="device-info"></span>
+      <span id="version-info"></span>
     </footer>
   </div>
+  <script src="../lib/browser.js"></script>
   <script src="popup.js"></script>
 </body>
 </html>
