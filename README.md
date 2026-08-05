@@ -54,14 +54,31 @@ POSTGRES_PASSWORD=...
 ```bash
 ./scripts/start.sh
 # 或 make up
+# 跳过 nginx: START_NGINX=0 ./scripts/start.sh
 ```
 
-服务：`postgres` + **唯一** `migrate` + `api` + `worker`
+服务：
 
-- 管理页：http://localhost:3000/  
-- Health：`/health`  
-- REST：`/api/v1/*`  
-- WS：`ws://localhost:3000/api/v1/ws`（首帧 `{ "type":"auth","token":"..." }`）
+| 栈 | 容器 |
+|----|------|
+| 主栈 | `postgres` + **唯一** `migrate` + `api` + `worker` |
+| 反代 | **nginx**（`nginx/tools/**` 保留）**80 → 301 HTTPS**，**443** 静态 + `/api` 反代 |
+
+### 访问入口（推荐 HTTPS）
+
+| 入口 | URL |
+|------|-----|
+| 管理页 | **https://\<host\>/** （证书为自签时浏览器需信任/继续访问） |
+| HTTP | **http://\<host\>/** → **301** 到 HTTPS |
+| REST | `https://<host>/api/v1/*` |
+| WS | `wss://<host>/api/v1/ws`（首帧 `{ "type":"auth","token":"..." }`） |
+| 直连 API（调试） | `http://localhost:3000/health` |
+
+```bash
+# 仅启/停 nginx
+make nginx-up
+make nginx-down
+```
 
 ---
 

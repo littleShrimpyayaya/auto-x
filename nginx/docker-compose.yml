@@ -1,6 +1,9 @@
-# Standalone nginx for static admin + reverse proxy to API (topology B).
-# From this directory: docker compose up -d
-# Requires API reachable at host.docker.internal:3000 (or change upstream).
+# Standalone nginx: 80 → 301 HTTPS, 443 static + /api reverse proxy + WebSocket.
+# Prefer joining the main stack network so upstream is service name `api:3000`.
+#
+# From repo root:
+#   docker compose -f nginx/docker-compose.yml up -d
+# Or via scripts/start.sh (starts main stack then nginx).
 
 services:
   nginx:
@@ -19,8 +22,19 @@ services:
       - ./logs:/var/log/nginx
     command: ["nginx", "-g", "daemon off;"]
     networks:
+      - autox
       - nginx_net
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q --spider http://127.0.0.1/healthz || exit 1"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 5s
 
 networks:
+  # Main auto-x stack (postgres/api/worker)
+  autox:
+    external: true
+    name: autox
   nginx_net:
     driver: bridge
