@@ -119,7 +119,8 @@ export const OFFICIAL_PER_USER: Record<
 
 const OFFICIAL = OFFICIAL_PER_USER;
 
-const SAFETY = Number(process.env.X_RATE_SAFETY ?? 0.85);
+// Slightly looser soft-cap for better UX; still under official docs.
+const SAFETY = Number(process.env.X_RATE_SAFETY ?? 0.9);
 
 function sleep(ms: number) {
   return new Promise((r) => setTimeout(r, ms));
@@ -343,14 +344,17 @@ export class RateBudget {
   ) {
     if (!headers) return;
     const b = this.buckets.get(bucket)!;
-    if (headers.limit != null) b.headerLimit = headers.limit;
-    if (headers.remaining != null) b.headerRemaining = headers.remaining;
-    if (headers.resetUnix != null) b.headerResetMs = headers.resetUnix * 1000;
-    this.emit({
-      type: "header_sync",
-      bucket,
-      message: `同步限流头：${bucket} remaining=${headers.remaining ?? "?"} limit=${headers.limit ?? "?"} reset=${headers.resetUnix ?? "?"}`,
-    });
+    // Ignore absurd header values (some gateways send 999999 / 1e6 placeholders)
+    if (headers.limit != null && headers.limit > 0 && headers.limit < 100_000) {
+      b.headerLimit = headers.limit;
+    }
+    if (headers.remaining != null && headers.remaining >= 0 && headers.remaining < 100_000) {
+      b.headerRemaining = headers.remaining;
+    }
+    if (headers.resetUnix != null && headers.resetUnix > 1_000_000_000) {
+      b.headerResetMs = headers.resetUnix * 1000;
+    }
+    // Don't spam UI for header sync of every request
   }
 
   /** After HTTP 429 — block until reset. */

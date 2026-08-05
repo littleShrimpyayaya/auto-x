@@ -161,6 +161,10 @@ export class LiveXClient implements XClient {
         const headers = extractRateHeaders(err);
         if (headers) this.budget.noteHeaders(bucket, headers);
         const xe = classifyXError(err);
+        // 402 / auth / forbidden: fail fast, do not retry-loop (felt like "UI dead")
+        if (xe.kind === "payment_required" || xe.kind === "auth" || xe.kind === "forbidden") {
+          throw xe;
+        }
         if (xe.kind === "rate_limit") {
           this.budget.note429(bucket, xe.retryAfterMs);
           if (attempt < this.maxRetries) {

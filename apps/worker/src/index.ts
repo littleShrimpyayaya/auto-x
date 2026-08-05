@@ -7,6 +7,7 @@ import {
   completeFullWalk,
   edgeSyncGenForUpsert,
   enqueueJobSafe,
+  demoteMockAccount,
   getPool,
   getPrimaryAccount,
   getRuntime,
@@ -36,68 +37,44 @@ let caps: XCapabilities | null = null;
 let lastProbeAt = 0;
 let lastRatePush = 0;
 
-/** Wire rate-budget + X errors into event_log + WS (user-visible progress). */
+/** Wire rate-budget into runtime/WS — throttle hard to avoid UI freeze. */
 function wireRateVisibility() {
   if (!x.onRateEvent) return;
   x.onRateEvent((ev) => {
-    const level = ev.type === "blocked_429" ? "warn" : ev.type === "wait" ? "info" : "debug";
-    // throttle noisy acquire/debug
-    if (ev.type === "acquire" && level === "debug") return;
-    void logEvent(
-      "x_rate",
-      ev.message,
-      {
-        type: ev.type,
-        bucket: ev.bucket,
-        waitMs: ev.waitMs,
-        snapshot: ev.snapshot,
-      },
-      level === "debug" ? "info" : level,
-    ).catch(() => {});
+    // Ignore routine acquire/header; only surface wait/429 occasionally
+    if (ev.type === "acquire" || ev.type === "header_sync") return;
+    const now = Date.now();
+    if (now - lastRatePush < 3000 && ev.type === "wait") return;
+    lastRatePush = now;
+
     const budgets = x.rateSnapshots?.() ?? [];
-    // earliest global next-allowed across buckets that are waiting
     const waiting = budgets.filter((b) => b.nextAllowedInSec > 0);
     const nextRetry = waiting.length
       ? waiting.reduce((a, b) =>
           (a.nextAllowedInSec ?? 0) <= (b.nextAllowedInSec ?? 0) ? a : b,
         )
       : null;
-    void pgNotify(
-      WS_CHANNEL,
-      envelope("x.rate", {
-        type: ev.type,
-        bucket: ev.bucket,
-        message: ev.message,
-        waitMs: ev.waitMs,
-        retryAt: ev.retryAt ?? ev.snapshot.nextAllowedAt,
-        retryInSec: ev.retryInSec ?? ev.snapshot.nextAllowedInSec,
-        snapshot: ev.snapshot,
-        budgets,
-        nextRetryAt: nextRetry?.nextAllowedAt ?? null,
-        nextRetryInSec: nextRetry?.nextAllowedInSec ?? 0,
-        nextRetryBucket: nextRetry?.bucket ?? null,
-      }),
-    ).catch(() => {});
-    // persist summary for REST pollers (throttle 1s so countdown stays fresh)
-    const now = Date.now();
-    if (now - lastRatePush > 1000) {
-      lastRatePush = now;
-      void setRuntime({
-        x_rate: {
-          lastEvent: ev.message,
-          lastType: ev.type,
-          lastBucket: ev.bucket,
-          waitMs: ev.waitMs ?? 0,
-          retryAt: ev.retryAt ?? ev.snapshot.nextAllowedAt,
-          retryInSec: ev.retryInSec ?? ev.snapshot.nextAllowedInSec,
-          nextRetryAt: nextRetry?.nextAllowedAt ?? null,
-          nextRetryInSec: nextRetry?.nextAllowedInSec ?? 0,
-          nextRetryBucket: nextRetry?.bucket ?? null,
-          budgets,
-          updatedAt: new Date().toISOString(),
-        },
-      }).catch(() => {});
+
+    const payload = {
+      type: ev.type,
+      bucket: ev.bucket,
+      message: ev.message,
+      waitMs: ev.waitMs,
+      retryAt: ev.retryAt ?? ev.snapshot.nextAllowedAt,
+      retryInSec: ev.retryInSec ?? ev.snapshot.nextAllowedInSec,
+      snapshot: ev.snapshot,
+      budgets,
+      nextRetryAt: nextRetry?.nextAllowedAt ?? null,
+      nextRetryInSec: nextRetry?.nextAllowedInSec ?? 0,
+      nextRetryBucket: nextRetry?.bucket ?? null,
+      updatedAt: new Date().toISOString(),
+    };
+
+    if (ev.type === "blocked_429") {
+      void logEvent("x_rate", ev.message, payload, "warn").catch(() => {});
     }
+    void setRuntime({ x_rate: payload }).catch(() => {});
+    void pgNotify(WS_CHANNEL, envelope("x.rate", payload)).catch(() => {});
   });
 }
 wireRateVisibility();
@@ -126,18 +103,35 @@ async function ensureBootstrap() {
     throw new Error(`X API getMe failed: ${caps?.errors.me ?? "unknown"} — check OAuth credentials`);
   }
 
+  const me = caps.meUser ?? (await x.getMe());
   let account = await getPrimaryAccount();
-  const rt = await getRuntime();
-  if (!account || rt?.needs_bootstrap) {
-    const me = caps.meUser ?? (await x.getMe());
-    await upsertXUser(me);
-    await upsertAccount({ id: me.id, username: me.username, name: me.name });
-    await setRuntime({ needs_bootstrap: false, last_error: null });
-    await logEvent("bootstrap", `live account @${me.username} (${me.id}) mode=${x.mode}`);
-    await pgNotify(WS_CHANNEL, envelope("runtime.changed", { needsBootstrap: false, me }));
-    account = { id: me.id, username: me.username, name: me.name };
+  const switched = !account || String(account.id) !== String(me.id);
+
+  await upsertXUser(me);
+  await upsertAccount({ id: me.id, username: me.username, name: me.name });
+  await demoteMockAccount(me.id);
+
+  if (switched) {
+    // Drop mock graph_consistent so live account re-syncs
+    await setRuntime({
+      needs_bootstrap: false,
+      graph_consistent: false,
+      followers_sync_ok: false,
+      following_sync_ok: false,
+      last_error: caps.readFollowers
+        ? null
+        : `账号已切换为 @${me.username}；读粉丝/关注列表: ${caps.errors.readFollowers || caps.errors.readFollowing || "受限"}`,
+    });
+    await logEvent("bootstrap", `switched to @${me.username} (${me.id}) mode=${x.mode}`, {
+      prev: account?.id,
+      readFollowers: caps.readFollowers,
+      readFollowing: caps.readFollowing,
+    });
+  } else {
+    await setRuntime({ needs_bootstrap: false });
   }
-  return account as { id: string; username: string; name?: string };
+  await pgNotify(WS_CHANNEL, envelope("runtime.changed", { needsBootstrap: false, me }));
+  return { id: me.id, username: me.username, name: me.name };
 }
 
 async function syncStream(accountId: string, stream: "followers" | "following") {
@@ -247,10 +241,34 @@ async function syncStream(accountId: string, stream: "followers" | "following") 
 }
 
 async function runSync(accountId: string) {
+  if (caps && !caps.readFollowers && !caps.readFollowing) {
+    const msg =
+      "无法同步关系图：X 返回 402/无 Follows lookup 权限。请在开发者控制台充值 credits 或升级含 follows 列表的套餐。getMe 已正常。";
+    await setRuntime({
+      last_error: msg,
+      graph_consistent: false,
+      x_progress: {
+        phase: "blocked",
+        error: msg,
+        kind: "payment_required",
+        at: new Date().toISOString(),
+      },
+    });
+    await logEvent("sync", msg, caps.errors, "warn");
+    await pgNotify(WS_CHANNEL, envelope("x.error", { source: "sync", message: msg, kind: "payment_required" }));
+    // Don't tight-loop hammering 402
+    await sleep(60_000);
+    return;
+  }
   try {
     await syncStream(accountId, "followers");
     await syncStream(accountId, "following");
-  } catch {
+  } catch (e) {
+    const xe = e instanceof XApiError ? e : null;
+    if (xe?.kind === "payment_required") {
+      await sleep(60_000);
+      return;
+    }
     // partial progress kept; will retry next loop
   }
   await pgNotify(WS_CHANNEL, envelope("runtime.changed", await getRuntime()));

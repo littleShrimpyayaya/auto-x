@@ -4,6 +4,7 @@ export type XErrorKind =
   | "rate_limit"
   | "auth"
   | "forbidden"
+  | "payment_required"
   | "not_found"
   | "already_following"
   | "cannot_follow"
@@ -92,6 +93,10 @@ export function classifyXError(err: unknown): XApiError {
       e.headers?.["Retry-After"];
     if (ra) retryAfterMs = Math.max(5_000, Number(ra) * 1000);
     return new XApiError("rate_limit", msg, { status: 429, code: e.code, retryAfterMs, raw: err });
+  }
+
+  if (status === 402 || /payment required|credits|enrolled account.*credits/i.test(msg)) {
+    return new XApiError("payment_required", msg, { status: status ?? 402, code: e.code, raw: err });
   }
 
   if (status === 401 || status === 403) {

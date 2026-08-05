@@ -317,14 +317,32 @@ app.post("/api/v1/control/probe", async (c) => {
       last_error: capabilities.me ? null : capabilities.errors.me ?? "probe failed",
     });
     if (capabilities.meUser) {
-      const { upsertAccount, upsertXUser } = await import("@autox/db");
+      const { upsertAccount, upsertXUser, demoteMockAccount, getPrimaryAccount } = await import(
+        "@autox/db"
+      );
+      const prev = await getPrimaryAccount();
       await upsertXUser(capabilities.meUser);
       await upsertAccount({
         id: capabilities.meUser.id,
         username: capabilities.meUser.username,
         name: capabilities.meUser.name,
       });
-      await setRuntime({ needs_bootstrap: false });
+      await demoteMockAccount(capabilities.meUser.id);
+      const switched = !prev || String(prev.id) !== String(capabilities.meUser.id);
+      await setRuntime({
+        needs_bootstrap: false,
+        ...(switched
+          ? {
+              graph_consistent: false,
+              followers_sync_ok: false,
+              following_sync_ok: false,
+            }
+          : {}),
+        last_error:
+          capabilities.readFollowers || capabilities.readFollowing
+            ? null
+            : `已登录 @${capabilities.meUser.username}，但 follows 列表 API 返回 402（需付费/credits）。身份探测正常。`,
+      });
     }
     await logEvent("probe", `api probe mode=${capabilities.mode}`, capabilities);
     await pgNotify(WS_CHANNEL, envelope("runtime.changed", { capabilities }));

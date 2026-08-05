@@ -343,8 +343,15 @@ export async function setConfig(key: string, value: unknown, accountId = "defaul
 }
 
 export async function getPrimaryAccount() {
-  const r = await query(`SELECT * FROM accounts ORDER BY created_at ASC LIMIT 1`);
+  // Prefer most recently updated (live bootstrap overwrites mock seed)
+  const r = await query(`SELECT * FROM accounts ORDER BY updated_at DESC NULLS LAST, created_at DESC LIMIT 1`);
   return r.rows[0] ?? null;
+}
+
+/** Remove legacy mock seed account if a real live account is present. */
+export async function demoteMockAccount(liveId: string) {
+  if (!liveId || liveId === "100") return;
+  await query(`DELETE FROM accounts WHERE id = '100'`);
 }
 
 export async function stats(accountId: string) {
