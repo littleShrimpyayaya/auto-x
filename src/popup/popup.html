@@ -15,30 +15,39 @@
       <span id="status-dot" class="dot offline" title="状态"></span>
     </header>
 
-    <!-- Gate: login / connect -->
+    <!-- Gate: login / connect / status badge -->
     <section id="gate" class="card">
       <div class="label">连接状态</div>
-      <div id="gate-status" class="gate-status">检测中…</div>
+      <div id="conn-badge" class="conn-badge checking" role="status">
+        <span class="conn-badge-dot"></span>
+        <span id="conn-badge-text">检测中…</span>
+      </div>
+      <div id="gate-status" class="gate-status">请稍候</div>
       <div id="gate-hint" class="hint"></div>
+      <div id="gate-error" class="error-box hidden"></div>
       <div class="actions col" id="gate-actions">
         <button id="btn-login" class="btn primary hidden">登录 X 账户</button>
-        <button id="btn-connect" class="btn primary hidden">连接</button>
+        <button id="btn-connect" class="btn primary hidden">连接账户</button>
         <button id="btn-open-x" class="btn hidden">打开 X.com</button>
       </div>
     </section>
 
     <!-- Connected account -->
     <section id="account" class="card hidden">
-      <div class="label">已连接账户</div>
+      <div class="label">当前账户</div>
       <div class="account-row">
         <img id="account-avatar" class="avatar hidden" alt="">
         <div class="account-meta">
           <div id="account-name" class="account-name">—</div>
           <div id="account-handle" class="account-handle">—</div>
         </div>
-        <button id="btn-disconnect" class="btn btn-sm danger-outline" title="断开连接">断开</button>
       </div>
       <div id="account-extra" class="hint"></div>
+      <div class="account-footer">
+        <button id="btn-disconnect" class="link-btn" title="解除与本插件的绑定（不会退出 X 登录）">
+          解除绑定
+        </button>
+      </div>
     </section>
 
     <!-- Sync graph -->

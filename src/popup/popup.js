@@ -8,8 +8,11 @@ const api = (typeof autoxBrowser !== "undefined" && autoxBrowser) ||
 const $ = (id) => document.getElementById(id);
 
 const statusDot = $("status-dot");
+const connBadge = $("conn-badge");
+const connBadgeText = $("conn-badge-text");
 const gateStatus = $("gate-status");
 const gateHint = $("gate-hint");
+const gateError = $("gate-error");
 const btnLogin = $("btn-login");
 const btnConnect = $("btn-connect");
 const btnOpenX = $("btn-open-x");
@@ -34,13 +37,44 @@ const successListEl = $("success-list");
 const failListEl = $("fail-list");
 const versionInfo = $("version-info");
 
+/** Last connect failure message — kept until next success / clear */
+let lastConnectError = "";
+
 function setDot(state) {
   statusDot.className = "dot " + state;
+}
+
+/**
+ * Primary connection status signal for the user.
+ * @param {"connected"|"disconnected"|"need-login"|"checking"|"running"} kind
+ * @param {string} label
+ */
+function setConnBadge(kind, label) {
+  if (!connBadge) return;
+  connBadge.className = "conn-badge " + kind;
+  connBadgeText.textContent = label;
+  // Mirror on header dot
+  if (kind === "connected") setDot("online");
+  else if (kind === "running") setDot("running");
+  else if (kind === "need-login") setDot("offline");
+  else if (kind === "checking") setDot("warning");
+  else setDot("offline");
 }
 
 function show(el, on) {
   if (!el) return;
   el.classList.toggle("hidden", !on);
+}
+
+function setError(msg) {
+  if (!gateError) return;
+  if (msg) {
+    gateError.textContent = "原因：" + msg;
+    show(gateError, true);
+  } else {
+    gateError.textContent = "";
+    show(gateError, false);
+  }
 }
 
 function fmtTime(iso) {
@@ -111,13 +145,23 @@ async function refresh() {
     const liveUser = status.liveUser;
     const running = !!status.autoFollowRunning;
 
-    // ── Gate / connection ──
+    // ── Gate / connection (badge = source of truth for user) ──
     if (connected && status.sessionUser?.username) {
-      setDot(running ? "running" : "online");
-      gateStatus.textContent = running ? "自动关注运行中…" : "已连接";
-      gateHint.textContent = running
-        ? "关闭此窗口不影响后台工作。点击下方停止可结束。"
-        : "账户已连通，可同步图谱或开始自动关注。";
+      lastConnectError = "";
+      setError("");
+
+      if (running) {
+        setConnBadge("running", "已连接 · 自动关注中");
+        gateStatus.textContent = "状态：已连接，自动关注运行中";
+        gateHint.textContent =
+          "关闭此窗口不影响后台。点下方「停止自动关注」可结束任务；右下「解除绑定」才会断开账户。";
+      } else {
+        setConnBadge("connected", "已连接");
+        gateStatus.textContent = "状态：已连接";
+        gateHint.textContent =
+          "账户已成功绑定。可同步图谱或开始自动关注。右下「解除绑定」才会断开（不会退出 X 网站登录）。";
+      }
+
       show(btnLogin, false);
       show(btnConnect, false);
       show(btnOpenX, false);
@@ -133,8 +177,8 @@ async function refresh() {
         show(accountAvatar, false);
       }
       accountExtra.textContent =
-        "连接于 " + fmtTime(status.connection?.connectedAt) +
-        (status.sessionMismatch ? " · ⚠ 当前标签可能已登出" : "");
+        "绑定时间 " + fmtTime(status.connection?.connectedAt) +
+        (status.sessionMismatch ? " · ⚠ X 标签页可能已登出，请刷新 x.com 后重连" : "");
 
       show(syncCard, true);
       const fl = status.followers?.count || 0;
@@ -148,9 +192,9 @@ async function refresh() {
 
       show(controlsCard, true);
       if (running) {
-        btnAuto.textContent = "🛑 停止";
+        btnAuto.textContent = "🛑 停止自动关注";
         btnAuto.className = "btn stop btn-lg";
-        autoHint.textContent = "自动关注进行中 · 后台持续运行";
+        autoHint.textContent = "这是停止自动任务，不是断开账户连接。";
       } else {
         btnAuto.textContent = "开始自动关注";
         btnAuto.className = "btn primary btn-lg";
@@ -176,7 +220,7 @@ async function refresh() {
       renderUserList(successListEl, status.successList || [], "ok");
       renderUserList(failListEl, status.failList || [], "fail");
     } else {
-      // Not connected — guide login / connect
+      // Not connected — always make that obvious
       show(accountCard, false);
       show(syncCard, false);
       show(controlsCard, false);
@@ -184,44 +228,48 @@ async function refresh() {
       show(resultsCard, false);
 
       if (liveIn && liveUser?.username) {
-        setDot("warning");
-        gateStatus.textContent = "已登录，待连接";
+        setConnBadge("disconnected", "未连接");
+        gateStatus.textContent = "状态：未连接（X 已登录）";
         gateHint.textContent =
-          `检测到 @${liveUser.username}` +
+          `已检测到 @${liveUser.username}` +
           (liveUser.name ? `（${liveUser.name}）` : "") +
-          "，点击连接以绑定此账户。";
+          "。点击下方「连接账户」完成绑定。";
         show(btnLogin, false);
         show(btnConnect, true);
         show(btnOpenX, false);
       } else if (status.hasXTab && liveIn === false) {
-        setDot("offline");
-        gateStatus.textContent = "未登录 X 账户";
-        gateHint.textContent = "请先登录 X，登录成功后回到此弹窗点击连接。";
+        setConnBadge("need-login", "未连接 · 未登录");
+        gateStatus.textContent = "状态：未连接";
+        gateHint.textContent = "X 标签页未登录。请先登录，再回来点「连接账户」。";
         show(btnLogin, true);
-        show(btnConnect, false);
+        show(btnConnect, true); // still allow try-connect with clear error
         show(btnOpenX, false);
       } else if (!status.hasXTab) {
-        setDot("offline");
-        gateStatus.textContent = "未打开 X.com";
-        gateHint.textContent = "打开 X 并登录后，即可连接账户。";
+        setConnBadge("disconnected", "未连接");
+        gateStatus.textContent = "状态：未连接（未打开 X）";
+        gateHint.textContent = "请先打开并登录 X.com，再点击「连接账户」。";
         show(btnLogin, true);
-        show(btnConnect, false);
+        show(btnConnect, true);
         show(btnOpenX, true);
       } else {
-        setDot("warning");
-        gateStatus.textContent = "检测登录状态中…";
-        gateHint.textContent = "若已登录，请稍等或点击连接重试。";
+        setConnBadge("checking", "检测中…");
+        gateStatus.textContent = "状态：检测登录中";
+        gateHint.textContent = "若你已登录 X，可直接点「连接账户」；失败会显示原因。";
         show(btnLogin, true);
         show(btnConnect, true);
         show(btnOpenX, false);
       }
+
+      // Surface previous connect failure if any
+      setError(lastConnectError || "");
     }
   } catch (e) {
-    setDot("offline");
-    gateStatus.textContent = "扩展通信失败";
-    gateHint.textContent = e.message || String(e);
+    setConnBadge("need-login", "未连接");
+    gateStatus.textContent = "状态：扩展通信失败";
+    gateHint.textContent = "请重新加载扩展后重试。";
+    setError(e.message || String(e));
     show(btnLogin, false);
-    show(btnConnect, false);
+    show(btnConnect, true);
     show(btnOpenX, true);
   }
 }
@@ -245,27 +293,50 @@ btnOpenX.addEventListener("click", async () => {
 
 btnConnect.addEventListener("click", async () => {
   btnConnect.disabled = true;
+  const prevLabel = btnConnect.textContent;
   btnConnect.textContent = "连接中…";
+  setConnBadge("checking", "连接中…");
+  setError("");
   try {
     const r = await send("CONNECT");
     if (!r?.ok) {
-      gateHint.textContent = r?.error || "连接失败";
-      if (r?.needLogin) {
-        show(btnLogin, true);
-      }
+      lastConnectError = r?.error || "连接失败（未知原因）";
+      setConnBadge("disconnected", "未连接");
+      gateStatus.textContent = "状态：未连接";
+      gateHint.textContent = "连接未成功，请根据下方原因处理后重试。";
+      setError(lastConnectError);
+      if (r?.needLogin) show(btnLogin, true);
+      show(btnConnect, true);
+    } else {
+      lastConnectError = "";
+      setError("");
     }
   } catch (e) {
-    gateHint.textContent = e.message || "连接失败";
+    lastConnectError = e.message || "连接失败";
+    setConnBadge("disconnected", "未连接");
+    gateStatus.textContent = "状态：未连接";
+    setError(lastConnectError);
   } finally {
     btnConnect.disabled = false;
-    btnConnect.textContent = "连接";
+    btnConnect.textContent = prevLabel || "连接账户";
     await refresh();
   }
 });
 
 btnDisconnect.addEventListener("click", async () => {
+  const ok = confirm(
+    "确定解除绑定？\n\n" +
+      "• 会断开插件与账户的连接，并停止自动关注\n" +
+      "• 不会退出你在 X 网站上的登录\n" +
+      "• 本地已同步的数据仍会保留",
+  );
+  if (!ok) return;
   await send("STOP_AUTO_FOLLOW");
   await send("DISCONNECT");
+  lastConnectError = "";
+  setConnBadge("disconnected", "未连接");
+  gateStatus.textContent = "状态：未连接";
+  gateHint.textContent = "已解除绑定。需要时再次点击「连接账户」。";
   await refresh();
 });
 

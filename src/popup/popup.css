@@ -75,10 +75,80 @@ h1 {
   margin-bottom: 6px;
 }
 
+/* ── Connection status badge (primary signal) ── */
+.conn-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 12px;
+  border-radius: 20px;
+  font-size: 13px;
+  font-weight: 700;
+  margin-bottom: 8px;
+  letter-spacing: 0.2px;
+}
+
+.conn-badge-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+
+.conn-badge.connected {
+  background: #00ba7c22;
+  color: #00ba7c;
+  border: 1px solid #00ba7c55;
+}
+.conn-badge.connected .conn-badge-dot {
+  background: #00ba7c;
+  box-shadow: 0 0 6px #00ba7c99;
+}
+
+.conn-badge.disconnected {
+  background: #71767b22;
+  color: #a0a5ab;
+  border: 1px solid #71767b44;
+}
+.conn-badge.disconnected .conn-badge-dot {
+  background: #71767b;
+}
+
+.conn-badge.need-login {
+  background: #f4212e18;
+  color: #f4212e;
+  border: 1px solid #f4212e44;
+}
+.conn-badge.need-login .conn-badge-dot {
+  background: #f4212e;
+}
+
+.conn-badge.checking {
+  background: #ffd40018;
+  color: #ffd400;
+  border: 1px solid #ffd40044;
+}
+.conn-badge.checking .conn-badge-dot {
+  background: #ffd400;
+  animation: pulse 1.4s infinite;
+}
+
+.conn-badge.running {
+  background: #1d9bf022;
+  color: #1d9bf0;
+  border: 1px solid #1d9bf055;
+}
+.conn-badge.running .conn-badge-dot {
+  background: #1d9bf0;
+  box-shadow: 0 0 6px #1d9bf099;
+  animation: pulse 1.4s infinite;
+}
+
 .gate-status {
-  font-size: 14px;
+  font-size: 13px;
   font-weight: 600;
-  margin-bottom: 4px;
+  margin-bottom: 2px;
+  color: #e7e9ea;
 }
 
 .hint {
@@ -88,10 +158,45 @@ h1 {
   margin-top: 6px;
 }
 
+.error-box {
+  margin-top: 8px;
+  padding: 8px 10px;
+  border-radius: 8px;
+  background: #f4212e18;
+  border: 1px solid #f4212e44;
+  color: #ff7a84;
+  font-size: 12px;
+  line-height: 1.45;
+}
+
 .account-row {
   display: flex;
   align-items: center;
   gap: 10px;
+}
+
+.account-footer {
+  margin-top: 10px;
+  padding-top: 8px;
+  border-top: 1px solid #ffffff0d;
+  display: flex;
+  justify-content: flex-end;
+}
+
+/* Quiet action — NOT a status indicator */
+.link-btn {
+  background: none;
+  border: none;
+  color: #71767b;
+  font-size: 11px;
+  cursor: pointer;
+  padding: 2px 0;
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+
+.link-btn:hover {
+  color: #a0a5ab;
 }
 
 .avatar {
@@ -201,16 +306,6 @@ h1 {
   padding: 4px 10px;
   font-size: 11px;
   border-radius: 12px;
-}
-
-.btn.danger-outline {
-  border-color: #f4212e55;
-  color: #f4212e;
-}
-
-.btn.danger-outline:hover:not(:disabled) {
-  background: #f4212e22;
-  border-color: #f4212e;
 }
 
 .results-header {
