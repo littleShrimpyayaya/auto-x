@@ -218,9 +218,13 @@ async function refresh() {
       }
 
       const flHint =
-        pf != null ? `本地 <b>${fl}</b>${pf !== fl ? ` / 主页约 ${pf}` : ""}` : `<b>${fl}</b>`;
+        pf != null
+          ? `本地 <b>${fl}</b>${pf !== fl ? ` · 主页 ${pf}${fl !== pf ? "（以本轮列表为准）" : ""}` : ""}`
+          : `<b>${fl}</b>`;
       const fgHint =
-        pg != null ? `本地 <b>${fg}</b>${pg !== fg ? ` / 主页约 ${pg}` : ""}` : `<b>${fg}</b>`;
+        pg != null
+          ? `本地 <b>${fg}</b>${pg !== fg ? ` · 主页 ${pg}${fg !== pg ? "（以本轮列表为准）" : ""}` : ""}`
+          : `<b>${fg}</b>`;
 
       syncStatus.innerHTML =
         `粉丝 ${flHint} · 关注 ${fgHint}` +
@@ -245,20 +249,21 @@ async function refresh() {
           cur +
           `待回关 ${nonMutual} 人。` +
           (status.graphSyncBusy || autoRunning
-            ? "图谱同步与回关并行：同步不中断回关；回关只更新「已关注」，不改粉丝名单。"
-            : "停止只结束回关队列，不影响图谱同步。");
+            ? "图谱同步中会暂缓回关（要占用 X 标签点关注按钮）；同步结束后自动继续。"
+            : "回关方式：打开对方主页并点击「关注」按钮。停止只结束回关，不影响同步。");
       } else {
         btnAuto.textContent = "开始自动关注";
         btnAuto.className = "btn primary btn-lg";
         if (autoRunning || status.graphSyncBusy) {
           autoHint.textContent =
-            "图谱同步进行中也可直接开始回关：两者并行，互不中断；回关不会改动粉丝/关注同步名单数量逻辑。";
+            "图谱同步进行中：回关会等同步结束再点主页关注按钮（避免抢同一标签页）。";
         } else if (fl === 0) {
           autoHint.textContent = "粉丝名单尚未同步完成，请稍候自动同步，或点「重新同步」。";
         } else if (nonMutual === 0) {
           autoHint.textContent = "当前没有待回关用户（可能都已互关）。可「重新同步」刷新名单。";
         } else {
-          autoHint.textContent = `待回关 ${nonMutual} 人。关闭面板不会停止；与图谱同步互不干扰。`;
+          autoHint.textContent =
+            `待回关 ${nonMutual} 人。将打开对方主页并点击关注按钮（间隔 ${settings.minIntervalSec || 5}s）。`;
         }
       }
 

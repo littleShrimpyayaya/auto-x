@@ -233,6 +233,9 @@
     try {
       const instructions = getTimelineInstructions(json);
 
+      // ONLY extract from timeline instructions / modules — not the whole payload.
+      // Deep-walking json.data pulls the profile owner + unrelated users → count inflation
+      // (e.g. following 540 vs real 536).
       for (const instr of instructions) {
         const entries = instr.entries ?? (instr.entry ? [instr.entry] : []);
         for (const entry of entries) processEntry(entry);
@@ -248,8 +251,15 @@
         }
       }
 
-      // Deep-walk entire payload — never leave a rest_id behind
-      walk(json.data, 0);
+      // If instructions path found nothing, walk timeline node only (not user root)
+      if (!users.length) {
+        const timeline =
+          json.data?.user?.result?.timeline?.timeline ??
+          json.data?.user?.result?.timeline_v2?.timeline ??
+          json.data?.user?.result?.timeline_response?.timeline ??
+          null;
+        if (timeline) walk(timeline, 0);
+      }
     } catch (e) {
       console.warn("[auto-x] user extraction error:", e);
     }

@@ -8,7 +8,7 @@ if (typeof importScripts === "function") {
 
 const api = self.autoxBrowser || (typeof browser !== "undefined" ? browser : chrome);
 const store = self.autoxStore;
-const VERSION = "0.3.10";
+const VERSION = "0.3.13";
 const PANEL_PATH = "src/panel/panel.html";
 
 let connectedTabId = null;
@@ -95,14 +95,81 @@ function recountSync(stream) {
   return n;
 }
 
+/**
+ * After a full list walk: count = only users seen this run.
+ * Fixes "following 540 vs 主页 536" (stale + false positives) and
+ * keeps followers aligned with what the list actually returned.
+ */
+function reconcileStreamAfterWalk(stream, sessionSeen) {
+  if (!data || !stream) return 0;
+  const seen = sessionSeen instanceof Set ? sessionSeen : new Set(sessionSeen || []);
+  if (seen.size === 0) {
+    console.warn("[auto-x] reconcile skipped — empty sessionSeen for", stream);
+    return recountSync(stream);
+  }
+
+  const prev = stream === "followers" ? data.followers : data.following;
+  const next = {};
+  let kept = 0;
+  for (const id of seen) {
+    const sid = String(id);
+    if (prev[sid]) {
+      next[sid] = prev[sid];
+      kept++;
+    }
+  }
+  // Preserve very recent auto-follows not yet on the following list API
+  if (stream === "following") {
+    const cutoff = Date.now() - 30 * 60 * 1000;
+    for (const [id, u] of Object.entries(prev || {})) {
+      if (next[id]) continue;
+      if (!u?._fromAutoFollow || !u._followedAt) continue;
+      const t = new Date(u._followedAt).getTime();
+      if (t >= cutoff) next[id] = u;
+    }
+  }
+
+  const before = Object.keys(prev || {}).length;
+  if (stream === "followers") data.followers = next;
+  else data.following = next;
+  const after = recountSync(stream);
+  console.log(
+    "[auto-x] reconcile",
+    stream,
+    "before=",
+    before,
+    "sessionSeen=",
+    seen.size,
+    "after=",
+    after,
+    "dropped=",
+    before - after,
+  );
+  return after;
+}
+
+function trackSessionSeen(stream, userIds) {
+  if (!pendingWalk || pendingWalk.stream !== stream) return;
+  if (!pendingWalk.sessionSeen) pendingWalk.sessionSeen = new Set();
+  for (const id of userIds || []) {
+    if (id != null) pendingWalk.sessionSeen.add(String(id));
+  }
+}
+
 function ingestUsers(users, stream) {
   if (!users?.length) return 0;
   let count = 0;
   const target = stream === "followers" ? data.followers : data.following;
-  const selfId = data.sessionUser?.id ? String(data.sessionUser.id) : null;
+  const selfId =
+    (data.sessionUser?.id && String(data.sessionUser.id)) ||
+    (data.syncStatus?.profile?.id && String(data.syncStatus.profile.id)) ||
+    null;
   const selfName = data.sessionUser?.username
     ? String(data.sessionUser.username).toLowerCase()
-    : null;
+    : data.syncStatus?.profile?.username
+      ? String(data.syncStatus.profile.username).toLowerCase()
+      : null;
+  const acceptedIds = [];
   for (const u of users) {
     if (!u?.id) continue;
     const id = String(u.id);
@@ -130,11 +197,20 @@ function ingestUsers(users, stream) {
       username,
       unavailable,
       _seenAt: new Date().toISOString(),
+      _seenInWalk: true,
     };
+    acceptedIds.push(id);
     count++;
   }
+  trackSessionSeen(stream, acceptedIds);
   data.syncStatus[stream].lastSync = new Date().toISOString();
-  recountSync(stream);
+  // During walk show session progress when available (more honest than stale total)
+  if (pendingWalk?.stream === stream && pendingWalk.sessionSeen) {
+    data.syncStatus[stream].count = pendingWalk.sessionSeen.size;
+    data.syncStatus[stream].walkProgress = pendingWalk.sessionSeen.size;
+  } else {
+    recountSync(stream);
+  }
   persistData();
   return count;
 }
@@ -244,15 +320,95 @@ async function ensureConnectedTab() {
   return null;
 }
 
+function sleep(ms) {
+  return new Promise((r) => setTimeout(r, ms));
+}
+
+/** Wait until tab URL looks like the target profile and status is complete */
+function waitForProfileTab(tabId, username, timeoutMs) {
+  const uname = String(username || "").toLowerCase();
+  const deadline = Date.now() + (timeoutMs || 25000);
+  return new Promise((resolve) => {
+    let done = false;
+    const finish = (ok) => {
+      if (done) return;
+      done = true;
+      try {
+        api.tabs.onUpdated.removeListener(onUpd);
+      } catch {
+        /* ignore */
+      }
+      resolve(ok);
+    };
+    const matches = (url) => {
+      if (!url || !uname) return false;
+      try {
+        const path = new URL(url).pathname || "";
+        return new RegExp("^/" + uname + "(?:/|$|\\?)", "i").test(path);
+      } catch {
+        return false;
+      }
+    };
+    const onUpd = (id, info, tab) => {
+      if (id !== tabId) return;
+      const url = info.url || tab?.url;
+      if (matches(url) && (info.status === "complete" || tab?.status === "complete")) {
+        finish(true);
+      }
+    };
+    api.tabs.onUpdated.addListener(onUpd);
+    // Already there?
+    api.tabs
+      .get(tabId)
+      .then((t) => {
+        if (matches(t?.url) && t.status === "complete") finish(true);
+      })
+      .catch(() => {});
+    const tick = () => {
+      if (done) return;
+      if (Date.now() >= deadline) {
+        finish(false);
+        return;
+      }
+      api.tabs
+        .get(tabId)
+        .then((t) => {
+          if (matches(t?.url) && t.status === "complete") finish(true);
+          else setTimeout(tick, 400);
+        })
+        .catch(() => setTimeout(tick, 400));
+    };
+    setTimeout(tick, 500);
+  });
+}
+
+/**
+ * Auto-follow via real UI click on profile Follow button (avoids CSRF/API 403).
+ * Uses the X tab: open profile → click Follow.
+ */
 async function executeAction(userId, username, name) {
   if (activeAction) return { deferred: true, reason: "busy" };
   if (!data?.autoFollowRunning) return { deferred: true, reason: "stopped" };
 
-  // List sync is navigating the tab — defer follow, do NOT stop auto-follow
-  if (isSyncNavigating()) {
-    console.log("[auto-x] defer follow while list sync navigates (auto-follow stays on)");
-    scheduleProcessQueue(2800);
-    return { deferred: true, reason: "sync-nav" };
+  // Click-follow needs the tab — defer while list sync owns it (don't break sync)
+  if (isGraphSyncBusy() || isSyncNavigating()) {
+    console.log("[auto-x] defer click-follow while graph sync uses the tab");
+    scheduleProcessQueue(5000);
+    return { deferred: true, reason: "sync-busy" };
+  }
+
+  const uname = username && !String(username).startsWith("id:") ? String(username) : null;
+  if (!uname) {
+    console.warn("[auto-x] skip follow — no username for", userId);
+    store.recordFollowResult(data, {
+      ok: false,
+      username: username || String(userId),
+      name,
+      error: "无用户名，无法打开主页点击关注",
+    });
+    await persistData();
+    scheduleProcessQueue(1000);
+    return { ok: false, error: "no-username" };
   }
 
   const tabId = await ensureConnectedTab();
@@ -277,65 +433,92 @@ async function executeAction(userId, username, name) {
     return { deferred: true, reason: "daily-limit" };
   }
 
-  activeAction = { userId, username, name: name || null, startedAt: Date.now() };
+  activeAction = { userId, username: uname, name: name || null, startedAt: Date.now() };
   clearActiveActionWatch();
-  // If page never responds: during graph sync soft-retry; otherwise record timeout
   activeActionTimer = setTimeout(async () => {
     if (!activeAction || activeAction.userId !== userId) return;
-    console.warn("[auto-x] follow timeout @" + username);
-    if (isGraphSyncBusy()) {
-      softReleaseFollow(userId, "timeout-during-sync");
-      return;
-    }
+    console.warn("[auto-x] click-follow timeout @" + uname);
     activeAction = null;
     data.pendingActions = (data.pendingActions || []).filter((a) => a.userId !== userId);
     store.recordFollowResult(data, {
       ok: false,
-      username,
+      username: uname,
       name,
-      error: "超时：页面未返回关注结果",
+      error: "超时：未能完成主页点击关注",
     });
     await persistData();
     if (data.autoFollowRunning) scheduleProcessQueue(2000);
-  }, 45000);
+  }, 60000);
 
+  const profileUrl = "https://x.com/" + uname;
   try {
-    await api.tabs.sendMessage(tabId, {
-      type: "EXECUTE_ACTION",
-      actionId: "follow-" + userId,
-      actionType: "follow",
-      targetUserId: userId,
-    });
-    console.log(
-      "[auto-x] follow dispatched → @" +
-        username +
-        " (" +
-        userId +
-        ")" +
-        (isGraphSyncBusy() ? " [parallel-with-sync]" : ""),
-    );
-    return { ok: true };
+    console.log("[auto-x] open profile for click-follow → @" + uname);
+    await api.tabs.update(tabId, { url: profileUrl, active: true });
   } catch (e) {
-    console.error("[auto-x] execute error:", e);
-    // Tab reloading for list sync — keep auto-follow alive, soft retry only
-    if (isGraphSyncBusy() || /receiving end|context invalidated|message port/i.test(e.message || "")) {
-      softReleaseFollow(userId, "tab-unreachable-soft");
-      return { deferred: true, reason: "tab-soft", error: e.message };
-    }
-    clearActiveActionWatch();
-    data.pendingActions = data.pendingActions.filter((a) => a.userId !== userId);
+    softReleaseFollow(userId, "nav-failed");
     store.recordFollowResult(data, {
       ok: false,
-      username,
+      username: uname,
+      name,
+      error: "无法打开主页: " + (e.message || e),
+    });
+    await persistData();
+    activeAction = null;
+    if (data.autoFollowRunning) scheduleProcessQueue(3000);
+    return { ok: false, error: e.message };
+  }
+
+  const loaded = await waitForProfileTab(tabId, uname, 25000);
+  // SPA needs a moment after complete
+  await sleep(loaded ? 1800 : 3500);
+
+  try {
+    const resp = await api.tabs.sendMessage(tabId, {
+      type: "CLICK_FOLLOW",
+      actionId: "follow-" + userId,
+      targetUserId: String(userId),
+      username: uname,
+    });
+    if (resp && resp.ok === false && resp.error) {
+      // content may also send ACTION_COMPLETED; if only sync response, handle here
+      if (!activeAction) return { ok: false };
+    }
+    console.log("[auto-x] click-follow requested → @" + uname + " (" + userId + ")");
+    return { ok: true, method: "click" };
+  } catch (e) {
+    console.error("[auto-x] click-follow message error:", e);
+    if (/receiving end|context invalidated|message port/i.test(e.message || "")) {
+      // retry once after short wait (content just injected)
+      await sleep(2000);
+      try {
+        await api.tabs.sendMessage(tabId, {
+          type: "CLICK_FOLLOW",
+          actionId: "follow-" + userId,
+          targetUserId: String(userId),
+          username: uname,
+        });
+        console.log("[auto-x] click-follow retry ok → @" + uname);
+        return { ok: true, method: "click" };
+      } catch (e2) {
+        e = e2;
+      }
+    }
+    clearActiveActionWatch();
+    data.pendingActions = (data.pendingActions || []).filter(
+      (a) => String(a.userId) !== String(userId),
+    );
+    store.recordFollowResult(data, {
+      ok: false,
+      username: uname,
       name,
       error: "标签页不可达: " + (e.message || String(e)),
     });
     store.addToLog(data, {
       type: "follow",
-      targetUser: "@" + username,
+      targetUser: "@" + uname,
       result: "fail: tab unreachable",
     });
-    console.log("[auto-x] ✗ follow @" + username + " — tab unreachable");
+    console.log("[auto-x] ✗ follow @" + uname + " — tab unreachable");
     await persistData();
     activeAction = null;
     if (data.autoFollowRunning) scheduleProcessQueue(4000);
@@ -932,6 +1115,10 @@ async function startSync(stream, opts = {}) {
   if (!username) return { ok: false, error: "无法识别用户名，请重新连接" };
 
   const targetUrl = "https://x.com/" + username + "/" + stream;
+  const expectedCount =
+    stream === "followers"
+      ? data.syncStatus?.profile?.followersCount
+      : data.syncStatus?.profile?.followingCount;
   pendingWalk = {
     stream,
     tabId,
@@ -940,6 +1127,8 @@ async function startSync(stream, opts = {}) {
     navAt: Date.now(),
     dispatchOk: false,
     auto: !!opts.auto,
+    sessionSeen: new Set(),
+    expectedCount: expectedCount != null ? Number(expectedCount) : null,
   };
   await api.storage.local.set({
     pendingWalk: {
@@ -950,6 +1139,7 @@ async function startSync(stream, opts = {}) {
       at: Date.now(),
       navAt: Date.now(),
       auto: !!opts.auto,
+      expectedCount: pendingWalk.expectedCount,
     },
   });
 
@@ -999,9 +1189,15 @@ async function tryDispatchWalk(tabId, tabUrlFromHeartbeat) {
   }
 
   try {
+    const expected =
+      pendingWalk.expectedCount ??
+      (pendingWalk.stream === "followers"
+        ? data?.syncStatus?.profile?.followersCount
+        : data?.syncStatus?.profile?.followingCount);
     const resp = await api.tabs.sendMessage(tabId, {
       type: "START_WALK",
       stream: pendingWalk.stream,
+      expectedCount: expected != null ? Number(expected) : null,
     });
     if (resp?.wrongPage) {
       console.warn("[auto-x] walk refused wrong page:", resp.path);
@@ -1010,7 +1206,13 @@ async function tryDispatchWalk(tabId, tabUrlFromHeartbeat) {
     if (resp?.ok) {
       pendingWalk.dispatchOk = true;
       if (!resp.already) {
-        console.log("[auto-x] walk dispatched:", pendingWalk.stream, "on", url);
+        console.log(
+          "[auto-x] walk dispatched:",
+          pendingWalk.stream,
+          "on",
+          url,
+          expected != null ? "expected≈" + expected : "",
+        );
       }
       return true;
     }
@@ -1189,19 +1391,41 @@ api.runtime.onMessage.addListener((msg, sender, sendResponse) => {
         case "INGEST_BATCH": {
           await loadData();
           if (msg.users?.length) {
-            const n = ingestUsers(msg.users, msg.walk?.stream || "followers");
+            const stream = msg.walk?.stream || "followers";
+            const n = ingestUsers(msg.users, stream);
+            const progress =
+              pendingWalk?.stream === stream && pendingWalk.sessionSeen
+                ? pendingWalk.sessionSeen.size
+                : stream === "following"
+                  ? Object.keys(data.following).length
+                  : Object.keys(data.followers).length;
             console.log(
               "[auto-x] ingested",
               n,
               "users from",
-              msg.walk?.stream,
-              "| total",
-              msg.walk?.stream === "following"
-                ? Object.keys(data.following).length
-                : Object.keys(data.followers).length,
+              stream,
+              "| walkSeen=",
+              progress,
             );
           }
-          if (msg.profileMeta) applyProfileMeta(msg.profileMeta);
+          if (msg.profileMeta) {
+            applyProfileMeta(msg.profileMeta);
+            // Refresh expected count on active walk
+            if (pendingWalk && msg.profileMeta) {
+              if (
+                pendingWalk.stream === "followers" &&
+                msg.profileMeta.followers_count != null
+              ) {
+                pendingWalk.expectedCount = Number(msg.profileMeta.followers_count);
+              }
+              if (
+                pendingWalk.stream === "following" &&
+                msg.profileMeta.following_count != null
+              ) {
+                pendingWalk.expectedCount = Number(msg.profileMeta.following_count);
+              }
+            }
+          }
           sendResponse({ ok: true });
           if (msg.walk?.stream === "followers" && data?.autoFollowRunning) {
             setTimeout(() => processQueue(), 3000);
@@ -1217,12 +1441,23 @@ api.runtime.onMessage.addListener((msg, sender, sendResponse) => {
         case "WALK_ENDED": {
           await loadData();
           const endedStream = msg.walk?.stream || null;
+          const sessionSeen =
+            pendingWalk && (!endedStream || endedStream === pendingWalk.stream)
+              ? pendingWalk.sessionSeen
+              : null;
           if (endedStream) {
             if (!data.syncStatus[endedStream]) {
               data.syncStatus[endedStream] = { lastSync: null, count: 0 };
             }
             data.syncStatus[endedStream].lastSync = new Date().toISOString();
-            recountSync(endedStream);
+            // Full-list reconcile: drop stale / false-positive ids not in this walk
+            if (sessionSeen && sessionSeen.size > 0) {
+              reconcileStreamAfterWalk(endedStream, sessionSeen);
+            } else if (msg.seenIds?.length) {
+              reconcileStreamAfterWalk(endedStream, new Set(msg.seenIds.map(String)));
+            } else {
+              recountSync(endedStream);
+            }
             await persistData();
           }
           if (pendingWalk && (!endedStream || endedStream === pendingWalk.stream)) {
@@ -1234,8 +1469,12 @@ api.runtime.onMessage.addListener((msg, sender, sendResponse) => {
             "[auto-x] WALK_ENDED",
             endedStream,
             msg.reason || "",
-            "seen=",
+            "contentSeen=",
             msg.seenCount ?? "?",
+            "final=",
+            endedStream === "following"
+              ? Object.keys(data.following || {}).length
+              : Object.keys(data.followers || {}).length,
             "| autoFollow=",
             !!data.autoFollowRunning,
           );

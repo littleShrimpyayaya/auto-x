@@ -260,8 +260,12 @@
   }
 
   /**
-   * DOM backup: scrape visible UserCells so virtualized-list gaps still get usernames.
-   * IDs often appear in avatar URLs or data attributes when GraphQL skipped a row.
+   * Count people on the CURRENT list page by each user row (UserCell).
+   *
+   * - /followers  → 关注者 = 粉丝（关注我的人）→ 每人一行/一个关注按钮
+   * - /following  → 正在关注 = 我关注的人 → 每人一行/一个关注状态按钮
+   *
+   * Primary key: data-testid="{userId}-follow|unfollow" on that row's button.
    */
   function scrapeVisibleListUsers() {
     const out = [];
@@ -273,6 +277,23 @@
         let id = null;
         let name = null;
 
+        // 1) Button on this row → official user id (most reliable)
+        const followBtn = cell.querySelector(
+          '[data-testid$="-follow"], [data-testid$="-unfollow"]',
+        );
+        if (followBtn) {
+          const tid = followBtn.getAttribute("data-testid") || "";
+          const bm = tid.match(/^(\d+)-(follow|unfollow)$/i);
+          if (bm) id = bm[1];
+        }
+        if (!id) {
+          const anyId =
+            cell.querySelector("[data-user-id]")?.getAttribute("data-user-id") ||
+            cell.getAttribute("data-user-id");
+          if (anyId) id = String(anyId);
+        }
+
+        // 2) @handle from profile link in the cell
         const links = cell.querySelectorAll('a[href^="/"]');
         for (const a of links) {
           const href = a.getAttribute("href") || "";
@@ -298,39 +319,27 @@
           break;
         }
 
-        const img =
-          cell.querySelector('img[src*="profile_images"]') ||
-          cell.querySelector('img[src*="twimg"]');
-        if (img?.src) {
-          // .../profile_images/1234567890/xxx.jpg  — not always user id
-          const idm = img.src.match(/\/profile_images\/(\d+)\//);
-          // Sometimes srcset / data-user-id
-        }
-        const anyId =
-          cell.querySelector("[data-user-id]")?.getAttribute("data-user-id") ||
-          cell.getAttribute("data-user-id");
-        if (anyId) id = String(anyId);
-
-        // name from first strong/span text
         const nameEl =
           cell.querySelector('[dir="ltr"] > span > span') ||
           cell.querySelector("span span");
         if (nameEl?.textContent) name = nameEl.textContent.trim() || null;
 
-        if (!username && !id) continue;
-        // Without GraphQL id we cannot key storage reliably — skip id-less for now
-        // unless we already have this username in buffer from graphql
-        if (!id) continue;
-        if (seen.has(id)) continue;
-        seen.add(id);
+        // Need at least id or username to count this row as one person
+        if (!id && !username) continue;
+        // Prefer id as key; fall back to username-stable key so we still count the row
+        const key = id || "u:" + String(username).toLowerCase();
+        if (seen.has(key)) continue;
+        seen.add(key);
+
         out.push({
-          id,
-          username: username || "id:" + id,
+          id: id || key,
+          username: username || (id ? "id:" + id : key),
           name,
           verified: false,
           protected: false,
           unavailable: false,
           _fromDom: true,
+          _listRow: true,
         });
       }
     } catch {
@@ -362,6 +371,21 @@
 
       if (msg.profileMeta) {
         sendToBg({ type: "PROFILE_META", meta: msg.profileMeta });
+        // Update walk expected count from list payload owner stats
+        if (activeWalk) {
+          if (
+            activeWalk.stream === "followers" &&
+            msg.profileMeta.followers_count != null
+          ) {
+            activeWalk.expectedCount = Number(msg.profileMeta.followers_count);
+          }
+          if (
+            activeWalk.stream === "following" &&
+            msg.profileMeta.following_count != null
+          ) {
+            activeWalk.expectedCount = Number(msg.profileMeta.following_count);
+          }
+        }
       }
 
       const pathStream = currentPathStream();
@@ -504,13 +528,15 @@
     }
     flushBatch();
     const stream = activeWalk?.stream || null;
-    const seen = activeWalk?.seenIds?.size || 0;
+    const seenIds = activeWalk?.seenIds ? [...activeWalk.seenIds] : [];
+    const seen = seenIds.length;
     if (notifyBg && stream) {
       sendToBg({
         type: "WALK_ENDED",
         walk: { stream },
         reason: reason || "stop",
         seenCount: seen,
+        seenIds,
       });
     }
     activeWalk = null;
@@ -571,9 +597,9 @@
       return;
     }
 
-    // DOM backup every few scrolls — catch rows GraphQL extraction missed
+    // Every scroll: count visible list rows (UserCell / follow buttons) — source of truth for "how many people on this page"
     activeWalk.scrollTicks = (activeWalk.scrollTicks || 0) + 1;
-    if (activeWalk.scrollTicks % 2 === 0) {
+    {
       const domUsers = scrapeVisibleListUsers();
       if (domUsers.length) {
         const before = activeWalk.seenIds?.size || 0;
@@ -623,16 +649,24 @@
     const idleMs = Date.now() - (activeWalk.lastUsersAt || activeWalk.startedAt || Date.now());
     const gotUsers = !!activeWalk.gotUsers;
     const noNew = activeWalk.consecutiveNoNew || 0;
-    // Don't stop too early: need solid idle + stable bottom after we already got users
-    const minWalkMs = 8000;
+    const minWalkMs = 12000;
     const walkedLongEnough = Date.now() - (activeWalk.startedAt || 0) > minWalkMs;
+    const seenN = activeWalk.seenIds?.size || 0;
+    const expected = activeWalk.expectedCount > 0 ? activeWalk.expectedCount : null;
+    // If we know profile count, don't soft-stop while clearly short (e.g. 297/330)
+    const shortOfExpected =
+      expected != null && seenN > 0 && seenN < Math.floor(expected * 0.97);
+    const nearExpected =
+      expected == null || seenN >= Math.floor(expected * 0.97);
 
+    // Prefer API noMore; soft end only when near expected or expected unknown + long idle
     if (
       gotUsers &&
       walkedLongEnough &&
       nearBottom &&
-      activeWalk.stuckScrolls >= 4 &&
-      idleMs > 9000
+      activeWalk.stuckScrolls >= 6 &&
+      idleMs > 14000 &&
+      nearExpected
     ) {
       const extra = scrapeVisibleListUsers();
       if (extra.length) {
@@ -642,11 +676,39 @@
       endWalkNatural("scroll-bottom-stable");
       return;
     }
-    if (gotUsers && walkedLongEnough && activeWalk.stuckScrolls >= 5 && idleMs > 12000) {
+    if (
+      gotUsers &&
+      walkedLongEnough &&
+      activeWalk.stuckScrolls >= 8 &&
+      idleMs > 20000 &&
+      nearExpected
+    ) {
       endWalkNatural("scroll-stable");
       return;
     }
-    if (gotUsers && walkedLongEnough && noNew >= 4 && activeWalk.stuckScrolls >= 3 && idleMs > 10000) {
+    // Still short of profile count: keep trying harder (don't stop at 297/330)
+    if (gotUsers && shortOfExpected && activeWalk.stuckScrolls >= 3) {
+      // nudge harder: jump further / small up-down to re-trigger virtual list
+      try {
+        window.scrollBy(0, -200);
+        setTimeout(() => {
+          window.scrollTo(0, document.documentElement.scrollHeight || 0);
+        }, 200);
+      } catch {
+        /* ignore */
+      }
+      activeWalk.stuckScrolls = Math.max(0, (activeWalk.stuckScrolls || 0) - 2);
+      scrollTimer = setTimeout(autoScroll, 2000);
+      return;
+    }
+    if (
+      gotUsers &&
+      walkedLongEnough &&
+      noNew >= 6 &&
+      activeWalk.stuckScrolls >= 5 &&
+      idleMs > 16000 &&
+      nearExpected
+    ) {
       endWalkNatural("no-new-users");
       return;
     }
@@ -654,10 +716,22 @@
       gotUsers &&
       walkedLongEnough &&
       looksLikeListEnd() &&
-      activeWalk.stuckScrolls >= 2 &&
-      idleMs > 6000
+      activeWalk.stuckScrolls >= 3 &&
+      idleMs > 10000 &&
+      nearExpected
     ) {
       endWalkNatural("dom-end-marker");
+      return;
+    }
+    // Absolute give-up if stuck forever even when short (list won't load more)
+    if (gotUsers && shortOfExpected && idleMs > 45000 && activeWalk.stuckScrolls >= 12) {
+      console.warn(
+        "[auto-x] giving up short of expected",
+        seenN,
+        "/",
+        expected,
+      );
+      endWalkNatural("short-stuck-giveup");
       return;
     }
     // Empty list edge case
@@ -668,11 +742,11 @@
 
     window.scrollTo(0, h);
     try {
-      window.scrollBy(0, 350);
+      window.scrollBy(0, 400);
     } catch {
       /* ignore */
     }
-    scrollTimer = setTimeout(autoScroll, 2400);
+    scrollTimer = setTimeout(autoScroll, 2200);
   }
 
   function startAutoScroll() {
@@ -681,7 +755,7 @@
     scrollTimer = setTimeout(autoScroll, 2000);
   }
 
-  function beginWalk(stream) {
+  function beginWalk(stream, expectedCount) {
     activeWalk = {
       stream,
       idlePages: 0,
@@ -694,10 +768,20 @@
       consecutiveNoNew: 0,
       seenIds: new Set(),
       endTimer: null,
+      expectedCount:
+        expectedCount != null && Number(expectedCount) > 0
+          ? Number(expectedCount)
+          : null,
       // Don't treat REPLAY of a previous "last page" as end-of-list
       ignoreEndUntil: Date.now() + 4500,
     };
-    console.log("[auto-x] walk started:", stream, "path=", location.pathname);
+    console.log(
+      "[auto-x] walk started:",
+      stream,
+      "path=",
+      location.pathname,
+      activeWalk.expectedCount != null ? "expected≈" + activeWalk.expectedCount : "",
+    );
 
     // Replay first-page GraphQL that arrived before walk (or before content was ready)
     window.postMessage(
@@ -755,6 +839,196 @@
   };
   window.addEventListener("popstate", () => setTimeout(onUrlMaybeChanged, 0));
 
+  // ── Click-based follow (real Follow button on profile) ─────────
+
+  function sleepMs(ms) {
+    return new Promise((r) => setTimeout(r, ms));
+  }
+
+  /**
+   * Locate profile Follow / Following / Pending button.
+   * Prefer data-testid="{userId}-follow|unfollow".
+   */
+  function findProfileFollowControl(userId, username) {
+    if (userId) {
+      const followBtn = document.querySelector(
+        `[data-testid="${userId}-follow"]`,
+      );
+      if (followBtn) return { el: followBtn, kind: "follow" };
+      const unf = document.querySelector(`[data-testid="${userId}-unfollow"]`);
+      if (unf) return { el: unf, kind: "following" };
+    }
+
+    const buttons = document.querySelectorAll('[role="button"], button');
+    for (const b of buttons) {
+      const al = (b.getAttribute("aria-label") || "").trim();
+      const text = (b.textContent || "").trim();
+      // Already following
+      if (
+        /^Following\b/i.test(al) ||
+        /^Unfollow\b/i.test(al) ||
+        /^正在关注/.test(al) ||
+        /^取消关注/.test(al) ||
+        text === "Following" ||
+        text === "正在关注"
+      ) {
+        // Prefer header actions, skip small cells if possible
+        return { el: b, kind: "following" };
+      }
+      if (
+        /^Pending\b/i.test(al) ||
+        /^Requested\b/i.test(al) ||
+        /^已请求/.test(al) ||
+        text === "Pending" ||
+        text === "Requested"
+      ) {
+        return { el: b, kind: "pending" };
+      }
+      if (
+        /^Follow @/i.test(al) ||
+        /^关注\s*@/i.test(al) ||
+        (/^Follow$/i.test(al) && username) ||
+        text === "Follow" ||
+        text === "关注"
+      ) {
+        // Avoid "Follow back" noise in sidebars if we can match username
+        if (username && al && !al.toLowerCase().includes(String(username).toLowerCase())) {
+          // still allow plain "Follow" in userActions
+          if (!b.closest('[data-testid="userActions"]') && !b.closest('[data-testid="placementTracking"]')) {
+            continue;
+          }
+        }
+        return { el: b, kind: "follow" };
+      }
+      if (text === "Follow back" || text === "回关" || /^Follow back/i.test(al)) {
+        return { el: b, kind: "follow" };
+      }
+    }
+
+    // placementTracking wrapper (profile primary CTA)
+    const place = document.querySelector(
+      '[data-testid="placementTracking"] [role="button"], [data-testid="userActions"] [role="button"]',
+    );
+    if (place) {
+      const al = (place.getAttribute("aria-label") || place.textContent || "").trim();
+      if (/follow/i.test(al) && !/following|unfollow/i.test(al)) {
+        return { el: place, kind: "follow" };
+      }
+      if (/following|unfollow/i.test(al)) return { el: place, kind: "following" };
+    }
+    return null;
+  }
+
+  async function performClickFollow({ username, userId, actionId }) {
+    const uid = userId != null ? String(userId) : null;
+    const uname = username ? String(username).replace(/^@/, "") : null;
+    console.log("[auto-x] click-follow start", uname, uid);
+
+    // Wait for profile chrome / button
+    let ctrl = null;
+    for (let i = 0; i < 40; i++) {
+      ctrl = findProfileFollowControl(uid, uname);
+      if (ctrl) break;
+      // also wait for primary column
+      if (document.querySelector('[data-testid="primaryColumn"]')) {
+        /* keep waiting for button */
+      }
+      await sleepMs(400);
+    }
+
+    if (!ctrl) {
+      const err = "未找到关注按钮（主页可能未加载完或账号不可用）";
+      console.warn("[auto-x]", err);
+      sendToBg({
+        type: "ACTION_COMPLETED",
+        actionId,
+        ok: false,
+        error: err,
+        method: "click",
+      });
+      return { ok: false, error: err };
+    }
+
+    if (ctrl.kind === "following") {
+      console.log("[auto-x] already following (button state)");
+      sendToBg({
+        type: "ACTION_COMPLETED",
+        actionId,
+        ok: true,
+        following: true,
+        alreadyFollowing: true,
+        verified: true,
+        method: "click",
+      });
+      return { ok: true, alreadyFollowing: true };
+    }
+    if (ctrl.kind === "pending") {
+      sendToBg({
+        type: "ACTION_COMPLETED",
+        actionId,
+        ok: true,
+        following: true,
+        pendingFollow: true,
+        alreadyFollowing: false,
+        verified: true,
+        method: "click",
+      });
+      return { ok: true, pendingFollow: true };
+    }
+
+    // Click Follow
+    try {
+      ctrl.el.scrollIntoView({ block: "center", behavior: "instant" });
+    } catch {
+      /* ignore */
+    }
+    await sleepMs(200);
+    try {
+      ctrl.el.click();
+    } catch (e) {
+      // fallback: dispatch mouse events
+      try {
+        ctrl.el.dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true, view: window }));
+      } catch (e2) {
+        const err = "点击关注按钮失败: " + (e2.message || e.message);
+        sendToBg({ type: "ACTION_COMPLETED", actionId, ok: false, error: err, method: "click" });
+        return { ok: false, error: err };
+      }
+    }
+    console.log("[auto-x] Follow button clicked");
+
+    // Confirm state change
+    for (let i = 0; i < 25; i++) {
+      await sleepMs(350);
+      const after = findProfileFollowControl(uid, uname);
+      if (after && (after.kind === "following" || after.kind === "pending")) {
+        console.log("[auto-x] click-follow confirmed:", after.kind);
+        sendToBg({
+          type: "ACTION_COMPLETED",
+          actionId,
+          ok: true,
+          following: true,
+          pendingFollow: after.kind === "pending",
+          verified: true,
+          method: "click",
+        });
+        return { ok: true, kind: after.kind };
+      }
+    }
+
+    // Some UIs briefly show toast only — treat ambiguous as fail so user sees it
+    const err = "已点击关注，但未确认按钮变为 Following（可能被限流或需验证）";
+    console.warn("[auto-x]", err);
+    sendToBg({
+      type: "ACTION_COMPLETED",
+      actionId,
+      ok: false,
+      error: err,
+      method: "click",
+    });
+    return { ok: false, error: err };
+  }
+
   // ── Messages from background ───────────────────────────────────
 
   api.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
@@ -787,6 +1061,9 @@
 
       // Heartbeat re-dispatch: keep walk, do not reset first-page progress
       if (activeWalk && activeWalk.stream === stream) {
+        if (msg.expectedCount != null && Number(msg.expectedCount) > 0) {
+          activeWalk.expectedCount = Number(msg.expectedCount);
+        }
         if (!scrollTimer) startAutoScroll();
         ensurePathWatch();
         flushBatch();
@@ -798,32 +1075,64 @@
         hardStopWalk("switch-stream", true);
       }
 
-      beginWalk(stream);
+      beginWalk(stream, msg.expectedCount);
       sendResponse({ ok: true });
     } else if (msg.type === "STOP_WALK") {
-      // User/background stop — flush then end (notify bg only if walk was active;
-      // bg often already cleared pendingWalk)
+      // User/background stop — flush then end
       stopAutoScroll();
       stopPathWatch();
       clearBatchTimer();
       flushBatch();
-      const stream = activeWalk?.stream || null;
+      const stoppedStream = activeWalk?.stream || null;
       activeWalk = null;
       if (!currentPathStream()) batchBuffer = [];
-      console.log("[auto-x] STOP_WALK", stream || "(idle)");
-      sendResponse({ ok: true, stream });
+      console.log("[auto-x] STOP_WALK", stoppedStream || "(idle)");
+      sendResponse({ ok: true, stream: stoppedStream });
     } else if (msg.type === "EXECUTE_ACTION") {
-      // API-level follow — never scrolls or clicks DOM
-      window.postMessage(
-        {
-          source: "autox-content",
-          type: msg.actionType === "follow" ? "EXECUTE_FOLLOW" : "EXECUTE_UNFOLLOW",
-          targetUserId: msg.targetUserId,
+      // Legacy path — prefer CLICK_FOLLOW (DOM button)
+      if (msg.actionType === "follow") {
+        performClickFollow({
+          username: msg.username,
+          userId: msg.targetUserId,
           actionId: msg.actionId,
-        },
-        "*",
-      );
-      sendResponse({ ok: true });
+        }).catch((e) => {
+          sendToBg({
+            type: "ACTION_COMPLETED",
+            actionId: msg.actionId,
+            ok: false,
+            error: e.message || String(e),
+          });
+        });
+        sendResponse({ ok: true, method: "click" });
+      } else {
+        window.postMessage(
+          {
+            source: "autox-content",
+            type: "EXECUTE_UNFOLLOW",
+            targetUserId: msg.targetUserId,
+            actionId: msg.actionId,
+          },
+          "*",
+        );
+        sendResponse({ ok: true });
+      }
+    } else if (msg.type === "CLICK_FOLLOW") {
+      performClickFollow({
+        username: msg.username,
+        userId: msg.targetUserId,
+        actionId: msg.actionId,
+      })
+        .then((r) => sendResponse(r || { ok: true }))
+        .catch((e) => {
+          sendToBg({
+            type: "ACTION_COMPLETED",
+            actionId: msg.actionId,
+            ok: false,
+            error: e.message || String(e),
+          });
+          sendResponse({ ok: false, error: e.message });
+        });
+      return true;
     } else if (msg.type === "GET_SESSION") {
       const state = evaluateLogin();
       sendResponse({
