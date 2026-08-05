@@ -4,7 +4,8 @@
   "version": "0.2.1",
   "description": "X (Twitter) 自动回关 — 纯浏览器插件，无需后端",
   "background": {
-    "service_worker": "src/background.js"
+    "service_worker": "src/background.js",
+    "scripts": ["src/lib/store.js", "src/background.js"]
   },
   "action": {
     "default_popup": "src/popup/popup.html",

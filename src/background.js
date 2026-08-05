@@ -1,8 +1,12 @@
 /**
- * Standalone background service worker — decision engine + action executor.
- * Firefox compatible: importScripts + self.autoxStore, no ES modules.
+ * Standalone background — decision engine + action executor.
+ * Works in both Service Worker (Chrome) and Background Page (Firefox).
  */
-importScripts("./lib/store.js");
+if (typeof importScripts === "function") {
+  // Service Worker context: load dependencies
+  importScripts("./lib/store.js");
+}
+// In background page context (Firefox), store.js is loaded via manifest scripts
 
 const store = self.autoxStore;
 const VERSION = "0.2.1";
