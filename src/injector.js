@@ -64,55 +64,114 @@
     const users = [];
     const seen = new Set();
 
-    function pushUser(result) {
-      if (!result || result.__typename === "UserUnavailable") return;
-      // Nested wrapper sometimes seen in newer schemas
-      if (result.result && (result.result.rest_id || result.result.legacy || result.result.core)) {
+    function pushUser(result, meta) {
+      if (!result || typeof result !== "object") return;
+
+      // Nested wrapper (Result / user_results)
+      if (
+        result.result &&
+        typeof result.result === "object" &&
+        (result.result.rest_id ||
+          result.result.legacy ||
+          result.result.core ||
+          result.result.__typename === "User" ||
+          result.result.__typename === "UserUnavailable")
+      ) {
         result = result.result;
       }
-      if (!result || result.__typename === "UserUnavailable") return;
-      const legacy = result.legacy ?? {};
-      const restId = result.rest_id || result.id_str || result.id;
-      const screen =
+
+      const typename = result.__typename || "";
+      const unavailable =
+        typename === "UserUnavailable" ||
+        typename === "UserTombstone" ||
+        !!(meta && meta.unavailable);
+
+      const legacy = result.legacy && typeof result.legacy === "object" ? result.legacy : {};
+      const core = result.core && typeof result.core === "object" ? result.core : {};
+      const restId =
+        result.rest_id != null
+          ? String(result.rest_id)
+          : result.id_str != null
+            ? String(result.id_str)
+            : result.id != null && typeof result.id !== "object"
+              ? String(result.id)
+              : null;
+
+      let screen =
         legacy.screen_name ||
-        result.core?.screen_name ||
-        result.core?.screenName ||
-        result.screen_name;
-      if (!restId || !screen || seen.has(String(restId))) return;
-      // Skip non-user objects that happen to have ids
-      if (result.__typename && result.__typename !== "User" && !legacy.screen_name && !result.core) {
+        core.screen_name ||
+        core.screenName ||
+        result.screen_name ||
+        result.username ||
+        null;
+
+      // Never drop a list entry just because username is missing / account unavailable
+      if (!restId) return;
+      if (seen.has(restId)) {
+        // Upgrade previous stub if we later get a better record
+        const prev = users.find((u) => u.id === restId);
+        if (prev && screen && (!prev.username || prev.username.startsWith("id:"))) {
+          prev.username = screen;
+          prev.name = legacy.name ?? core.name ?? result.name ?? prev.name;
+          if (!unavailable) prev.unavailable = false;
+        }
         return;
       }
-      seen.add(String(restId));
+
+      // Skip pure non-user nodes that only have numeric ids (tweets etc.)
+      if (
+        typename &&
+        typename !== "User" &&
+        typename !== "UserUnavailable" &&
+        typename !== "UserTombstone" &&
+        !legacy.screen_name &&
+        !core.screen_name &&
+        !core.screenName &&
+        !unavailable
+      ) {
+        // Still allow if it looks like a user (has friends_count / followers_count)
+        if (legacy.followers_count == null && legacy.friends_count == null) return;
+      }
+
+      if (!screen) screen = "id:" + restId;
+
+      seen.add(restId);
       users.push({
-        id: String(restId),
+        id: restId,
         username: screen,
-        name: legacy.name ?? result.core?.name ?? result.name ?? null,
+        name: legacy.name ?? core.name ?? result.name ?? null,
         verified: !!(result.is_blue_verified || legacy.verified),
         protected: legacy.protected ?? false,
         followers_count: legacy.followers_count ?? null,
         following_count: legacy.friends_count ?? null,
         tweet_count: legacy.statuses_count ?? null,
+        unavailable: !!unavailable,
       });
     }
 
     function walk(node, depth) {
-      if (!node || depth > 14) return;
+      if (!node || depth > 16) return;
       if (Array.isArray(node)) {
         for (const item of node) walk(item, depth + 1);
         return;
       }
       if (typeof node !== "object") return;
 
-      // User result shapes used by timeline + user modules
       if (
-        (node.__typename === "User" || node.rest_id || node.legacy?.screen_name) &&
-        (node.legacy?.screen_name || node.core?.screen_name || node.core?.screenName)
+        node.__typename === "User" ||
+        node.__typename === "UserUnavailable" ||
+        node.__typename === "UserTombstone" ||
+        ((node.rest_id || node.id_str) &&
+          (node.legacy?.screen_name ||
+            node.core?.screen_name ||
+            node.core?.screenName ||
+            node.__typename === "User"))
       ) {
         pushUser(node);
       }
 
       if (node.user_results?.result) pushUser(node.user_results.result);
+      if (node.user_results && node.user_results.rest_id) pushUser(node.user_results);
       if (node.userResult?.result) pushUser(node.userResult.result);
       if (node.user?.result) pushUser(node.user.result);
       if (node.result && (node.result.rest_id || node.result.legacy || node.result.core)) {
@@ -134,11 +193,11 @@
         entry.itemContent?.user_results?.result ??
         entry.itemContent?.user?.result ??
         entry.content?.content?.userResult?.result ??
-        entry.item?.itemContent?.user_results?.result;
+        entry.item?.itemContent?.user_results?.result ??
+        entry.content?.user_results?.result;
 
       if (result) pushUser(result);
 
-      // TimelineTimelineModule / nested items
       const items =
         entry.content?.items ??
         entry.content?.moduleItems ??
@@ -154,7 +213,6 @@
         else walk(it, 0);
       }
 
-      // Always walk entry to catch schema variants
       walk(entry, 0);
     }
 
@@ -162,11 +220,9 @@
       const instructions = getTimelineInstructions(json);
 
       for (const instr of instructions) {
-        // TimelineAddEntries / ReplaceEntry
         const entries = instr.entries ?? (instr.entry ? [instr.entry] : []);
         for (const entry of entries) processEntry(entry);
 
-        // TimelineAddToModule — subsequent pages often use this (was previously skipped)
         const moduleItems = instr.moduleItems ?? instr.items ?? [];
         for (const it of moduleItems) {
           const r =
@@ -178,7 +234,7 @@
         }
       }
 
-      // Always deep-walk the payload so we never miss users after partial preferred-path hits
+      // Deep-walk entire payload — never leave a rest_id behind
       walk(json.data, 0);
     } catch (e) {
       console.warn("[auto-x] user extraction error:", e);
@@ -442,72 +498,154 @@
 
   // ── Execute actions (follow/unfollow) ──────────────────────────
 
-  async function executeFollow(targetUserId) {
-    const q = seenQueries.get("Follow");
-    if (!q) {
-      throw new Error("Follow mutation hash not learned yet — perform a manual follow first");
-    }
+  function formHeaders() {
+    const h = mutationHeaders();
+    h["Content-Type"] = "application/x-www-form-urlencoded";
+    return h;
+  }
 
-    const body = JSON.stringify({
-      variables: { user_id: String(targetUserId) },
-      queryId: q.hash,
-    });
-
-    const resp = await origFetch.call(window, `https://x.com/i/api/graphql/${q.hash}/Follow`, {
+  /** Stable v1.1 friendships API — works without learning GraphQL hash */
+  async function followRest(targetUserId) {
+    const resp = await origFetch.call(window, "https://x.com/i/api/1.1/friendships/create.json", {
       method: "POST",
-      headers: mutationHeaders(),
-      body,
+      headers: formHeaders(),
+      body:
+        "user_id=" +
+        encodeURIComponent(String(targetUserId)) +
+        "&skip_status=true&include_ext=true",
       credentials: "include",
     });
-
     let json = {};
     try {
       json = await resp.json();
     } catch {
       /* empty */
     }
-
     if (resp.ok) {
-      const following = json?.data?.user?.result?.timeline || json?.data?.follow;
-      // Treat 200 as success; X payloads vary
       return {
         following: true,
-        pendingFollow: json?.data?.follow?.following === false,
+        method: "rest",
+        pendingFollow: false,
+        username: json.screen_name || null,
       };
     }
-    if (resp.status === 403 || resp.status === 404) {
-      // Often already following / protected / gone
-      return { following: true, alreadyFollowing: true };
+    // Already following
+    if (resp.status === 403 && /already|followed/i.test(JSON.stringify(json))) {
+      return { following: true, alreadyFollowing: true, method: "rest" };
     }
-    throw new Error(`Follow failed: ${resp.status} ${JSON.stringify(json).slice(0, 200)}`);
+    if (resp.status === 403 || resp.status === 404) {
+      return { following: true, alreadyFollowing: true, method: "rest" };
+    }
+    throw new Error(
+      "REST Follow failed: " + resp.status + " " + JSON.stringify(json).slice(0, 180),
+    );
   }
 
-  async function executeUnfollow(targetUserId) {
-    const q = seenQueries.get("Unfollow");
-    if (!q) {
-      throw new Error("Unfollow mutation hash not learned yet — perform a manual unfollow first");
-    }
-
-    const body = JSON.stringify({
-      variables: { user_id: String(targetUserId) },
-      queryId: q.hash,
-    });
-
-    const resp = await origFetch.call(window, `https://x.com/i/api/graphql/${q.hash}/Unfollow`, {
+  async function unfollowRest(targetUserId) {
+    const resp = await origFetch.call(window, "https://x.com/i/api/1.1/friendships/destroy.json", {
       method: "POST",
-      headers: mutationHeaders(),
-      body,
+      headers: formHeaders(),
+      body: "user_id=" + encodeURIComponent(String(targetUserId)) + "&skip_status=true",
       credentials: "include",
     });
-
-    if (resp.ok) return { following: false };
+    if (resp.ok) return { following: false, method: "rest" };
     let text = "";
     try {
       text = await resp.text();
     } catch {
       /* empty */
     }
-    throw new Error(`Unfollow failed: ${resp.status} ${text.slice(0, 200)}`);
+    throw new Error("REST Unfollow failed: " + resp.status + " " + text.slice(0, 180));
+  }
+
+  async function followGraphql(targetUserId, hash) {
+    const body = JSON.stringify({
+      variables: { user_id: String(targetUserId) },
+      queryId: hash,
+    });
+    const resp = await origFetch.call(window, `https://x.com/i/api/graphql/${hash}/Follow`, {
+      method: "POST",
+      headers: mutationHeaders(),
+      body,
+      credentials: "include",
+    });
+    let json = {};
+    try {
+      json = await resp.json();
+    } catch {
+      /* empty */
+    }
+    if (resp.ok) {
+      return {
+        following: true,
+        method: "graphql",
+        pendingFollow: json?.data?.follow?.following === false,
+      };
+    }
+    if (resp.status === 403 || resp.status === 404) {
+      return { following: true, alreadyFollowing: true, method: "graphql" };
+    }
+    throw new Error(
+      "GraphQL Follow failed: " + resp.status + " " + JSON.stringify(json).slice(0, 180),
+    );
+  }
+
+  async function executeFollow(targetUserId) {
+    const q = seenQueries.get("Follow");
+    const errors = [];
+    // Prefer REST (stable); GraphQL if learned as secondary
+    try {
+      return await followRest(targetUserId);
+    } catch (e) {
+      errors.push(e.message || String(e));
+    }
+    if (q?.hash) {
+      try {
+        return await followGraphql(targetUserId, q.hash);
+      } catch (e) {
+        errors.push(e.message || String(e));
+      }
+    }
+    throw new Error(errors.join(" | ") || "Follow failed");
+  }
+
+  async function executeUnfollow(targetUserId) {
+    const q = seenQueries.get("Unfollow");
+    const errors = [];
+    try {
+      return await unfollowRest(targetUserId);
+    } catch (e) {
+      errors.push(e.message || String(e));
+    }
+    if (q?.hash) {
+      try {
+        const body = JSON.stringify({
+          variables: { user_id: String(targetUserId) },
+          queryId: q.hash,
+        });
+        const resp = await origFetch.call(
+          window,
+          `https://x.com/i/api/graphql/${q.hash}/Unfollow`,
+          {
+            method: "POST",
+            headers: mutationHeaders(),
+            body,
+            credentials: "include",
+          },
+        );
+        if (resp.ok) return { following: false, method: "graphql" };
+        let text = "";
+        try {
+          text = await resp.text();
+        } catch {
+          /* empty */
+        }
+        throw new Error("GraphQL Unfollow failed: " + resp.status + " " + text.slice(0, 180));
+      } catch (e) {
+        errors.push(e.message || String(e));
+      }
+    }
+    throw new Error(errors.join(" | ") || "Unfollow failed");
   }
 
   // ── Listen for content script commands ─────────────────────────

@@ -187,9 +187,11 @@ async function refresh() {
       const walkStream = status.walkStream || null;
       const streamLabel =
         walkStream === "followers" ? "粉丝" : walkStream === "following" ? "关注" : walkStream || "";
+      const nonMutual = status.nonMutualCount ?? 0;
       syncStatus.innerHTML =
         `粉丝 <b>${fl}</b> · 关注 <b>${fg}</b>` +
         `<div class="hint" style="margin-top:4px">` +
+        `待回关（粉了你你未回）: <b style="color:#1d9bf0">${nonMutual}</b><br>` +
         `粉丝: ${fmtTime(status.followers?.lastSync)} · 关注: ${fmtTime(status.following?.lastSync)}` +
         (walkActive
           ? `<br><b style="color:#1d9bf0">正在同步${streamLabel}…</b> 到底会自动停止，也可点红色按钮停止`
@@ -201,26 +203,37 @@ async function refresh() {
       if (running) {
         btnAuto.textContent = "🛑 停止自动关注";
         btnAuto.className = "btn stop btn-lg";
+        const cur = status.activeFollow?.username
+          ? `当前: @${status.activeFollow.username}。`
+          : "";
         autoHint.textContent =
-          "停止后会结束回关队列，并停止列表同步翻页；不会断开账户绑定。自动关注本身不滚动页面。";
+          cur +
+          `待回关 ${nonMutual} 人。停止后会结束队列；自动关注走 API，不滚动页面。`;
       } else {
         btnAuto.textContent = "开始自动关注";
         btnAuto.className = "btn primary btn-lg";
         autoHint.textContent =
           fl === 0
-            ? "建议先「同步粉丝 / 关注」建立名单，再开始自动关注。"
-            : "关闭弹窗不会停止；仅通过 API 关注，不滚动页面、不抢操作。";
+            ? "请先「同步粉丝」建立名单，再开始自动关注。"
+            : nonMutual === 0
+              ? "当前没有待回关用户（可能都已互关，或需再同步粉丝）。"
+              : `待回关 ${nonMutual} 人。关闭面板不会停止；按间隔通过 API 关注。`;
       }
 
       show(usageCard, true);
       usageDetail.innerHTML =
         `今日回关: <b>${status.dailyFollows}</b> / ${settings.maxFollowsPerDay}<br>` +
-        `间隔: ${settings.minIntervalSec}s` +
+        `待回关: <b>${nonMutual}</b> · 间隔: ${settings.minIntervalSec}s` +
         (status.lastActionAt ? `<br>上次: ${fmtTime(status.lastActionAt)}` : "");
-      pendingLine.textContent =
-        (status.pendingActions || 0) > 0
+      pendingLine.textContent = status.activeFollow?.username
+        ? `正在关注 @${status.activeFollow.username}`
+        : (status.pendingActions || 0) > 0
           ? `队列中 ${status.pendingActions} 人`
-          : "队列空闲";
+          : running
+            ? nonMutual > 0
+              ? "排队等待间隔…"
+              : "无待回关用户"
+            : "队列空闲";
 
       show(resultsCard, true);
       successCountEl.textContent = String(status.successCount || 0);
@@ -358,6 +371,11 @@ btnAuto.addEventListener("click", async () => {
       const r = await send("START_AUTO_FOLLOW");
       if (!r?.ok) {
         autoHint.textContent = r?.error || "启动失败";
+        if (gateHint && r?.error) gateHint.textContent = r.error;
+      } else {
+        autoHint.textContent =
+          `已启动：待回关 ${r.nonMutual ?? "?"} 人，按间隔自动关注。` +
+          "请保持 x.com 标签页打开（不要求停在粉丝页）。";
       }
     }
   } finally {

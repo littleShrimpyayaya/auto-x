@@ -241,7 +241,9 @@
   function addToBatch(users) {
     const existing = new Set(batchBuffer.map((u) => u.id));
     for (const u of users) {
-      if (!u?.id || !u?.username || existing.has(u.id)) continue;
+      if (!u?.id || existing.has(u.id)) continue;
+      // Username may be stub "id:123" — still ingest so we never drop rest_id
+      if (!u.username) u.username = "id:" + u.id;
       batchBuffer.push(u);
       existing.add(u.id);
     }
@@ -254,6 +256,86 @@
     } else {
       scheduleFlush();
     }
+  }
+
+  /**
+   * DOM backup: scrape visible UserCells so virtualized-list gaps still get usernames.
+   * IDs often appear in avatar URLs or data attributes when GraphQL skipped a row.
+   */
+  function scrapeVisibleListUsers() {
+    const out = [];
+    const seen = new Set();
+    try {
+      const cells = document.querySelectorAll('[data-testid="UserCell"]');
+      for (const cell of cells) {
+        let username = null;
+        let id = null;
+        let name = null;
+
+        const links = cell.querySelectorAll('a[href^="/"]');
+        for (const a of links) {
+          const href = a.getAttribute("href") || "";
+          const m = href.match(/^\/([A-Za-z0-9_]{1,15})(?:\/|$|\?)/);
+          if (!m) continue;
+          const handle = m[1];
+          if (
+            [
+              "home",
+              "explore",
+              "search",
+              "i",
+              "settings",
+              "notifications",
+              "messages",
+              "compose",
+              "intent",
+            ].includes(handle.toLowerCase())
+          ) {
+            continue;
+          }
+          username = handle;
+          break;
+        }
+
+        const img =
+          cell.querySelector('img[src*="profile_images"]') ||
+          cell.querySelector('img[src*="twimg"]');
+        if (img?.src) {
+          // .../profile_images/1234567890/xxx.jpg  — not always user id
+          const idm = img.src.match(/\/profile_images\/(\d+)\//);
+          // Sometimes srcset / data-user-id
+        }
+        const anyId =
+          cell.querySelector("[data-user-id]")?.getAttribute("data-user-id") ||
+          cell.getAttribute("data-user-id");
+        if (anyId) id = String(anyId);
+
+        // name from first strong/span text
+        const nameEl =
+          cell.querySelector('[dir="ltr"] > span > span') ||
+          cell.querySelector("span span");
+        if (nameEl?.textContent) name = nameEl.textContent.trim() || null;
+
+        if (!username && !id) continue;
+        // Without GraphQL id we cannot key storage reliably — skip id-less for now
+        // unless we already have this username in buffer from graphql
+        if (!id) continue;
+        if (seen.has(id)) continue;
+        seen.add(id);
+        out.push({
+          id,
+          username: username || "id:" + id,
+          name,
+          verified: false,
+          protected: false,
+          unavailable: false,
+          _fromDom: true,
+        });
+      }
+    } catch {
+      /* ignore */
+    }
+    return out;
   }
 
   function clearBatchTimer() {
@@ -327,21 +409,29 @@
         // API says no more pages (ignore briefly after start — REPLAY may include stale last-page)
         const canTrustEnd = Date.now() >= (activeWalk.ignoreEndUntil || 0);
         if (msg.hasMore === false && canTrustEnd) {
+          // Last page: scrape DOM, flush, then wait a bit so we don't drop trailing rows
+          const domUsers = scrapeVisibleListUsers();
+          if (domUsers.length) addToBatch(domUsers);
           clearBatchTimer();
           flushBatch();
-          if (!msg.users?.length || newCount === 0) {
-            // Empty final page, or only duplicates → stop now
-            endWalkNatural("api-end");
-            return;
-          }
-          // Last page still had new users — flush them, then stop shortly
           activeWalk.noMore = true;
+          activeWalk.apiEndedAt = Date.now();
           if (activeWalk.endTimer) clearTimeout(activeWalk.endTimer);
+          // Give list time to paint last cells + one more DOM scrape
           activeWalk.endTimer = setTimeout(() => {
-            if (activeWalk?.noMore) endWalkNatural("api-end-last-page");
-          }, 1200);
+            if (!activeWalk?.noMore) return;
+            const extra = scrapeVisibleListUsers();
+            if (extra.length) {
+              addToBatch(extra);
+              flushBatch();
+            }
+            endWalkNatural(
+              !msg.users?.length || newCount === 0 ? "api-end" : "api-end-last-page",
+            );
+          }, newCount > 0 ? 2500 : 1500);
         } else if (msg.hasMore === true) {
           activeWalk.noMore = false;
+          activeWalk.apiEndedAt = null;
           if (activeWalk.endTimer) {
             clearTimeout(activeWalk.endTimer);
             activeWalk.endTimer = null;
@@ -463,17 +553,47 @@
       return;
     }
 
-    // API already said end of list
+    // DOM backup every few scrolls — catch rows GraphQL extraction missed
+    activeWalk.scrollTicks = (activeWalk.scrollTicks || 0) + 1;
+    if (activeWalk.scrollTicks % 2 === 0) {
+      const domUsers = scrapeVisibleListUsers();
+      if (domUsers.length) {
+        const before = activeWalk.seenIds?.size || 0;
+        addToBatch(domUsers);
+        for (const u of domUsers) {
+          if (u.id && activeWalk.seenIds && !activeWalk.seenIds.has(u.id)) {
+            activeWalk.seenIds.add(u.id);
+            activeWalk.lastUsersAt = Date.now();
+            activeWalk.gotUsers = true;
+            activeWalk.consecutiveNoNew = 0;
+          }
+        }
+        if ((activeWalk.seenIds?.size || 0) > before) {
+          clearBatchTimer();
+          flushBatch();
+        }
+      }
+    }
+
+    // API already said end — let endTimer finish; keep light scroll once more
     if (activeWalk.noMore) {
-      clearBatchTimer();
-      flushBatch();
-      endWalkNatural("api-end-scroll");
+      const domUsers = scrapeVisibleListUsers();
+      if (domUsers.length) {
+        addToBatch(domUsers);
+        flushBatch();
+      }
+      // endTimer handles stop; don't force-end here and drop trailing users
+      if (!activeWalk.endTimer) {
+        clearBatchTimer();
+        flushBatch();
+        endWalkNatural("api-end-scroll");
+      }
       return;
     }
 
     const h = document.documentElement.scrollHeight || document.body.scrollHeight || 0;
     const y = window.scrollY || document.documentElement.scrollTop || 0;
-    const nearBottom = y + window.innerHeight >= h - 80;
+    const nearBottom = y + window.innerHeight >= h - 120;
 
     if (activeWalk.lastHeight && h <= activeWalk.lastHeight + 4) {
       activeWalk.stuckScrolls = (activeWalk.stuckScrolls || 0) + 1;
@@ -485,37 +605,56 @@
     const idleMs = Date.now() - (activeWalk.lastUsersAt || activeWalk.startedAt || Date.now());
     const gotUsers = !!activeWalk.gotUsers;
     const noNew = activeWalk.consecutiveNoNew || 0;
+    // Don't stop too early: need solid idle + stable bottom after we already got users
+    const minWalkMs = 8000;
+    const walkedLongEnough = Date.now() - (activeWalk.startedAt || 0) > minWalkMs;
 
-    // Reached end: height stable + near bottom + no new users for a bit
-    if (gotUsers && nearBottom && activeWalk.stuckScrolls >= 2 && idleMs > 5000) {
+    if (
+      gotUsers &&
+      walkedLongEnough &&
+      nearBottom &&
+      activeWalk.stuckScrolls >= 4 &&
+      idleMs > 9000
+    ) {
+      const extra = scrapeVisibleListUsers();
+      if (extra.length) {
+        addToBatch(extra);
+        flushBatch();
+      }
       endWalkNatural("scroll-bottom-stable");
       return;
     }
-    if (gotUsers && activeWalk.stuckScrolls >= 3 && idleMs > 7000) {
+    if (gotUsers && walkedLongEnough && activeWalk.stuckScrolls >= 5 && idleMs > 12000) {
       endWalkNatural("scroll-stable");
       return;
     }
-    if (gotUsers && noNew >= 2 && activeWalk.stuckScrolls >= 2) {
+    if (gotUsers && walkedLongEnough && noNew >= 4 && activeWalk.stuckScrolls >= 3 && idleMs > 10000) {
       endWalkNatural("no-new-users");
       return;
     }
-    if (gotUsers && looksLikeListEnd() && activeWalk.stuckScrolls >= 1 && idleMs > 3000) {
+    if (
+      gotUsers &&
+      walkedLongEnough &&
+      looksLikeListEnd() &&
+      activeWalk.stuckScrolls >= 2 &&
+      idleMs > 6000
+    ) {
       endWalkNatural("dom-end-marker");
       return;
     }
     // Empty list edge case
-    if (!gotUsers && idleMs > 20000 && activeWalk.stuckScrolls >= 4) {
+    if (!gotUsers && idleMs > 25000 && activeWalk.stuckScrolls >= 5) {
       endWalkNatural("empty-or-stuck");
       return;
     }
 
     window.scrollTo(0, h);
     try {
-      window.scrollBy(0, 400);
+      window.scrollBy(0, 350);
     } catch {
       /* ignore */
     }
-    scrollTimer = setTimeout(autoScroll, 2200);
+    scrollTimer = setTimeout(autoScroll, 2400);
   }
 
   function startAutoScroll() {

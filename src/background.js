@@ -8,7 +8,7 @@ if (typeof importScripts === "function") {
 
 const api = self.autoxBrowser || (typeof browser !== "undefined" ? browser : chrome);
 const store = self.autoxStore;
-const VERSION = "0.3.5";
+const VERSION = "0.3.6";
 const PANEL_PATH = "src/panel/panel.html";
 
 let connectedTabId = null;
@@ -16,6 +16,8 @@ let data = null;
 let activeAction = null;
 let pendingWalk = null;
 let saveChain = Promise.resolve();
+let processQueueTimer = null;
+let activeActionTimer = null;
 /** Live probe from content: { loggedIn, user, tabId, at } */
 let liveSession = null;
 
@@ -65,17 +67,54 @@ function ingestUsers(users, stream) {
     ? String(data.sessionUser.username).toLowerCase()
     : null;
   for (const u of users) {
-    if (!u.id || !u.username) continue;
+    if (!u?.id) continue;
+    const id = String(u.id);
+    let username = u.username ? String(u.username) : "id:" + id;
     // Never store self as a follower/following entry (timeline root user appears in GraphQL)
-    if (selfId && String(u.id) === selfId) continue;
-    if (selfName && String(u.username).toLowerCase() === selfName) continue;
-    target[u.id] = { ...(target[u.id] || {}), ...u, _seenAt: new Date().toISOString() };
+    if (selfId && id === selfId) continue;
+    if (
+      selfName &&
+      username.toLowerCase() === selfName &&
+      !username.startsWith("id:")
+    ) {
+      continue;
+    }
+    const prev = target[id] || {};
+    // Prefer real username over stub
+    if (prev.username && !prev.username.startsWith("id:") && username.startsWith("id:")) {
+      username = prev.username;
+    }
+    const unavailable =
+      typeof u.unavailable === "boolean" ? u.unavailable : !!prev.unavailable;
+    target[id] = {
+      ...prev,
+      ...u,
+      id,
+      username,
+      unavailable,
+      _seenAt: new Date().toISOString(),
+    };
     count++;
   }
   data.syncStatus[stream].lastSync = new Date().toISOString();
   data.syncStatus[stream].count = Object.keys(target).length;
   persistData();
   return count;
+}
+
+function scheduleProcessQueue(delayMs) {
+  if (processQueueTimer) clearTimeout(processQueueTimer);
+  processQueueTimer = setTimeout(() => {
+    processQueueTimer = null;
+    processQueue();
+  }, Math.max(500, delayMs || 1000));
+}
+
+function clearActiveActionWatch() {
+  if (activeActionTimer) {
+    clearTimeout(activeActionTimer);
+    activeActionTimer = null;
+  }
 }
 
 async function computeFollowBacks() {
@@ -87,28 +126,93 @@ async function computeFollowBacks() {
   return candidates.slice(0, Math.min(remaining, 5));
 }
 
+async function ensureConnectedTab() {
+  if (connectedTabId) {
+    try {
+      const t = await api.tabs.get(connectedTabId);
+      if (t && isXUrl(t.url)) return connectedTabId;
+    } catch {
+      connectedTabId = null;
+    }
+  }
+  if (data?.connection?.tabId) {
+    connectedTabId = data.connection.tabId;
+    try {
+      const t = await api.tabs.get(connectedTabId);
+      if (t && isXUrl(t.url)) return connectedTabId;
+    } catch {
+      connectedTabId = null;
+    }
+  }
+  const tabs = await findXTabs();
+  const tab = (tabs || []).find((t) => t.id != null);
+  if (tab?.id != null) {
+    connectedTabId = tab.id;
+    if (data?.connection?.connected) {
+      data.connection.tabId = tab.id;
+      await persistData();
+    }
+    return connectedTabId;
+  }
+  return null;
+}
+
 async function executeAction(userId, username, name) {
-  if (activeAction || !connectedTabId) return;
-  if (!data?.autoFollowRunning) return;
+  if (activeAction) return { deferred: true, reason: "busy" };
+  if (!data?.autoFollowRunning) return { deferred: true, reason: "stopped" };
+
+  const tabId = await ensureConnectedTab();
+  if (!tabId) {
+    console.warn("[auto-x] no X tab for follow — will retry");
+    scheduleProcessQueue(5000);
+    return { deferred: true, reason: "no-tab" };
+  }
+
   const settings = await getSettings();
   if (data.stats.lastActionAt) {
     const elapsed = (Date.now() - new Date(data.stats.lastActionAt).getTime()) / 1000;
-    if (elapsed < settings.minIntervalSec) return;
+    if (elapsed < settings.minIntervalSec) {
+      const waitMs = Math.ceil((settings.minIntervalSec - elapsed) * 1000);
+      console.log("[auto-x] interval wait", waitMs, "ms before next follow");
+      scheduleProcessQueue(waitMs + 200);
+      return { deferred: true, reason: "interval", waitMs };
+    }
   }
   if ((data.stats.dailyFollows || 0) >= settings.maxFollowsPerDay) {
     console.log("[auto-x] daily limit reached, auto-follow paused");
-    return;
+    return { deferred: true, reason: "daily-limit" };
   }
-  activeAction = { userId, username, name: name || null };
+
+  activeAction = { userId, username, name: name || null, startedAt: Date.now() };
+  clearActiveActionWatch();
+  // If page never responds, free the slot and retry
+  activeActionTimer = setTimeout(async () => {
+    if (!activeAction || activeAction.userId !== userId) return;
+    console.warn("[auto-x] follow timeout @" + username);
+    activeAction = null;
+    data.pendingActions = (data.pendingActions || []).filter((a) => a.userId !== userId);
+    store.recordFollowResult(data, {
+      ok: false,
+      username,
+      name,
+      error: "超时：页面未返回关注结果",
+    });
+    await persistData();
+    if (data.autoFollowRunning) scheduleProcessQueue(2000);
+  }, 45000);
+
   try {
-    await api.tabs.sendMessage(connectedTabId, {
+    await api.tabs.sendMessage(tabId, {
       type: "EXECUTE_ACTION",
       actionId: "follow-" + userId,
       actionType: "follow",
       targetUserId: userId,
     });
+    console.log("[auto-x] follow dispatched → @" + username + " (" + userId + ")");
+    return { ok: true };
   } catch (e) {
     console.error("[auto-x] execute error:", e);
+    clearActiveActionWatch();
     data.pendingActions = data.pendingActions.filter((a) => a.userId !== userId);
     store.recordFollowResult(data, {
       ok: false,
@@ -124,6 +228,8 @@ async function executeAction(userId, username, name) {
     console.log("[auto-x] ✗ follow @" + username + " — tab unreachable");
     await persistData();
     activeAction = null;
+    if (data.autoFollowRunning) scheduleProcessQueue(4000);
+    return { ok: false, error: e.message };
   }
 }
 
@@ -133,6 +239,7 @@ async function onActionResult(msg) {
   const uname = activeAction.username;
   const name = activeAction.name;
   activeAction = null;
+  clearActiveActionWatch();
 
   data.pendingActions = data.pendingActions.filter((a) => a.userId !== uid);
 
@@ -158,7 +265,8 @@ async function onActionResult(msg) {
     store.addToLog(data, { type: "follow", targetUser: "@" + uname, result: "ok" });
     console.log(
       "[auto-x] ✓ 成功关注 @" + uname + (name ? " (" + name + ")" : "") +
-        " | 今日成功 " + data.stats.dailyFollows,
+        " | 今日成功 " + data.stats.dailyFollows +
+        (msg.method ? " via " + msg.method : ""),
     );
   } else {
     data.stats.lastActionAt = new Date().toISOString();
@@ -175,25 +283,55 @@ async function onActionResult(msg) {
 
   if (!data.autoFollowRunning) return;
   const interval = (await getSettings()).minIntervalSec * 1000;
-  setTimeout(() => {
-    processQueue();
-  }, interval);
+  scheduleProcessQueue(interval);
 }
 
 async function processQueue() {
   if (activeAction) return;
   await loadData();
-  if (!data.autoFollowRunning || !data.connection?.connected) return;
-  if (!connectedTabId) {
-    // try restore from connection.tabId
-    if (data.connection.tabId) connectedTabId = data.connection.tabId;
+  if (!data.autoFollowRunning || !data.connection?.connected) {
+    return;
   }
-  if (!connectedTabId) return;
+
+  // Drop stale pending entries that block candidate selection forever
+  if ((data.pendingActions || []).length && !activeAction) {
+    const staleBefore = Date.now() - 2 * 60 * 1000;
+    data.pendingActions = data.pendingActions.filter((a) => {
+      const t = a.queuedAt ? new Date(a.queuedAt).getTime() : 0;
+      return t > staleBefore;
+    });
+  }
+
+  const tabId = await ensureConnectedTab();
+  if (!tabId) {
+    console.warn("[auto-x] processQueue: no X tab, retry later");
+    scheduleProcessQueue(8000);
+    return;
+  }
 
   const candidates = await computeFollowBacks();
-  if (!candidates.length) return;
+  if (!candidates.length) {
+    const nonMutual = store.getNonMutualFollowers(data).length;
+    const settings = await getSettings();
+    const remaining = Math.max(0, settings.maxFollowsPerDay - (data.stats.dailyFollows || 0));
+    console.log(
+      "[auto-x] processQueue: no candidates | nonMutual=" +
+        nonMutual +
+        " remainingDaily=" +
+        remaining +
+        " followers=" +
+        Object.keys(data.followers || {}).length +
+        " following=" +
+        Object.keys(data.following || {}).length,
+    );
+    // Keep checking — new sync may add candidates
+    if (nonMutual === 0) return;
+    if (remaining <= 0) return;
+    scheduleProcessQueue(30000);
+    return;
+  }
   const next = candidates[0];
-  if (!data.pendingActions.some((a) => a.userId === next.id)) {
+  if (!data.pendingActions.some((a) => String(a.userId) === String(next.id))) {
     data.pendingActions.push({ userId: next.id, queuedAt: new Date().toISOString() });
     await persistData();
   }
@@ -390,11 +528,59 @@ async function startAutoFollow() {
     }
   }
 
+  const tabId = await ensureConnectedTab();
+  if (!tabId) {
+    return { ok: false, error: "请先打开并登录 x.com 标签页" };
+  }
+
+  // Seed learned queries into page (Follow hash optional — REST fallback exists)
+  await pushKnownQueries(tabId);
+
+  const nonMutual = store.getNonMutualFollowers(data);
+  const settings = await getSettings();
+  const followerCount = Object.keys(data.followers || {}).length;
+  if (followerCount === 0) {
+    return {
+      ok: false,
+      error: "本地还没有粉丝名单，请先点「同步粉丝」",
+      nonMutual: 0,
+    };
+  }
+  if (nonMutual.length === 0) {
+    return {
+      ok: false,
+      error:
+        "没有可回关的人（粉丝都已在关注列表中，或需先「同步粉丝」且勿只同步关注）。当前粉丝 " +
+        followerCount +
+        " · 关注 " +
+        Object.keys(data.following || {}).length,
+      nonMutual: 0,
+      followers: followerCount,
+      following: Object.keys(data.following || {}).length,
+    };
+  }
+
   data.autoFollowRunning = true;
+  data.pendingActions = [];
   await persistData();
-  console.log("[auto-x] 自动关注已启动");
-  processQueue();
-  return { ok: true, running: true };
+  console.log(
+    "[auto-x] 自动关注已启动 | 待回关 " +
+      nonMutual.length +
+      " | 每日上限 " +
+      settings.maxFollowsPerDay +
+      " | 间隔 " +
+      settings.minIntervalSec +
+      "s",
+  );
+  // Kick immediately
+  scheduleProcessQueue(300);
+  return {
+    ok: true,
+    running: true,
+    nonMutual: nonMutual.length,
+    followers: followerCount,
+    following: Object.keys(data.following || {}).length,
+  };
 }
 
 async function stopAutoFollow() {
@@ -620,6 +806,10 @@ function buildStatus() {
     walkActive: !!pendingWalk,
     walkStream: pendingWalk?.stream || null,
     hasConnectedTab: !!connectedTabId,
+    nonMutualCount: store.getNonMutualFollowers(data).length,
+    activeFollow: activeAction
+      ? { username: activeAction.username, userId: activeAction.userId }
+      : null,
   };
 }
 

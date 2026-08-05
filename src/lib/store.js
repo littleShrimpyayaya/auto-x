@@ -76,18 +76,19 @@
 
   function getNonMutualFollowers(data) {
     const toFollow = [];
-    const pending = new Set((data.pendingActions || []).map((a) => a.userId));
+    const pending = new Set((data.pendingActions || []).map((a) => String(a.userId)));
     const selfId = data.sessionUser?.id ? String(data.sessionUser.id) : null;
     const selfName = data.sessionUser?.username
       ? String(data.sessionUser.username).toLowerCase()
       : null;
     for (const [id, user] of Object.entries(data.followers || {})) {
-      if (selfId && String(id) === selfId) continue;
+      const sid = String(id);
+      if (selfId && sid === selfId) continue;
       if (selfName && String(user?.username || "").toLowerCase() === selfName) continue;
-      if (!data.following?.[id] && !pending.has(id)) {
-        if (!user?.username) continue;
-        toFollow.push({ id, ...user });
-      }
+      if (user?.unavailable) continue; // suspended / gone — cannot follow
+      if (data.following?.[sid] || data.following?.[id]) continue;
+      if (pending.has(sid)) continue;
+      toFollow.push({ ...user, id: sid, username: user?.username || "id:" + sid });
     }
     toFollow.sort((a, b) => {
       const ta = a._seenAt || "";
