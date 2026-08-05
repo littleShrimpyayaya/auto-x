@@ -135,6 +135,12 @@ app.get("/api/v1/jobs", async (c) => {
       statsCharged: j.stats_charged,
       createdAt: j.created_at,
       finishedAt: j.finished_at,
+      nextRunAt: j.next_run_at,
+      retryInSec:
+        j.status === "pending" && j.next_run_at
+          ? Math.max(0, Math.ceil((new Date(j.next_run_at).getTime() - Date.now()) / 1000))
+          : 0,
+      attempts: j.attempts,
     })),
   });
 });
@@ -340,26 +346,75 @@ app.get("/api/v1/capabilities", async (c) => {
   });
 });
 
-/** Official X rate budgets + last wait/429 (worker updates runtime.x_rate). */
+/**
+ * Official X rate budgets + live wait/retry schedule for the client UI.
+ * Source: https://docs.x.com/x-api/fundamentals/rate-limits
+ */
 app.get("/api/v1/rate-limits", async (c) => {
   const rt = await getRuntime();
+  const { OFFICIAL_PER_USER } = await import("@autox/x-client");
+  const live = (rt?.x_rate ?? null) as Record<string, unknown> | null;
+  const budgets = (live?.budgets as Array<Record<string, unknown>>) ?? [];
+  // pending jobs with next_run_at = planned retries
+  const pending = await query(
+    `SELECT id, type, target_user_id, status, next_run_at, last_error, attempts
+     FROM jobs WHERE status='pending' AND next_run_at > now()
+     ORDER BY next_run_at ASC LIMIT 20`,
+  );
   return c.json({
-    /** Docs: https://docs.x.com/x-api/fundamentals/rate-limits */
-    official: {
-      window: "15 minutes (unless noted)",
-      perUser: {
-        "GET /2/users/me": "75/15min",
-        "GET /2/users/:id/followers": "300/15min",
-        "GET /2/users/:id/following": "300/15min",
-        "POST /2/users/:id/following": "50/15min",
-        "DELETE following": "50/15min",
-      },
-      strategy:
-        "Preemptive sliding window at 85% of official limit + min spacing; honor x-rate-limit-* headers; on 429 wait until reset.",
+    docs: "https://docs.x.com/x-api/fundamentals/rate-limits",
+    headers: {
+      limit: "x-rate-limit-limit",
+      remaining: "x-rate-limit-remaining",
+      reset: "x-rate-limit-reset (unix seconds)",
     },
-    live: rt?.x_rate ?? null,
+    official: {
+      window: "15 minutes (per endpoint, per user OAuth)",
+      endpoints: Object.fromEntries(
+        Object.entries(OFFICIAL_PER_USER).map(([k, v]) => [
+          k,
+          {
+            method: v.method,
+            path: v.endpoint,
+            perUser: `${v.limit}/15min`,
+            softCap85pct: Math.floor(v.limit * 0.85),
+            minIntervalMs: Math.ceil(v.windowMs / Math.max(1, Math.floor(v.limit * 0.85))),
+          },
+        ]),
+      ),
+      strategy: [
+        "Preemptive sliding window at 85% of official per-user limit",
+        "Min spacing = window / softCap (spread requests)",
+        "Honor response headers when present (authoritative)",
+        "On 429: hard-block until reset; jobs get next_run_at; sync keeps cursor",
+      ],
+    },
+    /** Client should display these for “计划重试” */
+    schedule: {
+      nextRetryAt: live?.nextRetryAt ?? live?.retryAt ?? null,
+      nextRetryInSec: live?.nextRetryInSec ?? live?.retryInSec ?? 0,
+      nextRetryBucket: live?.nextRetryBucket ?? live?.lastBucket ?? null,
+      lastEvent: live?.lastEvent ?? null,
+      lastType: live?.lastType ?? null,
+    },
+    budgets,
     progress: rt?.x_progress ?? null,
     lastError: rt?.last_error ?? null,
+    /** Jobs deliberately deferred (quota / 429) */
+    deferredJobs: pending.rows.map((j) => ({
+      id: j.id,
+      type: j.type,
+      targetUserId: j.target_user_id,
+      status: j.status,
+      nextRunAt: j.next_run_at,
+      retryInSec: Math.max(
+        0,
+        Math.ceil((new Date(j.next_run_at).getTime() - Date.now()) / 1000),
+      ),
+      lastError: j.last_error,
+      attempts: j.attempts,
+    })),
+    live,
   });
 });
 

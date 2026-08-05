@@ -54,6 +54,14 @@ function wireRateVisibility() {
       },
       level === "debug" ? "info" : level,
     ).catch(() => {});
+    const budgets = x.rateSnapshots?.() ?? [];
+    // earliest global next-allowed across buckets that are waiting
+    const waiting = budgets.filter((b) => b.nextAllowedInSec > 0);
+    const nextRetry = waiting.length
+      ? waiting.reduce((a, b) =>
+          (a.nextAllowedInSec ?? 0) <= (b.nextAllowedInSec ?? 0) ? a : b,
+        )
+      : null;
     void pgNotify(
       WS_CHANNEL,
       envelope("x.rate", {
@@ -61,13 +69,18 @@ function wireRateVisibility() {
         bucket: ev.bucket,
         message: ev.message,
         waitMs: ev.waitMs,
+        retryAt: ev.retryAt ?? ev.snapshot.nextAllowedAt,
+        retryInSec: ev.retryInSec ?? ev.snapshot.nextAllowedInSec,
         snapshot: ev.snapshot,
-        budgets: x.rateSnapshots?.() ?? [],
+        budgets,
+        nextRetryAt: nextRetry?.nextAllowedAt ?? null,
+        nextRetryInSec: nextRetry?.nextAllowedInSec ?? 0,
+        nextRetryBucket: nextRetry?.bucket ?? null,
       }),
     ).catch(() => {});
-    // persist summary for REST pollers (throttle 2s)
+    // persist summary for REST pollers (throttle 1s so countdown stays fresh)
     const now = Date.now();
-    if (now - lastRatePush > 2000) {
+    if (now - lastRatePush > 1000) {
       lastRatePush = now;
       void setRuntime({
         x_rate: {
@@ -75,7 +88,12 @@ function wireRateVisibility() {
           lastType: ev.type,
           lastBucket: ev.bucket,
           waitMs: ev.waitMs ?? 0,
-          budgets: x.rateSnapshots?.() ?? [],
+          retryAt: ev.retryAt ?? ev.snapshot.nextAllowedAt,
+          retryInSec: ev.retryInSec ?? ev.snapshot.nextAllowedInSec,
+          nextRetryAt: nextRetry?.nextAllowedAt ?? null,
+          nextRetryInSec: nextRetry?.nextAllowedInSec ?? 0,
+          nextRetryBucket: nextRetry?.bucket ?? null,
+          budgets,
           updatedAt: new Date().toISOString(),
         },
       }).catch(() => {});
@@ -605,17 +623,36 @@ async function executeOne(accountId: string) {
         kind: "rate_limit",
         retryAfterMs: xe.retryAfterMs,
       }, "warn");
-      await pgNotify(
-        WS_CHANNEL,
-        envelope("x.error", {
-          source: "executor",
-          jobId: job.id,
-          type: job.type,
-          message: msg,
-          kind: "rate_limit",
-          retryAfterMs: xe.retryAfterMs,
-        }),
-      );
+      {
+        const retryAt = new Date(Date.now() + (xe.retryAfterMs ?? 60_000)).toISOString();
+        await pgNotify(
+          WS_CHANNEL,
+          envelope("x.error", {
+            source: "executor",
+            jobId: job.id,
+            type: job.type,
+            message: msg,
+            kind: "rate_limit",
+            retryAfterMs: xe.retryAfterMs,
+            retryAt,
+            retryInSec: Math.ceil((xe.retryAfterMs ?? 60_000) / 1000),
+          }),
+        );
+        await setRuntime({
+          last_error: `job #${job.id} 限流，计划 ${retryAt} 重试`,
+          x_rate: {
+            lastEvent: `任务 #${job.id} 限流`,
+            lastType: "blocked_429",
+            lastBucket: job.type === "unfollow" ? "unfollow" : "follow",
+            retryAt,
+            retryInSec: Math.ceil((xe.retryAfterMs ?? 60_000) / 1000),
+            nextRetryAt: retryAt,
+            nextRetryInSec: Math.ceil((xe.retryAfterMs ?? 60_000) / 1000),
+            budgets: x.rateSnapshots?.() ?? [],
+            updatedAt: new Date().toISOString(),
+          },
+        });
+      }
       await sleep(Math.min(xe.retryAfterMs ?? 60_000, 120_000));
       return true;
     }

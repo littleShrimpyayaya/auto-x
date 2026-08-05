@@ -143,23 +143,49 @@ async function refresh() {
 
   try {
     const rl = await api('/api/v1/rate-limits');
-    const budgets = (rl.live && rl.live.budgets) || [];
+    const budgets = rl.budgets || (rl.live && rl.live.budgets) || [];
+    const sch = rl.schedule || {};
     const prog = rl.progress;
-    let html = '<div style="color:var(--mut);margin-bottom:.5rem">预扣配额（85% 官方上限）+ 最小间隔，避免 429</div>';
-    if (rl.live?.lastEvent) {
-      html += '<div class="'+(rl.live.lastType==='blocked_429'?'bad':'')+'">最近: '+rl.live.lastEvent+'</div>';
+    let html = '<div style="color:var(--mut);margin-bottom:.5rem">依据 <a href="https://docs.x.com/x-api/fundamentals/rate-limits" target="_blank" style="color:var(--acc)">官方 rate-limits</a>：15min 窗口 · 85% 软顶 · 计划重试时间可见</div>';
+    if (sch.nextRetryAt && sch.nextRetryInSec > 0) {
+      html += '<div class="bad" style="font-size:1rem;margin:.4rem 0"><b>计划重试</b>：'
+        + sch.nextRetryInSec + 's 后'
+        + (sch.nextRetryBucket ? '（'+sch.nextRetryBucket+'）' : '')
+        + '<br/><span style="font-size:.8rem;color:var(--mut)">' + sch.nextRetryAt + '</span></div>';
+    } else {
+      html += '<div class="ok">当前无等待：可立即请求</div>';
+    }
+    if (sch.lastEvent) {
+      html += '<div class="'+(sch.lastType==='blocked_429'?'bad':'')+'">最近: '+sch.lastEvent+'</div>';
     }
     if (prog) {
-      html += '<div>同步: '+prog.stream+' · '+prog.phase+' · 页 '+ (prog.pagesDone||0) + (prog.error?(' · <span class="bad">'+prog.error+'</span>'):'')+'</div>';
+      html += '<div>同步: '+prog.stream+' · '+prog.phase+' · 页 '+(prog.pagesDone||0)
+        + (prog.error?(' · <span class="bad">'+prog.error+'</span>'):'')+'</div>';
     }
     if (budgets.length) {
-      html += '<table><thead><tr><th>端点</th><th>剩余</th><th>限额</th><th>间隔</th></tr></thead><tbody>';
+      html += '<table><thead><tr><th>桶</th><th>状态</th><th>剩余/限</th><th>官方</th><th>下次可请求</th></tr></thead><tbody>';
       for (const b of budgets) {
-        html += '<tr><td>'+b.bucket+'</td><td>'+b.remaining+'</td><td>'+b.limit+'</td><td>'+b.minIntervalMs+'ms</td></tr>';
+        const st = b.status || 'ok';
+        const cls = st === 'blocked_429' || st === 'window_exhausted' ? 'bad' : (st === 'waiting' ? '' : 'ok');
+        const next = (b.nextAllowedInSec > 0)
+          ? (b.nextAllowedInSec + 's · ' + (b.nextAllowedAt || ''))
+          : '现在';
+        html += '<tr><td>'+b.bucket+'</td><td class="'+cls+'">'+st+'</td><td>'
+          +b.remaining+'/'+b.limit+'</td><td>'+(b.officialLimit||'?')+'/15m</td><td style="font-size:.75rem">'
+          +next+'</td></tr>';
       }
       html += '</tbody></table>';
     } else {
       html += '<div style="color:var(--mut)">启动自动化后 worker 会刷新预算</div>';
+    }
+    const defs = rl.deferredJobs || [];
+    if (defs.length) {
+      html += '<div style="margin-top:.6rem"><b>延期任务（计划 next_run_at）</b></div><ul style="margin:.2rem 0;padding-left:1.1rem">';
+      for (const j of defs.slice(0,8)) {
+        html += '<li>#'+j.id+' '+j.type+' · '+j.retryInSec+'s · '
+          +(j.lastError||'')+'</li>';
+      }
+      html += '</ul>';
     }
     if (rl.lastError) html += '<div class="bad">last_error: '+rl.lastError+'</div>';
     document.getElementById('rates').innerHTML = html;
@@ -168,9 +194,13 @@ async function refresh() {
   }
 
   const jobs = await api('/api/v1/jobs?limit=40');
-  document.getElementById('jobs').innerHTML = (jobs.jobs||[]).map(j =>
-    `<tr><td>${j.id}</td><td>${j.type}</td><td><span class="tag">${j.status}</span></td><td>${j.username?'@'+j.username:'@unknown'} ${j.name||''}</td><td>${j.source||''}</td></tr>`
-  ).join('') || '<tr><td colspan=5>空</td></tr>';
+  document.getElementById('jobs').innerHTML = (jobs.jobs||[]).map(j => {
+    const retry = (j.retryInSec > 0)
+      ? `<br/><span class="bad" style="font-size:.7rem">重试 ${j.retryInSec}s</span>`
+      : '';
+    const err = j.lastError ? `<br/><span class="bad" style="font-size:.7rem">${j.lastError}</span>` : '';
+    return `<tr><td>${j.id}</td><td>${j.type}</td><td><span class="tag">${j.status}</span>${retry}${err}</td><td>${j.username?'@'+j.username:'@unknown'} ${j.name||''}</td><td>${j.source||''}</td></tr>`;
+  }).join('') || '<tr><td colspan=5>空</td></tr>';
 
   const fo = await api('/api/v1/followers');
   document.getElementById('followers').innerHTML = (fo.items||[]).map(x =>
@@ -244,6 +274,12 @@ document.getElementById('btnProbe').onclick = async () => {
   } catch (e) { log('probe fail ' + e.message); }
 };
 document.getElementById('btnRefresh').onclick = () => refresh();
+// keep countdown fresh while logged in
+setInterval(() => {
+  if (token && document.getElementById('app').style.display !== 'none') {
+    refresh().catch(()=>{});
+  }
+}, 5000);
 </script>
 </body>
 </html>
