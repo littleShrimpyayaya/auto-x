@@ -8,7 +8,7 @@ if (typeof importScripts === "function") {
 
 const api = self.autoxBrowser || (typeof browser !== "undefined" ? browser : chrome);
 const store = self.autoxStore;
-const VERSION = "0.3.13";
+const VERSION = "0.3.15";
 const PANEL_PATH = "src/panel/panel.html";
 
 let connectedTabId = null;
@@ -20,6 +20,8 @@ let processQueueTimer = null;
 let activeActionTimer = null;
 /** Live probe from content: { loggedIn, user, tabId, at } */
 let liveSession = null;
+/** Follow-back on /followers list (not profile pages) */
+let followBackWalk = null; // { tabId, active, startedAt }
 /**
  * Auto graph sync after connect: followers → following, no manual start needed.
  * { queue, idx, phase: 'running'|'done'|'error'|'idle', error, startedAt, finishedAt }
@@ -324,9 +326,7 @@ function sleep(ms) {
   return new Promise((r) => setTimeout(r, ms));
 }
 
-/** Wait until tab URL looks like the target profile and status is complete */
-function waitForProfileTab(tabId, username, timeoutMs) {
-  const uname = String(username || "").toLowerCase();
+function waitForTabPath(tabId, pathTest, timeoutMs) {
   const deadline = Date.now() + (timeoutMs || 25000);
   return new Promise((resolve) => {
     let done = false;
@@ -340,11 +340,9 @@ function waitForProfileTab(tabId, username, timeoutMs) {
       }
       resolve(ok);
     };
-    const matches = (url) => {
-      if (!url || !uname) return false;
+    const okUrl = (url) => {
       try {
-        const path = new URL(url).pathname || "";
-        return new RegExp("^/" + uname + "(?:/|$|\\?)", "i").test(path);
+        return pathTest(new URL(url).pathname || "");
       } catch {
         return false;
       }
@@ -352,214 +350,180 @@ function waitForProfileTab(tabId, username, timeoutMs) {
     const onUpd = (id, info, tab) => {
       if (id !== tabId) return;
       const url = info.url || tab?.url;
-      if (matches(url) && (info.status === "complete" || tab?.status === "complete")) {
+      if (url && okUrl(url) && (info.status === "complete" || tab?.status === "complete")) {
         finish(true);
       }
     };
     api.tabs.onUpdated.addListener(onUpd);
-    // Already there?
     api.tabs
       .get(tabId)
       .then((t) => {
-        if (matches(t?.url) && t.status === "complete") finish(true);
+        if (t?.url && okUrl(t.url) && t.status === "complete") finish(true);
       })
       .catch(() => {});
     const tick = () => {
       if (done) return;
-      if (Date.now() >= deadline) {
-        finish(false);
-        return;
-      }
+      if (Date.now() >= deadline) return finish(false);
       api.tabs
         .get(tabId)
         .then((t) => {
-          if (matches(t?.url) && t.status === "complete") finish(true);
+          if (t?.url && okUrl(t.url) && t.status === "complete") finish(true);
           else setTimeout(tick, 400);
         })
         .catch(() => setTimeout(tick, 400));
     };
-    setTimeout(tick, 500);
+    setTimeout(tick, 400);
   });
 }
 
 /**
- * Auto-follow via real UI click on profile Follow button (avoids CSRF/API 403).
- * Uses the X tab: open profile → click Follow.
+ * Auto follow-back: stay on /followers (关注者) and click every
+ * 「回关 / Follow / Follow back」 button in the list. Never open profiles.
  */
-async function executeAction(userId, username, name) {
-  if (activeAction) return { deferred: true, reason: "busy" };
-  if (!data?.autoFollowRunning) return { deferred: true, reason: "stopped" };
-
-  // Click-follow needs the tab — defer while list sync owns it (don't break sync)
-  if (isGraphSyncBusy() || isSyncNavigating()) {
-    console.log("[auto-x] defer click-follow while graph sync uses the tab");
-    scheduleProcessQueue(5000);
-    return { deferred: true, reason: "sync-busy" };
+async function startFollowBackList() {
+  await loadData();
+  if (!data?.autoFollowRunning) return { ok: false, error: "auto-follow off" };
+  if (isGraphSyncBusy()) {
+    console.log("[auto-x] follow-back list waits for graph sync");
+    scheduleProcessQueue(8000);
+    return { ok: false, deferred: true, reason: "sync-busy" };
   }
-
-  const uname = username && !String(username).startsWith("id:") ? String(username) : null;
-  if (!uname) {
-    console.warn("[auto-x] skip follow — no username for", userId);
-    store.recordFollowResult(data, {
-      ok: false,
-      username: username || String(userId),
-      name,
-      error: "无用户名，无法打开主页点击关注",
-    });
-    await persistData();
-    scheduleProcessQueue(1000);
-    return { ok: false, error: "no-username" };
+  if (followBackWalk?.active) {
+    return { ok: true, already: true };
   }
 
   const tabId = await ensureConnectedTab();
   if (!tabId) {
-    console.warn("[auto-x] no X tab for follow — will retry");
     scheduleProcessQueue(5000);
-    return { deferred: true, reason: "no-tab" };
+    return { ok: false, error: "no-tab" };
   }
+
+  let username = data.sessionUser?.username;
+  if (!username) {
+    try {
+      const r = await api.tabs.sendMessage(tabId, { type: "GET_SESSION" });
+      username = r?.user?.username;
+    } catch {
+      /* ignore */
+    }
+  }
+  if (!username) return { ok: false, error: "无法识别用户名" };
 
   const settings = await getSettings();
-  if (data.stats.lastActionAt) {
-    const elapsed = (Date.now() - new Date(data.stats.lastActionAt).getTime()) / 1000;
-    if (elapsed < settings.minIntervalSec) {
-      const waitMs = Math.ceil((settings.minIntervalSec - elapsed) * 1000);
-      console.log("[auto-x] interval wait", waitMs, "ms before next follow");
-      scheduleProcessQueue(waitMs + 200);
-      return { deferred: true, reason: "interval", waitMs };
-    }
-  }
-  if ((data.stats.dailyFollows || 0) >= settings.maxFollowsPerDay) {
-    console.log("[auto-x] daily limit reached, auto-follow paused");
-    return { deferred: true, reason: "daily-limit" };
+  const remaining = Math.max(
+    0,
+    settings.maxFollowsPerDay - (data.stats.dailyFollows || 0),
+  );
+  if (remaining <= 0) {
+    console.log("[auto-x] daily limit reached");
+    return { ok: false, error: "今日回关已达上限" };
   }
 
-  activeAction = { userId, username: uname, name: name || null, startedAt: Date.now() };
-  clearActiveActionWatch();
-  activeActionTimer = setTimeout(async () => {
-    if (!activeAction || activeAction.userId !== userId) return;
-    console.warn("[auto-x] click-follow timeout @" + uname);
-    activeAction = null;
-    data.pendingActions = (data.pendingActions || []).filter((a) => a.userId !== userId);
-    store.recordFollowResult(data, {
-      ok: false,
-      username: uname,
-      name,
-      error: "超时：未能完成主页点击关注",
-    });
-    await persistData();
-    if (data.autoFollowRunning) scheduleProcessQueue(2000);
-  }, 60000);
-
-  const profileUrl = "https://x.com/" + uname;
+  const listUrl = "https://x.com/" + username + "/followers";
+  followBackWalk = { tabId, active: true, startedAt: Date.now(), username };
   try {
-    console.log("[auto-x] open profile for click-follow → @" + uname);
-    await api.tabs.update(tabId, { url: profileUrl, active: true });
+    console.log("[auto-x] open 关注者列表 for follow-back →", listUrl);
+    await api.tabs.update(tabId, { url: listUrl, active: true });
   } catch (e) {
-    softReleaseFollow(userId, "nav-failed");
-    store.recordFollowResult(data, {
-      ok: false,
-      username: uname,
-      name,
-      error: "无法打开主页: " + (e.message || e),
-    });
-    await persistData();
-    activeAction = null;
-    if (data.autoFollowRunning) scheduleProcessQueue(3000);
+    followBackWalk = null;
     return { ok: false, error: e.message };
   }
 
-  const loaded = await waitForProfileTab(tabId, uname, 25000);
-  // SPA needs a moment after complete
-  await sleep(loaded ? 1800 : 3500);
+  await waitForTabPath(
+    tabId,
+    (p) => /\/followers(?:\/|$)/.test(p),
+    30000,
+  );
+  await sleep(2500);
 
   try {
-    const resp = await api.tabs.sendMessage(tabId, {
-      type: "CLICK_FOLLOW",
-      actionId: "follow-" + userId,
-      targetUserId: String(userId),
-      username: uname,
+    await api.tabs.sendMessage(tabId, {
+      type: "START_FOLLOW_BACK_LIST",
+      intervalSec: settings.minIntervalSec || 5,
+      maxClicks: remaining,
+      selfUsername: username,
     });
-    if (resp && resp.ok === false && resp.error) {
-      // content may also send ACTION_COMPLETED; if only sync response, handle here
-      if (!activeAction) return { ok: false };
-    }
-    console.log("[auto-x] click-follow requested → @" + uname + " (" + userId + ")");
-    return { ok: true, method: "click" };
-  } catch (e) {
-    console.error("[auto-x] click-follow message error:", e);
-    if (/receiving end|context invalidated|message port/i.test(e.message || "")) {
-      // retry once after short wait (content just injected)
-      await sleep(2000);
-      try {
-        await api.tabs.sendMessage(tabId, {
-          type: "CLICK_FOLLOW",
-          actionId: "follow-" + userId,
-          targetUserId: String(userId),
-          username: uname,
-        });
-        console.log("[auto-x] click-follow retry ok → @" + uname);
-        return { ok: true, method: "click" };
-      } catch (e2) {
-        e = e2;
-      }
-    }
-    clearActiveActionWatch();
-    data.pendingActions = (data.pendingActions || []).filter(
-      (a) => String(a.userId) !== String(userId),
+    console.log(
+      "[auto-x] follow-back list started | interval=" +
+        settings.minIntervalSec +
+        "s | max=" +
+        remaining,
     );
-    store.recordFollowResult(data, {
-      ok: false,
-      username: uname,
-      name,
-      error: "标签页不可达: " + (e.message || String(e)),
-    });
-    store.addToLog(data, {
-      type: "follow",
-      targetUser: "@" + uname,
-      result: "fail: tab unreachable",
-    });
-    console.log("[auto-x] ✗ follow @" + uname + " — tab unreachable");
-    await persistData();
-    activeAction = null;
-    if (data.autoFollowRunning) scheduleProcessQueue(4000);
-    return { ok: false, error: e.message };
+    return { ok: true };
+  } catch (e) {
+    console.warn("[auto-x] START_FOLLOW_BACK_LIST failed, retry", e.message || e);
+    await sleep(2000);
+    try {
+      await api.tabs.sendMessage(tabId, {
+        type: "START_FOLLOW_BACK_LIST",
+        intervalSec: settings.minIntervalSec || 5,
+        maxClicks: remaining,
+        selfUsername: username,
+      });
+      return { ok: true };
+    } catch (e2) {
+      followBackWalk = null;
+      return { ok: false, error: e2.message };
+    }
   }
 }
 
+async function stopFollowBackList() {
+  const tabId = followBackWalk?.tabId || connectedTabId;
+  followBackWalk = null;
+  if (tabId) {
+    try {
+      await api.tabs.sendMessage(tabId, { type: "STOP_FOLLOW_BACK_LIST" });
+    } catch {
+      /* ignore */
+    }
+  }
+}
+
+/** @deprecated profile-by-profile removed — kept name for any callers */
+async function executeAction() {
+  return startFollowBackList();
+}
+
 async function onActionResult(msg) {
-  if (!activeAction) return;
-  const uid = activeAction.userId;
-  const uname = activeAction.username;
-  const name = activeAction.name;
-  activeAction = null;
+  // List-page follow-back sends results without activeAction (profile path removed)
   clearActiveActionWatch();
+  activeAction = null;
 
-  data.pendingActions = data.pendingActions.filter((a) => a.userId !== uid);
+  const uid = msg.targetUserId != null ? String(msg.targetUserId) : null;
+  const uname = msg.username || "unknown";
+  const name = msg.name || null;
 
-  // msg.ok from page is authoritative (content forwards full fields).
-  // IMPORTANT: only writes data.following — never mutates data.followers.
+  if (uid) {
+    data.pendingActions = (data.pendingActions || []).filter(
+      (a) => String(a.userId) !== uid,
+    );
+  }
+
   const isSuccess =
     !!msg.ok &&
     (msg.following === true ||
       msg.verified === true ||
       msg.alreadyFollowing === true ||
-      // ok:true alone — content used to drop following/verified; still accept
       msg.error == null);
 
   if (isSuccess) {
-    const base = data.followers[uid] || data.followers[String(uid)] || {};
-    const finalName = msg.username || uname || base.username || null;
-    data.following[String(uid)] = {
-      id: String(uid),
-      username: finalName,
-      name: name || base.name || null,
-      verified: base.verified,
-      protected: base.protected,
-      _followedAt: new Date().toISOString(),
-      _fromAutoFollow: true,
-    };
-    if (data.syncStatus?.following) {
-      data.syncStatus.following.count = Object.keys(data.following).length;
+    const base =
+      (uid && (data.followers[uid] || data.followers[String(uid)])) || {};
+    const finalName = uname || base.username || null;
+    if (uid) {
+      data.following[uid] = {
+        id: uid,
+        username: finalName,
+        name: name || base.name || null,
+        verified: base.verified,
+        protected: base.protected,
+        _followedAt: new Date().toISOString(),
+        _fromAutoFollow: true,
+      };
+      if (data.syncStatus?.following) {
+        data.syncStatus.following.count = Object.keys(data.following).length;
+      }
     }
     if (!msg.alreadyFollowing) {
       data.stats.dailyFollows = (data.stats.dailyFollows || 0) + 1;
@@ -577,84 +541,65 @@ async function onActionResult(msg) {
         ? "ok: already"
         : msg.pendingFollow
           ? "ok: pending"
-          : "ok" + (msg.verified ? "+verified" : ""),
+          : "ok:list-click",
     });
     console.log(
-      "[auto-x] ✓ 成功关注 @" + (finalName || uname) + (name ? " (" + name + ")" : "") +
-        (msg.alreadyFollowing ? " (本来已关注)" : "") +
-        (msg.pendingFollow ? " (待通过)" : "") +
-        (msg.verified ? " [已校验]" : "") +
-        " | 今日成功 " + data.stats.dailyFollows +
+      "[auto-x] ✓ 列表回关 @" +
+        (finalName || uname) +
+        " | 今日 " +
+        data.stats.dailyFollows +
         (msg.method ? " via " + msg.method : ""),
     );
+
+    // Daily cap: stop list walk
+    const settings = await getSettings();
+    if ((data.stats.dailyFollows || 0) >= settings.maxFollowsPerDay) {
+      console.log("[auto-x] daily limit — stop follow-back list");
+      await stopFollowBackList();
+      data.autoFollowRunning = false;
+      await persistData();
+      return;
+    }
   } else {
     data.stats.lastActionAt = new Date().toISOString();
     const err = msg.error || "unknown";
+    // Failures are skipped on the list (no profile loop). Just record once.
     store.recordFollowResult(data, { ok: false, username: uname, name, error: err });
     store.addToLog(data, {
       type: "follow",
       targetUser: "@" + uname,
       result: "fail: " + err,
     });
-    console.log("[auto-x] ✗ 关注失败 @" + uname + " — " + err);
+    console.log("[auto-x] ✗ 列表回关失败 @" + uname + " — " + err + "（已跳过，不重试主页）");
   }
   await persistData();
-
-  if (!data.autoFollowRunning) return;
-  const interval = (await getSettings()).minIntervalSec * 1000;
-  scheduleProcessQueue(interval);
+  // Content list walk continues on its own timer — no processQueue re-entry per user
 }
 
 async function processQueue() {
-  if (activeAction) return;
   await loadData();
   if (!data.autoFollowRunning || !data.connection?.connected) {
     return;
   }
-
-  // Drop stale pending entries that block candidate selection forever
-  if ((data.pendingActions || []).length && !activeAction) {
-    const staleBefore = Date.now() - 2 * 60 * 1000;
-    data.pendingActions = data.pendingActions.filter((a) => {
-      const t = a.queuedAt ? new Date(a.queuedAt).getTime() : 0;
-      return t > staleBefore;
-    });
-  }
-
-  const tabId = await ensureConnectedTab();
-  if (!tabId) {
-    console.warn("[auto-x] processQueue: no X tab, retry later");
+  if (isGraphSyncBusy()) {
+    console.log("[auto-x] processQueue: wait graph sync before 关注者列表回关");
     scheduleProcessQueue(8000);
     return;
   }
-
-  const candidates = await computeFollowBacks();
-  if (!candidates.length) {
-    const nonMutual = store.getNonMutualFollowers(data).length;
-    const settings = await getSettings();
-    const remaining = Math.max(0, settings.maxFollowsPerDay - (data.stats.dailyFollows || 0));
-    console.log(
-      "[auto-x] processQueue: no candidates | nonMutual=" +
-        nonMutual +
-        " remainingDaily=" +
-        remaining +
-        " followers=" +
-        Object.keys(data.followers || {}).length +
-        " following=" +
-        Object.keys(data.following || {}).length,
-    );
-    // Keep checking — new sync may add candidates
-    if (nonMutual === 0) return;
-    if (remaining <= 0) return;
-    scheduleProcessQueue(30000);
+  if (followBackWalk?.active) {
+    // List walk already clicking 回关 buttons
     return;
   }
-  const next = candidates[0];
-  if (!data.pendingActions.some((a) => String(a.userId) === String(next.id))) {
-    data.pendingActions.push({ userId: next.id, queuedAt: new Date().toISOString() });
-    await persistData();
+  const settings = await getSettings();
+  const remaining = Math.max(
+    0,
+    settings.maxFollowsPerDay - (data.stats.dailyFollows || 0),
+  );
+  if (remaining <= 0) {
+    console.log("[auto-x] processQueue: daily limit");
+    return;
   }
-  await executeAction(next.id, next.username, next.name);
+  await startFollowBackList();
 }
 
 async function findXTabs() {
@@ -965,36 +910,17 @@ async function startAutoFollow() {
   const settings = await getSettings();
   const followerCount = Object.keys(data.followers || {}).length;
   if (followerCount === 0) {
-    // Kick auto sync if not running
     if (!autoSyncPlan || autoSyncPlan.phase !== "running") {
       startAutoGraphSync({ reason: "pre-follow" }).catch(() => {});
     }
-    return {
-      ok: false,
-      error: "本地还没有粉丝名单，已开始自动同步，请稍候再试",
-      nonMutual: 0,
-    };
-  }
-  if (nonMutual.length === 0) {
-    return {
-      ok: false,
-      error:
-        "没有可回关的人（可能都已互关，或关注列表尚未同步完）。粉丝 " +
-        followerCount +
-        " · 关注 " +
-        Object.keys(data.following || {}).length +
-        " · 可点「重新同步」",
-      nonMutual: 0,
-      followers: followerCount,
-      following: Object.keys(data.following || {}).length,
-    };
+    // still allow list walk — 关注者页按钮不依赖本地名单
   }
 
   data.autoFollowRunning = true;
   data.pendingActions = [];
   await persistData();
   console.log(
-    "[auto-x] 自动关注已启动 | 待回关 " +
+    "[auto-x] 自动回关已启动（关注者列表点「回关」）| 本地待回关约 " +
       nonMutual.length +
       " | 每日上限 " +
       settings.maxFollowsPerDay +
@@ -1002,14 +928,15 @@ async function startAutoFollow() {
       settings.minIntervalSec +
       "s",
   );
-  // Kick immediately
-  scheduleProcessQueue(300);
+  // Open /followers and click list buttons — not profile pages
+  scheduleProcessQueue(400);
   return {
     ok: true,
     running: true,
     nonMutual: nonMutual.length,
     followers: followerCount,
     following: Object.keys(data.following || {}).length,
+    mode: "followers-list-click",
   };
 }
 
@@ -1020,8 +947,8 @@ async function stopAutoFollow() {
   clearActiveActionWatch();
   data.pendingActions = [];
   await persistData();
-  // Do NOT cancel graph auto-sync / pendingWalk — independent pipelines
-  console.log("[auto-x] 自动关注已停止 🛑 (graph sync untouched)");
+  await stopFollowBackList();
+  console.log("[auto-x] 自动回关已停止 🛑");
   return { ok: true, running: false };
 }
 
@@ -1285,6 +1212,7 @@ function buildStatus() {
     nonMutualCount: nonMutual.count ?? 0,
     nonMutualDetail: nonMutual,
     graphSyncBusy: isGraphSyncBusy(),
+    followBackListActive: !!(followBackWalk && followBackWalk.active),
     activeFollow: activeAction
       ? { username: activeAction.username, userId: activeAction.userId }
       : null,
@@ -1483,8 +1411,8 @@ api.runtime.onMessage.addListener((msg, sender, sendResponse) => {
           if (autoSyncPlan?.phase === "running") {
             advanceAutoSyncAfterWalk(endedStream);
           }
-          // Resume/keep auto-follow after list page settles
-          if (data?.autoFollowRunning) scheduleProcessQueue(2000);
+          // After graph sync, start 关注者列表回关 if user enabled auto-follow
+          if (data?.autoFollowRunning) scheduleProcessQueue(2500);
           break;
         }
         case "ACTION_COMPLETED":
@@ -1492,6 +1420,32 @@ api.runtime.onMessage.addListener((msg, sender, sendResponse) => {
           await onActionResult(msg);
           sendResponse({ ok: true });
           break;
+        case "FOLLOW_BACK_LIST_DONE": {
+          console.log(
+            "[auto-x] follow-back list done",
+            msg.reason || "",
+            "clicked=",
+            msg.clicked || 0,
+          );
+          if (followBackWalk) followBackWalk.active = false;
+          followBackWalk = null;
+          // Do not auto-restart into a loop of failures
+          if (data?.autoFollowRunning && msg.reason === "need-restart") {
+            scheduleProcessQueue(5000);
+          } else if (data?.autoFollowRunning && msg.reason === "complete") {
+            data.autoFollowRunning = false;
+            await persistData();
+            console.log("[auto-x] 关注者列表回关结束，自动关注已关闭");
+          }
+          sendResponse({ ok: true });
+          break;
+        }
+        case "FOLLOW_BACK_LIST_PROGRESS": {
+          // optional heartbeat from content
+          if (followBackWalk) followBackWalk.lastProgressAt = Date.now();
+          sendResponse({ ok: true });
+          break;
+        }
         case "QUERY_LEARNED": {
           const queries = (await api.storage.local.get("knownQueries")).knownQueries || {};
           queries[msg.endpoint] = { hash: msg.hash, seenAt: Date.now() };

@@ -248,22 +248,20 @@ async function refresh() {
         autoHint.textContent =
           cur +
           `待回关 ${nonMutual} 人。` +
-          (status.graphSyncBusy || autoRunning
-            ? "图谱同步中会暂缓回关（要占用 X 标签点关注按钮）；同步结束后自动继续。"
-            : "回关方式：打开对方主页并点击「关注」按钮。停止只结束回关，不影响同步。");
+          (status.followBackListActive
+            ? "正在关注者列表滚动并点击「回关」按钮（失败会跳过，不进主页循环）。"
+            : status.graphSyncBusy || autoRunning
+              ? "图谱同步中会暂缓回关；同步完后进入关注者列表点回关。"
+              : "停止只结束列表回关，不影响图谱同步。");
       } else {
         btnAuto.textContent = "开始自动关注";
         btnAuto.className = "btn primary btn-lg";
-        if (autoRunning || status.graphSyncBusy) {
+        if (status.graphSyncBusy || autoRunning) {
           autoHint.textContent =
-            "图谱同步进行中：回关会等同步结束再点主页关注按钮（避免抢同一标签页）。";
-        } else if (fl === 0) {
-          autoHint.textContent = "粉丝名单尚未同步完成，请稍候自动同步，或点「重新同步」。";
-        } else if (nonMutual === 0) {
-          autoHint.textContent = "当前没有待回关用户（可能都已互关）。可「重新同步」刷新名单。";
+            "图谱同步进行中：结束后会打开「关注者」列表，自动点击每一行的回关/关注按钮。";
         } else {
           autoHint.textContent =
-            `待回关 ${nonMutual} 人。将打开对方主页并点击关注按钮（间隔 ${settings.minIntervalSec || 5}s）。`;
+            `将打开关注者页面，滚动并点击「回关」按钮（间隔 ${settings.minIntervalSec || 5}s）。失败跳过，不会反复进个人主页。`;
         }
       }
 

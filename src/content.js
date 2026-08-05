@@ -839,118 +839,529 @@
   };
   window.addEventListener("popstate", () => setTimeout(onUrlMaybeChanged, 0));
 
-  // ── Click-based follow (real Follow button on profile) ─────────
+  // ── Follow-back on 关注者 list (NOT profile pages) ─────────────
+  // Stay on /followers, click each row's 回关/Follow button, skip failures.
+
+  let followBackList = null; // { intervalSec, maxClicks, clicked, skipped, stuckScrolls, lastHeight }
 
   function sleepMs(ms) {
     return new Promise((r) => setTimeout(r, ms));
   }
 
-  /**
-   * Locate profile Follow / Following / Pending button.
-   * Prefer data-testid="{userId}-follow|unfollow".
-   */
-  function findProfileFollowControl(userId, username) {
-    if (userId) {
-      const followBtn = document.querySelector(
-        `[data-testid="${userId}-follow"]`,
-      );
-      if (followBtn) return { el: followBtn, kind: "follow" };
-      const unf = document.querySelector(`[data-testid="${userId}-unfollow"]`);
-      if (unf) return { el: unf, kind: "following" };
-    }
+  function parseFollowTestIdSimple(tid) {
+    if (!tid) return null;
+    const m = String(tid).match(/^(\d+)-(follow|unfollow)$/i);
+    if (!m) return null;
+    return {
+      id: m[1],
+      kind: m[2].toLowerCase() === "unfollow" ? "following" : "follow",
+    };
+  }
 
-    const buttons = document.querySelectorAll('[role="button"], button');
-    for (const b of buttons) {
-      const al = (b.getAttribute("aria-label") || "").trim();
-      const text = (b.textContent || "").trim();
-      // Already following
+  function usernameFromUserCell(cell) {
+    const links = cell.querySelectorAll('a[href^="/"]');
+    for (const a of links) {
+      const href = a.getAttribute("href") || "";
+      const m = href.match(/^\/([A-Za-z0-9_]{1,15})(?:\/|$|\?)/);
+      if (!m) continue;
+      const h = m[1];
       if (
-        /^Following\b/i.test(al) ||
-        /^Unfollow\b/i.test(al) ||
-        /^正在关注/.test(al) ||
-        /^取消关注/.test(al) ||
-        text === "Following" ||
-        text === "正在关注"
+        ["home", "explore", "search", "i", "settings", "notifications", "messages"].includes(
+          h.toLowerCase(),
+        )
       ) {
-        // Prefer header actions, skip small cells if possible
-        return { el: b, kind: "following" };
+        continue;
       }
-      if (
-        /^Pending\b/i.test(al) ||
-        /^Requested\b/i.test(al) ||
-        /^已请求/.test(al) ||
-        text === "Pending" ||
-        text === "Requested"
-      ) {
-        return { el: b, kind: "pending" };
-      }
-      if (
-        /^Follow @/i.test(al) ||
-        /^关注\s*@/i.test(al) ||
-        (/^Follow$/i.test(al) && username) ||
-        text === "Follow" ||
-        text === "关注"
-      ) {
-        // Avoid "Follow back" noise in sidebars if we can match username
-        if (username && al && !al.toLowerCase().includes(String(username).toLowerCase())) {
-          // still allow plain "Follow" in userActions
-          if (!b.closest('[data-testid="userActions"]') && !b.closest('[data-testid="placementTracking"]')) {
-            continue;
-          }
-        }
-        return { el: b, kind: "follow" };
-      }
-      if (text === "Follow back" || text === "回关" || /^Follow back/i.test(al)) {
-        return { el: b, kind: "follow" };
-      }
-    }
-
-    // placementTracking wrapper (profile primary CTA)
-    const place = document.querySelector(
-      '[data-testid="placementTracking"] [role="button"], [data-testid="userActions"] [role="button"]',
-    );
-    if (place) {
-      const al = (place.getAttribute("aria-label") || place.textContent || "").trim();
-      if (/follow/i.test(al) && !/following|unfollow/i.test(al)) {
-        return { el: place, kind: "follow" };
-      }
-      if (/following|unfollow/i.test(al)) return { el: place, kind: "following" };
+      return h;
     }
     return null;
+  }
+
+  /**
+   * On 关注者 page: each UserCell may show Follow / Follow back / 回关 / 关注.
+   * Those are people who follow you but you don't follow (or not yet).
+   */
+  function findListFollowBackTargets(alreadyTried) {
+    const tried = alreadyTried || new Set();
+    const out = [];
+    const cells = document.querySelectorAll('[data-testid="UserCell"]');
+    for (const cell of cells) {
+      let userId = null;
+      let followBtn = null;
+      let kind = null;
+
+      for (const el of cell.querySelectorAll("[data-testid]")) {
+        const p = parseFollowTestIdSimple(el.getAttribute("data-testid"));
+        if (!p) continue;
+        userId = p.id;
+        if (p.kind === "follow") {
+          followBtn = el;
+          kind = "follow";
+        } else if (p.kind === "following") {
+          followBtn = null;
+          kind = "following";
+        }
+      }
+
+      // Text/aria fallback on the cell
+      if (!followBtn && kind !== "following") {
+        for (const b of cell.querySelectorAll('[role="button"], button')) {
+          const al = (b.getAttribute("aria-label") || "").trim();
+          const tx = (b.innerText || b.textContent || "").replace(/\s+/g, " ").trim();
+          if (
+            /^(Following|Unfollow|正在关注|取消关注)/i.test(al) ||
+            /^(Following|正在关注)$/i.test(tx)
+          ) {
+            kind = "following";
+            followBtn = null;
+            break;
+          }
+          if (
+            /^(Follow|Follow back|关注|回关)\b/i.test(al) ||
+            /^(Follow|Follow back|关注|回关)$/i.test(tx) ||
+            /^Follow @/i.test(al) ||
+            /^关注/.test(al)
+          ) {
+            if (/^Following/i.test(al) || /^Following/i.test(tx)) continue;
+            followBtn = b;
+            kind = "follow";
+            break;
+          }
+        }
+      }
+
+      if (!followBtn || kind !== "follow") continue;
+      const un = usernameFromUserCell(cell);
+      const key = userId
+        ? String(userId)
+        : un
+          ? "name:" + un.toLowerCase()
+          : null;
+      if (!key || tried.has(key)) continue;
+
+      out.push({
+        el: followBtn,
+        userId: userId ? String(userId) : null,
+        key,
+        username: un,
+      });
+    }
+    return out;
+  }
+
+  function stopFollowBackListLocal(reason) {
+    if (followBackList?.timer) {
+      clearTimeout(followBackList.timer);
+      followBackList.timer = null;
+    }
+    const clicked = followBackList?.clicked || 0;
+    followBackList = null;
+    console.log("[auto-x] follow-back list stopped:", reason || "", "clicked=", clicked);
+    sendToBg({
+      type: "FOLLOW_BACK_LIST_DONE",
+      reason: reason || "stop",
+      clicked,
+    });
+  }
+
+  async function followBackListTick() {
+    if (!followBackList) return;
+
+    // Must stay on 关注者 page
+    if (currentPathStream() !== "followers") {
+      stopFollowBackListLocal("left-followers-page");
+      return;
+    }
+
+    if (followBackList.clicked >= followBackList.maxClicks) {
+      stopFollowBackListLocal("daily-or-max");
+      return;
+    }
+
+    const targets = findListFollowBackTargets(followBackList.tried);
+    if (targets.length > 0) {
+      const t = targets[0];
+      followBackList.tried.add(t.key);
+      followBackList.stuckScrolls = 0;
+
+      try {
+        t.el.scrollIntoView({ block: "center", inline: "nearest" });
+      } catch {
+        /* ignore */
+      }
+      await sleepMs(250);
+
+      try {
+        const r = t.el.getBoundingClientRect();
+        const opts = {
+          bubbles: true,
+          cancelable: true,
+          view: window,
+          clientX: r.left + 4,
+          clientY: r.top + 4,
+        };
+        t.el.dispatchEvent(new MouseEvent("pointerdown", opts));
+        t.el.dispatchEvent(new MouseEvent("mousedown", opts));
+        t.el.dispatchEvent(new MouseEvent("pointerup", opts));
+        t.el.dispatchEvent(new MouseEvent("mouseup", opts));
+        t.el.dispatchEvent(new MouseEvent("click", opts));
+        if (typeof t.el.click === "function") t.el.click();
+      } catch (e) {
+        sendToBg({
+          type: "ACTION_COMPLETED",
+          actionId: "list-follow-" + t.key,
+          ok: false,
+          error: "点击失败: " + (e.message || e),
+          username: t.username,
+          targetUserId: t.userId,
+          method: "list-click",
+        });
+        followBackList.timer = setTimeout(followBackListTick, 800);
+        return;
+      }
+
+      console.log("[auto-x] list 回关 clicked", t.username || t.key);
+
+      // Wait briefly for button to become Following/unfollow
+      let ok = false;
+      let pending = false;
+      for (let i = 0; i < 12; i++) {
+        await sleepMs(350);
+        const cellStill = t.el.isConnected
+          ? t.el.closest('[data-testid="UserCell"]')
+          : null;
+        const root = cellStill || document;
+        let state = null;
+        if (t.userId) {
+          if (root.querySelector?.(`[data-testid="${t.userId}-unfollow"]`) ||
+              document.querySelector(`[data-testid="${t.userId}-unfollow"]`)) {
+            state = "following";
+          } else if (
+            document.querySelector(`[data-testid="${t.userId}-follow"]`)
+          ) {
+            state = "follow";
+          }
+        }
+        if (!state && cellStill) {
+          for (const b of cellStill.querySelectorAll('[role="button"], button')) {
+            const al = (b.getAttribute("aria-label") || "") + " " + (b.innerText || "");
+            if (/Following|Unfollow|正在关注|取消关注/i.test(al)) {
+              state = "following";
+              break;
+            }
+            if (/Pending|Requested|已请求/i.test(al)) {
+              state = "pending";
+              break;
+            }
+          }
+        }
+        if (state === "following" || state === "pending") {
+          ok = true;
+          pending = state === "pending";
+          break;
+        }
+        // button gone often means UI updated
+        if (!t.el.isConnected) {
+          ok = true;
+          break;
+        }
+      }
+
+      followBackList.clicked += ok ? 1 : 0;
+      sendToBg({
+        type: "ACTION_COMPLETED",
+        actionId: "list-follow-" + t.key,
+        ok,
+        following: ok,
+        pendingFollow: pending,
+        verified: ok,
+        username: t.username || t.key,
+        targetUserId: t.userId,
+        method: "list-click",
+        error: ok ? null : "列表点击后未确认已关注（已跳过，不进主页）",
+      });
+
+      const waitMs = Math.max(3000, (followBackList.intervalSec || 5) * 1000);
+      followBackList.timer = setTimeout(followBackListTick, waitMs);
+      return;
+    }
+
+    // No visible 回关 buttons — scroll for more
+    const h = document.documentElement.scrollHeight || document.body.scrollHeight || 0;
+    if (followBackList.lastHeight && h <= followBackList.lastHeight + 4) {
+      followBackList.stuckScrolls = (followBackList.stuckScrolls || 0) + 1;
+    } else {
+      followBackList.stuckScrolls = 0;
+      followBackList.lastHeight = h;
+    }
+
+    if (followBackList.stuckScrolls >= 6) {
+      stopFollowBackListLocal("complete");
+      return;
+    }
+
+    window.scrollTo(0, h);
+    try {
+      window.scrollBy(0, 500);
+    } catch {
+      /* ignore */
+    }
+    followBackList.timer = setTimeout(followBackListTick, 2000);
+  }
+
+  function startFollowBackListLocal(opts) {
+    if (followBackList?.timer) {
+      clearTimeout(followBackList.timer);
+      followBackList.timer = null;
+    }
+    followBackList = {
+      intervalSec: Math.max(3, Number(opts.intervalSec) || 5),
+      maxClicks: Math.max(1, Number(opts.maxClicks) || 50),
+      clicked: 0,
+      tried: new Set(),
+      stuckScrolls: 0,
+      lastHeight: 0,
+      timer: null,
+      selfUsername: opts.selfUsername || null,
+    };
+    console.log(
+      "[auto-x] follow-back list ON (关注者页点回关) | interval=",
+      followBackList.intervalSec,
+      "s max=",
+      followBackList.maxClicks,
+    );
+    followBackList.timer = setTimeout(followBackListTick, 1500);
+  }
+
+  // ── Profile click helpers (optional) ───────────────────────────
+
+  function primaryCol() {
+    return (
+      document.querySelector('[data-testid="primaryColumn"]') ||
+      document.querySelector('main[role="main"]') ||
+      document.body
+    );
+  }
+
+  function profilePageState(username) {
+    const text = (document.body && document.body.innerText) || "";
+    if (/This account doesn.?t exist|账号不存在|该账号不存在|Account suspended|账号已被冻结|已被冻结/i.test(text)) {
+      return "unavailable";
+    }
+    if (/These posts are protected|这些帖子受到保护|This account.?s posts are protected/i.test(text)) {
+      // protected still has Follow
+      return "protected";
+    }
+    const path = (location.pathname || "").toLowerCase();
+    const u = (username || "").toLowerCase();
+    if (u && path.indexOf("/" + u) === 0) return "profile";
+    return "unknown";
+  }
+
+  /** true follow testid: "123-follow" — NOT "123-unfollow" (ends with -follow too!) */
+  function parseFollowTestId(tid) {
+    if (!tid) return null;
+    const m = String(tid).match(/^(\d+)-(follow|unfollow)$/i);
+    if (!m) return null;
+    return { id: m[1], kind: m[2].toLowerCase() === "unfollow" ? "following" : "follow" };
+  }
+
+  function classifyButton(el, username) {
+    if (!el || el.disabled || el.getAttribute("aria-disabled") === "true") return null;
+    const tid = el.getAttribute("data-testid") || "";
+    const parsed = parseFollowTestId(tid);
+    if (parsed) return { el, kind: parsed.kind, via: "testid" };
+
+    const al = (el.getAttribute("aria-label") || "").replace(/\s+/g, " ").trim();
+    // Visible label: take direct text, not all descendants spam
+    let text = "";
+    try {
+      text = (el.innerText || el.textContent || "").replace(/\s+/g, " ").trim();
+      // Profile CTA is usually a short word
+      if (text.length > 40) text = text.slice(0, 40);
+    } catch {
+      text = "";
+    }
+
+    if (
+      /^(Following|Unfollow|正在关注|取消关注)\b/i.test(al) ||
+      /^(Following|Unfollow|正在关注|取消关注)$/i.test(text)
+    ) {
+      return { el, kind: "following", via: "label" };
+    }
+    if (
+      /^(Pending|Requested|已请求|等待中)\b/i.test(al) ||
+      /^(Pending|Requested|已请求)$/i.test(text)
+    ) {
+      return { el, kind: "pending", via: "label" };
+    }
+    // Follow / Follow @user / Follow back / 关注 / 回关
+    if (
+      /^(Follow|Follow back|关注|回关)\b/i.test(al) ||
+      /^(Follow|Follow back|关注|回关)$/i.test(text) ||
+      /^Follow @/i.test(al) ||
+      /^关注\s*@/i.test(al)
+    ) {
+      // Skip "Following" false positive already handled
+      if (/^Following/i.test(al) || /^Following/i.test(text)) {
+        return { el, kind: "following", via: "label" };
+      }
+      return { el, kind: "follow", via: "label" };
+    }
+    return null;
+  }
+
+  /**
+   * Locate profile Follow / Following / Pending in the main column.
+   */
+  function findProfileFollowControl(userId, username) {
+    const root = primaryCol();
+    const uid = userId != null ? String(userId) : null;
+    const uname = username ? String(username).replace(/^@/, "") : null;
+
+    // 1) Exact testids
+    if (uid) {
+      const f = root.querySelector(`[data-testid="${uid}-follow"]`);
+      if (f) return { el: f, kind: "follow", via: "id-follow" };
+      const u = root.querySelector(`[data-testid="${uid}-unfollow"]`);
+      if (u) return { el: u, kind: "following", via: "id-unfollow" };
+    }
+
+    // 2) Any *-follow / *-unfollow in primary column (parse carefully)
+    const testNodes = root.querySelectorAll("[data-testid]");
+    for (const el of testNodes) {
+      const parsed = parseFollowTestId(el.getAttribute("data-testid"));
+      if (!parsed) continue;
+      // Prefer matching userId when we have it
+      if (uid && parsed.id !== uid) continue;
+      return { el, kind: parsed.kind, via: "scan-testid" };
+    }
+    // If userId mismatch (stale id), accept first follow/unfollow in header area
+    for (const el of testNodes) {
+      const parsed = parseFollowTestId(el.getAttribute("data-testid"));
+      if (!parsed) continue;
+      if (el.closest('[data-testid="UserCell"]')) continue; // skip list cells if any
+      return { el, kind: parsed.kind, via: "scan-testid-any" };
+    }
+
+    // 3) placementTracking / userActions (profile CTA zone)
+    const zones = root.querySelectorAll(
+      '[data-testid="placementTracking"], [data-testid="userActions"], [data-testid="placementTracking"] *',
+    );
+    for (const zone of zones) {
+      const btns = zone.querySelectorAll
+        ? zone.querySelectorAll('[role="button"], button')
+        : [];
+      for (const b of btns) {
+        const c = classifyButton(b, uname);
+        if (c) return c;
+      }
+      // zone itself may be the button
+      if (zone.getAttribute && zone.getAttribute("role") === "button") {
+        const c = classifyButton(zone, uname);
+        if (c) return c;
+      }
+    }
+
+    // 4) All role=button in primary column — prefer top half of profile header
+    const buttons = root.querySelectorAll('[role="button"], button');
+    const candidates = [];
+    for (const b of buttons) {
+      if (b.closest('[data-testid="UserCell"]')) continue;
+      if (b.closest('[aria-label="Timeline:"]') || b.closest('[aria-label*="Timeline"]')) continue;
+      const c = classifyButton(b, uname);
+      if (!c) continue;
+      // Score: prefer buttons whose label mentions the username
+      let score = 0;
+      const al = (b.getAttribute("aria-label") || "").toLowerCase();
+      if (uname && al.includes(uname.toLowerCase())) score += 5;
+      if (b.closest('[data-testid="placementTracking"]')) score += 3;
+      if (b.closest('[data-testid="userActions"]')) score += 3;
+      candidates.push({ ...c, score });
+    }
+    candidates.sort((a, b) => b.score - a.score);
+    if (candidates.length) return candidates[0];
+
+    return null;
+  }
+
+  function debugDumpFollowCandidates() {
+    try {
+      const root = primaryCol();
+      const bits = [];
+      root.querySelectorAll('[role="button"], button, [data-testid]').forEach((el, i) => {
+        if (i > 80) return;
+        const tid = el.getAttribute("data-testid") || "";
+        const al = el.getAttribute("aria-label") || "";
+        const tx = (el.innerText || "").replace(/\s+/g, " ").trim().slice(0, 30);
+        if (/follow|关注|unfollow|pending|请求/i.test(tid + al + tx)) {
+          bits.push({ tid, al: al.slice(0, 60), tx });
+        }
+      });
+      console.log("[auto-x] follow candidates dump", bits.slice(0, 20));
+      return bits.slice(0, 12);
+    } catch {
+      return [];
+    }
   }
 
   async function performClickFollow({ username, userId, actionId }) {
     const uid = userId != null ? String(userId) : null;
     const uname = username ? String(username).replace(/^@/, "") : null;
-    console.log("[auto-x] click-follow start", uname, uid);
+    console.log("[auto-x] click-follow start", uname, uid, "path=", location.pathname);
 
-    // Wait for profile chrome / button
+    // Ensure we're near top (sticky header can hide CTA briefly)
+    try {
+      window.scrollTo(0, 0);
+    } catch {
+      /* ignore */
+    }
+
+    // Wait for profile shell + button (up to ~30s)
     let ctrl = null;
-    for (let i = 0; i < 40; i++) {
+    for (let i = 0; i < 60; i++) {
+      const st = profilePageState(uname);
+      if (st === "unavailable") {
+        const err = "账号不存在或已冻结，无法关注";
+        sendToBg({ type: "ACTION_COMPLETED", actionId, ok: false, error: err, method: "click" });
+        return { ok: false, error: err };
+      }
       ctrl = findProfileFollowControl(uid, uname);
       if (ctrl) break;
-      // also wait for primary column
-      if (document.querySelector('[data-testid="primaryColumn"]')) {
-        /* keep waiting for button */
+      // nudge scroll once mid-wait (some layouts lazy-render CTA)
+      if (i === 15 || i === 30) {
+        try {
+          window.scrollTo(0, 200);
+          await sleepMs(200);
+          window.scrollTo(0, 0);
+        } catch {
+          /* ignore */
+        }
       }
-      await sleepMs(400);
+      await sleepMs(500);
     }
 
     if (!ctrl) {
-      const err = "未找到关注按钮（主页可能未加载完或账号不可用）";
+      const dump = debugDumpFollowCandidates();
+      const err =
+        "未找到关注按钮（主页可能未加载完或选择器不匹配） path=" +
+        location.pathname +
+        (dump.length ? " dump=" + JSON.stringify(dump).slice(0, 220) : "");
       console.warn("[auto-x]", err);
       sendToBg({
         type: "ACTION_COMPLETED",
         actionId,
         ok: false,
-        error: err,
+        error: "未找到关注按钮（主页可能未加载完或账号不可用）",
         method: "click",
+        debug: dump,
       });
       return { ok: false, error: err };
     }
 
+    console.log("[auto-x] found follow control", ctrl.kind, ctrl.via || "");
+
     if (ctrl.kind === "following") {
-      console.log("[auto-x] already following (button state)");
       sendToBg({
         type: "ACTION_COMPLETED",
         actionId,
@@ -969,37 +1380,38 @@
         ok: true,
         following: true,
         pendingFollow: true,
-        alreadyFollowing: false,
         verified: true,
         method: "click",
       });
       return { ok: true, pendingFollow: true };
     }
 
-    // Click Follow
     try {
-      ctrl.el.scrollIntoView({ block: "center", behavior: "instant" });
+      ctrl.el.scrollIntoView({ block: "center", inline: "nearest" });
     } catch {
       /* ignore */
     }
-    await sleepMs(200);
+    await sleepMs(300);
+
+    // Prefer pointer events like a real user
     try {
-      ctrl.el.click();
+      const r = ctrl.el.getBoundingClientRect();
+      const opts = { bubbles: true, cancelable: true, view: window, clientX: r.left + 5, clientY: r.top + 5 };
+      ctrl.el.dispatchEvent(new MouseEvent("pointerdown", opts));
+      ctrl.el.dispatchEvent(new MouseEvent("mousedown", opts));
+      ctrl.el.dispatchEvent(new MouseEvent("pointerup", opts));
+      ctrl.el.dispatchEvent(new MouseEvent("mouseup", opts));
+      ctrl.el.dispatchEvent(new MouseEvent("click", opts));
+      if (typeof ctrl.el.click === "function") ctrl.el.click();
     } catch (e) {
-      // fallback: dispatch mouse events
-      try {
-        ctrl.el.dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true, view: window }));
-      } catch (e2) {
-        const err = "点击关注按钮失败: " + (e2.message || e.message);
-        sendToBg({ type: "ACTION_COMPLETED", actionId, ok: false, error: err, method: "click" });
-        return { ok: false, error: err };
-      }
+      const err = "点击关注按钮失败: " + (e.message || e);
+      sendToBg({ type: "ACTION_COMPLETED", actionId, ok: false, error: err, method: "click" });
+      return { ok: false, error: err };
     }
     console.log("[auto-x] Follow button clicked");
 
-    // Confirm state change
-    for (let i = 0; i < 25; i++) {
-      await sleepMs(350);
+    for (let i = 0; i < 30; i++) {
+      await sleepMs(400);
       const after = findProfileFollowControl(uid, uname);
       if (after && (after.kind === "following" || after.kind === "pending")) {
         console.log("[auto-x] click-follow confirmed:", after.kind);
@@ -1016,16 +1428,9 @@
       }
     }
 
-    // Some UIs briefly show toast only — treat ambiguous as fail so user sees it
     const err = "已点击关注，但未确认按钮变为 Following（可能被限流或需验证）";
     console.warn("[auto-x]", err);
-    sendToBg({
-      type: "ACTION_COMPLETED",
-      actionId,
-      ok: false,
-      error: err,
-      method: "click",
-    });
+    sendToBg({ type: "ACTION_COMPLETED", actionId, ok: false, error: err, method: "click" });
     return { ok: false, error: err };
   }
 
@@ -1088,51 +1493,37 @@
       if (!currentPathStream()) batchBuffer = [];
       console.log("[auto-x] STOP_WALK", stoppedStream || "(idle)");
       sendResponse({ ok: true, stream: stoppedStream });
-    } else if (msg.type === "EXECUTE_ACTION") {
-      // Legacy path — prefer CLICK_FOLLOW (DOM button)
-      if (msg.actionType === "follow") {
-        performClickFollow({
-          username: msg.username,
-          userId: msg.targetUserId,
-          actionId: msg.actionId,
-        }).catch((e) => {
-          sendToBg({
-            type: "ACTION_COMPLETED",
-            actionId: msg.actionId,
-            ok: false,
-            error: e.message || String(e),
-          });
+    } else if (msg.type === "START_FOLLOW_BACK_LIST") {
+      if (currentPathStream() !== "followers") {
+        sendResponse({
+          ok: false,
+          error: "not on followers page",
+          path: location.pathname,
         });
-        sendResponse({ ok: true, method: "click" });
-      } else {
-        window.postMessage(
-          {
-            source: "autox-content",
-            type: "EXECUTE_UNFOLLOW",
-            targetUserId: msg.targetUserId,
-            actionId: msg.actionId,
-          },
-          "*",
-        );
-        sendResponse({ ok: true });
+        return true;
       }
+      // Don't scroll-walk for sync at the same time
+      if (activeWalk) {
+        hardStopWalk("follow-back-takes-over", true);
+      }
+      startFollowBackListLocal({
+        intervalSec: msg.intervalSec,
+        maxClicks: msg.maxClicks,
+        selfUsername: msg.selfUsername,
+      });
+      sendResponse({ ok: true });
+    } else if (msg.type === "STOP_FOLLOW_BACK_LIST") {
+      if (followBackList) stopFollowBackListLocal("user-stop");
+      else followBackList = null;
+      sendResponse({ ok: true });
+    } else if (msg.type === "EXECUTE_ACTION") {
+      // Deprecated profile path — ignore follow (use list mode)
+      sendResponse({ ok: false, error: "use list follow-back" });
     } else if (msg.type === "CLICK_FOLLOW") {
-      performClickFollow({
-        username: msg.username,
-        userId: msg.targetUserId,
-        actionId: msg.actionId,
-      })
-        .then((r) => sendResponse(r || { ok: true }))
-        .catch((e) => {
-          sendToBg({
-            type: "ACTION_COMPLETED",
-            actionId: msg.actionId,
-            ok: false,
-            error: e.message || String(e),
-          });
-          sendResponse({ ok: false, error: e.message });
-        });
-      return true;
+      sendResponse({
+        ok: false,
+        error: "已改为关注者列表回关，不再进个人主页",
+      });
     } else if (msg.type === "GET_SESSION") {
       const state = evaluateLogin();
       sendResponse({
