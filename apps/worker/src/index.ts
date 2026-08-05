@@ -111,24 +111,26 @@ async function ensureBootstrap() {
   await upsertAccount({ id: me.id, username: me.username, name: me.name });
   await demoteMockAccount(me.id);
 
+  const listBlocked = !caps.readFollowers && !caps.readFollowing;
+  await setRuntime({
+    needs_bootstrap: false,
+    ...(switched || listBlocked
+      ? {
+          graph_consistent: listBlocked ? false : false,
+          followers_sync_ok: !!caps.readFollowers,
+          following_sync_ok: !!caps.readFollowing,
+        }
+      : {}),
+    last_error: listBlocked
+      ? `@${me.username} 已登录。X follows 列表接口 402（需 credits/付费套餐），无法同步粉丝/关注图；互关自动化暂不可用。`
+      : null,
+  });
   if (switched) {
-    // Drop mock graph_consistent so live account re-syncs
-    await setRuntime({
-      needs_bootstrap: false,
-      graph_consistent: false,
-      followers_sync_ok: false,
-      following_sync_ok: false,
-      last_error: caps.readFollowers
-        ? null
-        : `账号已切换为 @${me.username}；读粉丝/关注列表: ${caps.errors.readFollowers || caps.errors.readFollowing || "受限"}`,
-    });
-    await logEvent("bootstrap", `switched to @${me.username} (${me.id}) mode=${x.mode}`, {
+    await logEvent("bootstrap", `account @${me.username} (${me.id}) mode=${x.mode}`, {
       prev: account?.id,
       readFollowers: caps.readFollowers,
       readFollowing: caps.readFollowing,
     });
-  } else {
-    await setRuntime({ needs_bootstrap: false });
   }
   await pgNotify(WS_CHANNEL, envelope("runtime.changed", { needsBootstrap: false, me }));
   return { id: me.id, username: me.username, name: me.name };
