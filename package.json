@@ -1,0 +1,19 @@
+{
+  "name": "autox",
+  "private": true,
+  "type": "module",
+  "packageManager": "pnpm@9.15.9",
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "dev:api": "pnpm --filter @autox/api dev",
+    "dev:worker": "pnpm --filter @autox/worker dev",
+    "build": "pnpm -r run build",
+    "db:migrate": "pnpm --filter @autox/db db:migrate",
+    "typecheck": "pnpm -r run typecheck"
+  },
+  "devDependencies": {
+    "typescript": "^5.7.3"
+  }
+}

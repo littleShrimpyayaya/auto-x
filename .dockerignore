@@ -1,0 +1,24 @@
+# Keep Docker build context small and free of host-local deps/symlinks
+node_modules
+**/node_modules
+.git
+.gitignore
+.env
+.env.*
+!.env.example
+data
+backups
+coverage
+dist
+**/dist
+*.log
+.pnpm-store
+.turbo
+.DS_Store
+*.tsbuildinfo
+nginx/logs
+docs
+README.md
+Makefile
+scripts
+nginx

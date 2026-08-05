@@ -1,158 +1,112 @@
-# 统一编排文件 - 支持独立启动 nginx（静态页面）
-# 启动全部: docker compose up -d
-# 仅启动 nginx（静态页面）: docker compose up -d nginx
+# auto-x main stack: postgres + one-shot migrate + api + worker
+# nginx is intentionally NOT here — keep nginx/tools/ and start nginx separately if needed.
+# Start: ./scripts/start.sh   or   make up
 
 services:
-
-  # =============================================
-  # Nginx - 可独立启动，访问静态页面
-  # =============================================
-  nginx:
-    image: "docker.m.daocloud.io/library/nginx:1.27-alpine"
-    container_name: nginx
-    restart: unless-stopped
-    ports:
-      - "80:80"
-      - "443:443"
-    volumes:
-      - ./nginx/nginx/nginx.conf:/etc/nginx/nginx.conf:ro
-      - ./nginx/nginx/certs:/etc/nginx/certs:ro
-      - ./nginx/web:/var/www/web:ro
-      - ./nginx/logs:/var/log/nginx
-    command: ["nginx", "-g", "daemon off;"]
-    networks:
-      - backend
-    depends_on:
-      - drogon
-    healthcheck:
-      # 80 端口提供 /healthz（不强制跳转 HTTPS），避免 alpine wget 跟 301 后 SSL 探测失败
-      test: ["CMD-SHELL", "wget -q --spider http://127.0.0.1/healthz || exit 1"]
-      interval: 30s
-      timeout: 10s
-      retries: 3
-      start_period: 5s
-
-  # =============================================
-  # Backend (Drogon)
-  # =============================================
-  drogon:
-    image: "backend-builder:latest"
-    container_name: drogon
-    restart: unless-stopped
-    command: ["/app/output/bin/drogonserver"]
-    environment:
-      - REDIS_HOST=redis
-      - REDIS_PORT=6379
-      - SUPER_ADMIN_PHONE_NO=${SUPER_ADMIN_PHONE_NO:-}
-      # OCR 配置 - 使用 PaddleOCR 自建服务
-      - OCR_BACKEND_TYPE=${OCR_BACKEND_TYPE:-paddle}
-      - PADDLEOCR_URL=${PADDLEOCR_URL:-http://paddleocr:9393}
-    volumes:
-      - ./backend:/app
-      - ./backend/tools/keys:/etc/application/keys
-      - ./backend/output:/app/output
-      - ./backend/var/www:/var/www
-      - drogon_data:/app/data
-      - drogon_uploads:/app/uploads
-      - ./backend/logs/drogon:/app/logs
-      - file_storage:/data/files
-      - /coredumps:/coredumps
-
-    ulimits:
-      core: -1
-    networks:
-      - backend
-    depends_on:
-      redis:
-        condition: service_started
-      postgres:
-        condition: service_healthy
-    healthcheck:
-      test: ["CMD-SHELL", "python3 -c \"import urllib.request; urllib.request.urlopen('http://localhost:8080/api/health')\""]
-      interval: 30s
-      timeout: 10s
-      retries: 3
-      start_period: 45s
-
-  # =============================================
-  # PostgreSQL (primary DB; SQLite config kept as config.sqlite.json)
-  # =============================================
   postgres:
-    image: "docker.m.daocloud.io/library/postgres:16-alpine"
-    container_name: postgres
+    image: postgres:16-alpine
+    container_name: autox-postgres
     restart: unless-stopped
+    env_file: .env
     environment:
-      POSTGRES_USER: massage
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-massage_pg_pass}
-      POSTGRES_DB: massage
-      TZ: Asia/Shanghai
+      POSTGRES_USER: ${POSTGRES_USER:-autox}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB:-autox}
     volumes:
-      - postgres_data:/var/lib/postgresql/data
-    networks:
-      - backend
+      - pgdata:/var/lib/postgresql/data
+    ports:
+      - "5432:5432"
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U massage -d massage"]
-      interval: 10s
+      test: ["CMD-SHELL", "pg_isready -U $$POSTGRES_USER -d $$POSTGRES_DB"]
+      interval: 5s
       timeout: 5s
       retries: 10
       start_period: 10s
-
-  # =============================================
-  # Redis
-  # =============================================
-  redis:
-    image: "docker.m.daocloud.io/library/redis:7-alpine"
-    container_name: redis
-    restart: unless-stopped
-    command: ["redis-server", "--appendonly", "yes", "--bind", "0.0.0.0", "--protected-mode", "no"]
-    volumes:
-      - redis_data:/data
     networks:
-      - backend
+      - autox
+
+  # K25: sole migrator — api/worker MUST NOT migrate on boot
+  # PR1: packages/db migrate is a no-op stub that logs "PR1: no migrations yet" and exits 0
+  # DATABASE_URL embeds POSTGRES_PASSWORD without URL-encoding — use URL-safe passwords
+  # (no @ : / # ? % etc.) until an entrypoint encodes credentials (see .env.example).
+  migrate:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.node
+      args:
+        APP: migrate
+    container_name: autox-migrate
+    env_file: .env
+    environment:
+      DATABASE_URL: postgres://${POSTGRES_USER:-autox}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-autox}
+    command: ["pnpm", "--filter", "@autox/db", "db:migrate"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: "no"
+    networks:
+      - autox
+
+  api:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.node
+      args:
+        APP: api
+    container_name: autox-api
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      DATABASE_URL: postgres://${POSTGRES_USER:-autox}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-autox}
+      PORT: "3000"
+      PG_POOL_MAX: "10"
+    ports:
+      - "3000:3000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
     healthcheck:
-      test: ["CMD", "redis-cli", "ping"]
-      interval: 10s
+      test:
+        [
+          "CMD",
+          "node",
+          "-e",
+          "fetch('http://127.0.0.1:3000/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))",
+        ]
+      interval: 15s
       timeout: 5s
-      retries: 3
+      retries: 5
+      start_period: 20s
+    networks:
+      - autox
 
-  # =============================================
-  # PaddleOCR Service - 自建OCR服务（可选）
-  # =============================================
-  # 构建镜像: docker build -t paddleocr-serving -f paddleocr/Dockerfile .
-  # 使用本地构建的镜像，无需登录即可拉取
-  # 如果不启动此服务，系统会自动降级使用Mock OCR后端
-  #paddleocr:
-  #  image: "paddleocr-serving:latest"
-  #  build:
-  #    context: ./paddleocr
-  #    dockerfile: Dockerfile
-  #  container_name: paddleocr
-  #  restart: unless-stopped
-  #  # 不暴露端口，仅供 Docker 内网访问
-  #  environment:
-  #    - TZ=Asia/Shanghai
-  #    - FLAGS_rpc_deadline=5000
-  #  volumes:
-  #    - ./paddleocr/config.yml:/app/config.yml
-  #    - paddleocr_models:/root/.paddleocr
-  #  networks:
-  #    - backend
-  #  healthcheck:
-  #    test: ["CMD", "curl", "-f", "http://localhost:9393/health", "||", "exit", "0"]
-  #    interval: 30s
-  #    timeout: 10s
-  #    retries: 3
-  #    start_period: 60s
-
-networks:
-  backend:
-    name: webpage_backend
-    driver: bridge
+  worker:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.node
+      args:
+        APP: worker
+    container_name: autox-worker
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      DATABASE_URL: postgres://${POSTGRES_USER:-autox}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-autox}
+      WORKER_ID: worker-1
+      PG_POOL_MAX: "10"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+    networks:
+      - autox
 
 volumes:
-  redis_data:
-  drogon_data:
-  drogon_uploads:
-  file_storage:
-  postgres_data:
-#paddleocr_models:
+  pgdata:
+
+networks:
+  autox:
+    name: autox
+    driver: bridge
