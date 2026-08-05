@@ -8,7 +8,8 @@ if (typeof importScripts === "function") {
 
 const api = self.autoxBrowser || (typeof browser !== "undefined" ? browser : chrome);
 const store = self.autoxStore;
-const VERSION = "0.3.0";
+const VERSION = "0.3.2";
+const PANEL_PATH = "src/panel/panel.html";
 
 let connectedTabId = null;
 let data = null;
@@ -603,6 +604,12 @@ api.runtime.onMessage.addListener((msg, sender, sendResponse) => {
         case "OPEN_X":
           sendResponse(await openOrFocusX());
           break;
+        case "OPEN_SIDE_PANEL":
+          sendResponse(await openSidePanelForSender(sender));
+          break;
+        case "OPEN_PANEL_TAB":
+          sendResponse(await openPanelTab());
+          break;
         case "CONNECT":
           sendResponse(await connectAccount());
           break;
@@ -713,9 +720,123 @@ try {
   }, 60_000);
 }
 
+// ── Toolbar / fixed panel (side panel stays open while browsing) ──
+
+function setupActionIcon() {
+  try {
+    if (api.action?.setTitle) {
+      api.action.setTitle({ title: "auto-x — 打开固定控制台" });
+    }
+    if (api.action?.setIcon) {
+      api.action.setIcon({
+        path: {
+          16: "icons/icon-16.png",
+          32: "icons/icon-32.png",
+          48: "icons/icon-48.png",
+          128: "icons/icon-128.png",
+        },
+      });
+    }
+  } catch (e) {
+    console.warn("[auto-x] action icon setup", e);
+  }
+}
+
+/**
+ * Chrome / Edge: click extension icon → open side panel (stays docked).
+ * Firefox: sidebar_action in manifest; action click opens panel tab as fallback.
+ */
+async function setupSidePanelBehavior() {
+  try {
+    if (api.sidePanel?.setPanelBehavior) {
+      await api.sidePanel.setPanelBehavior({ openPanelOnActionClick: true });
+      console.log("[auto-x] side panel opens on action click");
+      return true;
+    }
+  } catch (e) {
+    console.warn("[auto-x] sidePanel behavior:", e);
+  }
+  return false;
+}
+
+async function openSidePanelForSender(sender) {
+  if (!api.sidePanel?.open) {
+    return { ok: false, error: "当前浏览器不支持侧边栏，已可用「新标签页」代替" };
+  }
+  try {
+    const winId =
+      sender?.tab?.windowId ??
+      (await api.windows?.getCurrent?.().then((w) => w?.id).catch(() => null));
+    if (winId != null) {
+      await api.sidePanel.open({ windowId: winId });
+    } else {
+      // Some builds accept open() without args
+      await api.sidePanel.open({});
+    }
+    return { ok: true };
+  } catch (e) {
+    return { ok: false, error: e.message || String(e) };
+  }
+}
+
+async function openPanelTab() {
+  const url = api.runtime.getURL(PANEL_PATH);
+  // Reuse existing panel tab if present
+  try {
+    const tabs = await api.tabs.query({});
+    const existing = (tabs || []).find(
+      (t) => t.url && (t.url === url || t.url.startsWith(url)),
+    );
+    if (existing?.id != null) {
+      await api.tabs.update(existing.id, { active: true });
+      if (existing.windowId != null && api.windows?.update) {
+        try {
+          await api.windows.update(existing.windowId, { focused: true });
+        } catch {
+          /* ignore */
+        }
+      }
+      return { ok: true, tabId: existing.id, reused: true };
+    }
+  } catch {
+    /* fall through */
+  }
+  const tab = await api.tabs.create({ url, active: true });
+  return { ok: true, tabId: tab?.id, reused: false };
+}
+
+// Fallback when side panel API missing: open panel tab on icon click
+let sidePanelReady = false;
+
+if (api.action?.onClicked) {
+  api.action.onClicked.addListener(async () => {
+    if (sidePanelReady) return; // Chrome handles open via setPanelBehavior
+    await openPanelTab();
+  });
+}
+
+if (api.runtime?.onInstalled) {
+  api.runtime.onInstalled.addListener(async (details) => {
+    setupActionIcon();
+    sidePanelReady = await setupSidePanelBehavior();
+    if (details.reason === "install") {
+      try {
+        await api.storage.local.remove("autox_pin_tip_dismissed");
+      } catch {
+        /* ignore */
+      }
+      console.log("[auto-x] installed — open side panel or pin the control tab");
+    }
+  });
+}
+
 // ── Init ──
 
 (async function () {
+  setupActionIcon();
+  sidePanelReady = await setupSidePanelBehavior();
+  // If no side panel: ensure icon click still opens fixed console as tab
+  // (requires NO default_popup — already removed from manifest)
   await loadData();
   if (data.connection?.tabId) connectedTabId = data.connection.tabId;
   const pw = (await api.storage.local.get("pendingWalk")).pendingWalk;
@@ -724,6 +845,7 @@ try {
   }
   console.log(
     "[auto-x] v" + VERSION +
+      " | sidePanel=" + sidePanelReady +
       " | connected=" + !!data.connection?.connected +
       " | autoFollow=" + !!data.autoFollowRunning +
       " | followers=" + Object.keys(data.followers).length +

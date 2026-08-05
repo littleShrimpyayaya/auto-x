@@ -2,10 +2,11 @@
 <html lang="zh-CN">
 <head>
   <meta charset="utf-8">
-  <title>auto-x</title>
-  <link rel="stylesheet" href="popup.css">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>auto-x 控制台</title>
+  <link rel="stylesheet" href="../popup/popup.css">
 </head>
-<body>
+<body class="panel-mode">
   <div id="app">
     <header>
       <div class="brand">
@@ -15,24 +16,29 @@
       <span id="status-dot" class="dot offline" title="状态"></span>
     </header>
 
-    <!-- Fixed console: side panel / pin tab (popup closes when focus lost) -->
     <section id="pin-tip" class="card pin-tip">
       <div class="pin-tip-row">
         <div>
-          <div class="pin-tip-title">📌 固定插件页面（推荐）</div>
-          <div class="hint pin-tip-body" id="pin-tip-body">
-            小弹窗点别处会关闭。要用<strong>固定面板</strong>：
-          </div>
-          <div class="actions col" style="margin-top:8px">
-            <button id="btn-open-side" class="btn primary" type="button">在侧边栏打开（固定在右侧）</button>
-            <button id="btn-open-tab" class="btn" type="button">在新标签打开（可固定标签页）</button>
+          <div class="pin-tip-title">📌 本页可固定显示</div>
+          <div class="hint pin-tip-body">
+            你正在使用<strong>固定控制台</strong>：切换到 X 浏览时页面不会自动关闭。<br>
+            · <b>侧边栏</b>：点工具栏图标即可打开（Chrome / Edge）<br>
+            · <b>固定标签</b>：点下方按钮打开标签后，右键标签 →「固定标签页」
           </div>
         </div>
-        <button id="btn-pin-dismiss" class="link-btn" type="button" title="知道了，不再显示">知道了</button>
+        <button id="btn-pin-dismiss" class="link-btn" type="button">知道了</button>
       </div>
     </section>
 
-    <!-- Gate: login / connect / status badge -->
+    <section id="panel-actions" class="card">
+      <div class="label">页面固定方式</div>
+      <div class="actions col">
+        <button id="btn-open-side" class="btn primary" type="button">在侧边栏打开</button>
+        <button id="btn-open-tab" class="btn" type="button">在新标签页打开（可固定标签）</button>
+      </div>
+      <div class="hint">侧边栏会停在浏览器一侧；标签页可用浏览器自带的「固定标签页」钉住。</div>
+    </section>
+
     <section id="gate" class="card">
       <div class="label">连接状态</div>
       <div id="conn-badge" class="conn-badge checking" role="status">
@@ -49,7 +55,6 @@
       </div>
     </section>
 
-    <!-- Connected account -->
     <section id="account" class="card hidden">
       <div class="label">当前账户</div>
       <div class="account-row">
@@ -67,7 +72,6 @@
       </div>
     </section>
 
-    <!-- Sync graph -->
     <section id="sync" class="card hidden">
       <div class="label">图谱同步</div>
       <div id="sync-status">未同步</div>
@@ -75,24 +79,21 @@
         <button id="btn-sync-followers" class="btn">同步粉丝</button>
         <button id="btn-sync-following" class="btn">同步关注</button>
       </div>
-      <div class="hint">同步时会打开列表页并自动翻页；关闭弹窗不影响后台自动关注。</div>
+      <div class="hint">同步时会打开列表页并自动翻页；关闭本面板不影响后台自动关注。</div>
     </section>
 
-    <!-- Main control -->
     <section id="controls" class="card hidden">
       <div class="label">自动回关</div>
       <button id="btn-auto" class="btn primary btn-lg">开始自动关注</button>
-      <div id="auto-hint" class="hint">后台运行，关闭弹窗不会停止。</div>
+      <div id="auto-hint" class="hint">后台运行，关闭面板不会停止。</div>
     </section>
 
-    <!-- Usage -->
     <section id="usage" class="card hidden">
       <div class="label">今日用量</div>
       <div id="usage-detail">—</div>
       <div id="pending-line" class="hint"></div>
     </section>
 
-    <!-- Results: success / fail -->
     <section id="results" class="card hidden">
       <div class="results-header">
         <div class="label">关注结果</div>
@@ -126,6 +127,6 @@
     </footer>
   </div>
   <script src="../lib/browser.js"></script>
-  <script src="popup.js"></script>
+  <script src="../popup/popup.js"></script>
 </body>
 </html>

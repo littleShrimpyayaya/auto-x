@@ -4,6 +4,10 @@
   padding: 0;
 }
 
+html {
+  height: 100%;
+}
+
 body {
   width: 340px;
   max-height: 560px;
@@ -15,11 +19,49 @@ body {
   padding: 12px;
 }
 
+/* Side panel / full tab: stay open while browsing X */
+body.panel-mode {
+  width: 100%;
+  min-width: 280px;
+  max-width: 100%;
+  max-height: none;
+  min-height: 100%;
+  height: auto;
+}
+
+body.panel-mode #app {
+  max-width: 420px;
+  margin: 0 auto;
+}
+
 header {
   display: flex;
   align-items: center;
   justify-content: space-between;
   margin-bottom: 12px;
+}
+
+.pin-tip {
+  border: 1px solid #1d9bf044;
+  background: linear-gradient(135deg, #1a1f26 0%, #15202b 100%);
+}
+
+.pin-tip-row {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  justify-content: space-between;
+}
+
+.pin-tip-title {
+  font-size: 13px;
+  font-weight: 700;
+  color: #1d9bf0;
+  margin-bottom: 4px;
+}
+
+.pin-tip-body {
+  margin-top: 0;
 }
 
 .brand {

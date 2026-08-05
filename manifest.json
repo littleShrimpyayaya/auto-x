@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "auto-x",
-  "version": "0.3.0",
+  "version": "0.3.2",
   "description": "X (Twitter) 自动回关 — 跨浏览器纯前端插件，无需后端",
   "background": {
     "service_worker": "src/background.js",
@@ -12,19 +12,28 @@
     ]
   },
   "action": {
-    "default_popup": "src/popup/popup.html",
-    "default_title": "auto-x",
+    "default_title": "auto-x — 打开固定控制台",
     "default_icon": {
       "16": "icons/icon-16.png",
+      "32": "icons/icon-32.png",
       "48": "icons/icon-48.png",
       "128": "icons/icon-128.png"
     }
+  },
+  "side_panel": {
+    "default_path": "src/panel/panel.html"
+  },
+  "sidebar_action": {
+    "default_panel": "src/panel/panel.html",
+    "default_title": "auto-x",
+    "default_icon": "icons/icon-48.png",
+    "open_at_install": false
   },
   "options_ui": {
     "page": "src/options/options.html",
     "open_in_tab": true
   },
-  "permissions": ["storage", "alarms", "tabs"],
+  "permissions": ["storage", "alarms", "tabs", "sidePanel"],
   "host_permissions": [
     "https://x.com/*",
     "https://twitter.com/*",
@@ -51,6 +60,7 @@
   },
   "icons": {
     "16": "icons/icon-16.png",
+    "32": "icons/icon-32.png",
     "48": "icons/icon-48.png",
     "128": "icons/icon-128.png"
   }

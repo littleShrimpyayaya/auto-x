@@ -391,5 +391,85 @@ $("open-options").addEventListener("click", (e) => {
   }
 });
 
+// ── Fixed console: side panel / pin-able tab ──
+const pinTip = $("pin-tip");
+const btnPinDismiss = $("btn-pin-dismiss");
+const btnOpenSide = $("btn-open-side");
+const btnOpenTab = $("btn-open-tab");
+const panelActions = $("panel-actions");
+const isPanelPage = document.body.classList.contains("panel-mode");
+
+async function openSidePanel() {
+  const r = await send("OPEN_SIDE_PANEL");
+  if (r && r.ok === false) {
+    // Fallback: open tab if side panel unavailable
+    await send("OPEN_PANEL_TAB");
+    if (gateHint) gateHint.textContent = r.error || "已改用标签页打开控制台";
+  } else if (!isPanelPage) {
+    // Closing popup after opening side panel is fine
+    try {
+      window.close();
+    } catch {
+      /* ignore */
+    }
+  }
+}
+
+async function openPanelTab() {
+  await send("OPEN_PANEL_TAB");
+  if (!isPanelPage) {
+    try {
+      window.close();
+    } catch {
+      /* ignore */
+    }
+  }
+}
+
+if (btnOpenSide) {
+  btnOpenSide.addEventListener("click", () => {
+    openSidePanel();
+  });
+}
+if (btnOpenTab) {
+  btnOpenTab.addEventListener("click", () => {
+    openPanelTab();
+  });
+}
+
+// On dedicated panel page, hide redundant "open side" if already in side panel-ish UI
+if (isPanelPage && panelActions) {
+  // Keep both options available so user can still open a pin-able tab
+  show(panelActions, true);
+}
+
+async function initPinTip() {
+  // Always show open-fixed-panel buttons in popup; dismiss only hides tip card text area on panel
+  try {
+    const stored = await api.storage.local.get("autox_pin_tip_dismissed");
+    if (stored.autox_pin_tip_dismissed && pinTip) {
+      // In popup: still show a compact open-panel card if buttons exist outside tip
+      if (isPanelPage) show(pinTip, false);
+      else show(pinTip, true); // keep entry points visible in small popup
+    } else if (pinTip) {
+      show(pinTip, true);
+    }
+  } catch {
+    if (pinTip) show(pinTip, true);
+  }
+}
+
+if (btnPinDismiss) {
+  btnPinDismiss.addEventListener("click", async () => {
+    show(pinTip, false);
+    try {
+      await api.storage.local.set({ autox_pin_tip_dismissed: true });
+    } catch {
+      /* ignore */
+    }
+  });
+}
+
+initPinTip();
 refresh();
 setInterval(refresh, 2500);
