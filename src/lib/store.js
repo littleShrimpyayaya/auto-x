@@ -77,7 +77,13 @@
   function getNonMutualFollowers(data) {
     const toFollow = [];
     const pending = new Set((data.pendingActions || []).map((a) => a.userId));
+    const selfId = data.sessionUser?.id ? String(data.sessionUser.id) : null;
+    const selfName = data.sessionUser?.username
+      ? String(data.sessionUser.username).toLowerCase()
+      : null;
     for (const [id, user] of Object.entries(data.followers || {})) {
+      if (selfId && String(id) === selfId) continue;
+      if (selfName && String(user?.username || "").toLowerCase() === selfName) continue;
       if (!data.following?.[id] && !pending.has(id)) {
         if (!user?.username) continue;
         toFollow.push({ id, ...user });

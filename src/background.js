@@ -8,7 +8,7 @@ if (typeof importScripts === "function") {
 
 const api = self.autoxBrowser || (typeof browser !== "undefined" ? browser : chrome);
 const store = self.autoxStore;
-const VERSION = "0.3.2";
+const VERSION = "0.3.3";
 const PANEL_PATH = "src/panel/panel.html";
 
 let connectedTabId = null;
@@ -60,8 +60,15 @@ function ingestUsers(users, stream) {
   if (!users?.length) return 0;
   let count = 0;
   const target = stream === "followers" ? data.followers : data.following;
+  const selfId = data.sessionUser?.id ? String(data.sessionUser.id) : null;
+  const selfName = data.sessionUser?.username
+    ? String(data.sessionUser.username).toLowerCase()
+    : null;
   for (const u of users) {
     if (!u.id || !u.username) continue;
+    // Never store self as a follower/following entry (timeline root user appears in GraphQL)
+    if (selfId && String(u.id) === selfId) continue;
+    if (selfName && String(u.username).toLowerCase() === selfName) continue;
     target[u.id] = { ...(target[u.id] || {}), ...u, _seenAt: new Date().toISOString() };
     count++;
   }
@@ -397,11 +404,52 @@ async function stopAutoFollow() {
   return { ok: true, running: false };
 }
 
+async function stopSync() {
+  const stream = pendingWalk?.stream || null;
+  const tabId = pendingWalk?.tabId || connectedTabId;
+  pendingWalk = null;
+  await api.storage.local.remove("pendingWalk");
+  if (tabId) {
+    try {
+      await api.tabs.sendMessage(tabId, { type: "STOP_WALK" });
+    } catch {
+      /* tab may be gone */
+    }
+  }
+  console.log("[auto-x] sync stopped", stream || "");
+  return { ok: true, stopped: true, stream };
+}
+
 async function startSync(stream) {
   await loadData();
+  if (stream !== "followers" && stream !== "following") {
+    return { ok: false, error: "未知同步类型" };
+  }
   if (!data.connection?.connected) {
     return { ok: false, error: "请先连接账户" };
   }
+
+  // Only one list walk at a time (same tab navigation + scroll)
+  if (pendingWalk) {
+    if (pendingWalk.stream === stream) {
+      return {
+        ok: false,
+        error: "该列表正在同步中，可点击「停止同步」结束",
+        busy: true,
+        walkStream: pendingWalk.stream,
+      };
+    }
+    return {
+      ok: false,
+      error:
+        "当前正在同步「" +
+        (pendingWalk.stream === "followers" ? "粉丝" : "关注") +
+        "」，请先停止后再同步另一列表（不能同时进行）",
+      busy: true,
+      walkStream: pendingWalk.stream,
+    };
+  }
+
   if (!connectedTabId) {
     if (data.connection.tabId) connectedTabId = data.connection.tabId;
   }
@@ -432,9 +480,11 @@ async function startSync(stream) {
   try {
     await api.tabs.update(connectedTabId, { url: targetUrl, active: true });
   } catch (e) {
+    pendingWalk = null;
+    await api.storage.local.remove("pendingWalk");
     return { ok: false, error: e.message };
   }
-  return { ok: true };
+  return { ok: true, walkStream: stream };
 }
 
 async function tryDispatchWalk(tabId) {
@@ -625,19 +675,9 @@ api.runtime.onMessage.addListener((msg, sender, sendResponse) => {
         case "START_SYNC":
           sendResponse(await startSync(msg.stream));
           break;
-        case "STOP_SYNC": {
-          pendingWalk = null;
-          await api.storage.local.remove("pendingWalk");
-          if (connectedTabId) {
-            try {
-              await api.tabs.sendMessage(connectedTabId, { type: "STOP_WALK" });
-            } catch {
-              /* ignore */
-            }
-          }
-          sendResponse({ ok: true });
+        case "STOP_SYNC":
+          sendResponse(await stopSync());
           break;
-        }
         case "CLEAR_RESULTS": {
           await loadData();
           data.stats.successList = [];

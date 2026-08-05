@@ -183,12 +183,19 @@ async function refresh() {
       show(syncCard, true);
       const fl = status.followers?.count || 0;
       const fg = status.following?.count || 0;
+      const walkActive = !!status.walkActive;
+      const walkStream = status.walkStream || null;
+      const streamLabel =
+        walkStream === "followers" ? "粉丝" : walkStream === "following" ? "关注" : walkStream || "";
       syncStatus.innerHTML =
         `粉丝 <b>${fl}</b> · 关注 <b>${fg}</b>` +
         `<div class="hint" style="margin-top:4px">` +
         `粉丝: ${fmtTime(status.followers?.lastSync)} · 关注: ${fmtTime(status.following?.lastSync)}` +
-        (status.walkActive ? `<br>正在同步 ${status.walkStream || ""}…` : "") +
+        (walkActive
+          ? `<br><b style="color:#1d9bf0">正在同步${streamLabel}…</b> 点击红色按钮可停止`
+          : "") +
         `</div>`;
+      updateSyncButtons(walkActive, walkStream);
 
       show(controlsCard, true);
       if (running) {
@@ -358,24 +365,74 @@ btnAuto.addEventListener("click", async () => {
   }
 });
 
-$("btn-sync-followers").addEventListener("click", async () => {
-  const r = await send("START_SYNC", { stream: "followers" });
-  if (r && r.ok === false) {
-    gateHint.textContent = r.error || "同步失败";
-    return;
-  }
-  // Keep popup open so user sees status; walk continues in background
-  await refresh();
-});
+const btnSyncFollowers = $("btn-sync-followers");
+const btnSyncFollowing = $("btn-sync-following");
 
-$("btn-sync-following").addEventListener("click", async () => {
-  const r = await send("START_SYNC", { stream: "following" });
+/**
+ * Sync is exclusive: only one list walk at a time.
+ * Active stream → stop button; the other is grayed out.
+ */
+function updateSyncButtons(walkActive, walkStream) {
+  if (!btnSyncFollowers || !btnSyncFollowing) return;
+
+  if (walkActive && walkStream === "followers") {
+    btnSyncFollowers.textContent = "🛑 停止同步粉丝";
+    btnSyncFollowers.className = "btn stop";
+    btnSyncFollowers.disabled = false;
+    btnSyncFollowers.title = "点击停止当前粉丝同步";
+    btnSyncFollowing.textContent = "同步关注";
+    btnSyncFollowing.className = "btn";
+    btnSyncFollowing.disabled = true;
+    btnSyncFollowing.title = "请先停止粉丝同步，两者不能同时进行";
+  } else if (walkActive && walkStream === "following") {
+    btnSyncFollowing.textContent = "🛑 停止同步关注";
+    btnSyncFollowing.className = "btn stop";
+    btnSyncFollowing.disabled = false;
+    btnSyncFollowing.title = "点击停止当前关注同步";
+    btnSyncFollowers.textContent = "同步粉丝";
+    btnSyncFollowers.className = "btn";
+    btnSyncFollowers.disabled = true;
+    btnSyncFollowers.title = "请先停止关注同步，两者不能同时进行";
+  } else {
+    btnSyncFollowers.textContent = "同步粉丝";
+    btnSyncFollowers.className = "btn";
+    btnSyncFollowers.disabled = false;
+    btnSyncFollowers.title = "打开粉丝列表并自动翻页同步";
+    btnSyncFollowing.textContent = "同步关注";
+    btnSyncFollowing.className = "btn";
+    btnSyncFollowing.disabled = false;
+    btnSyncFollowing.title = "打开关注列表并自动翻页同步";
+  }
+}
+
+async function onSyncButtonClick(stream) {
+  const status = await send("GET_STATUS");
+  if (status?.walkActive && status.walkStream === stream) {
+    await send("STOP_SYNC");
+    await refresh();
+    return;
+  }
+  if (status?.walkActive && status.walkStream && status.walkStream !== stream) {
+    const other = status.walkStream === "followers" ? "粉丝" : "关注";
+    if (gateHint) {
+      gateHint.textContent =
+        `正在同步「${other}」，请先停止后再同步另一列表（不能同时进行）。`;
+    }
+    await refresh();
+    return;
+  }
+
+  const r = await send("START_SYNC", { stream });
   if (r && r.ok === false) {
-    gateHint.textContent = r.error || "同步失败";
+    if (gateHint) gateHint.textContent = r.error || "同步失败";
+    await refresh();
     return;
   }
   await refresh();
-});
+}
+
+btnSyncFollowers.addEventListener("click", () => onSyncButtonClick("followers"));
+btnSyncFollowing.addEventListener("click", () => onSyncButtonClick("following"));
 
 $("btn-clear-results").addEventListener("click", async () => {
   await send("CLEAR_RESULTS");

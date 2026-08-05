@@ -49,6 +49,16 @@
 
   // ── Parse user objects from GraphQL responses ──────────────────
 
+  function getTimelineInstructions(json) {
+    return (
+      json?.data?.user?.result?.timeline?.timeline?.instructions ??
+      json?.data?.user?.result?.timeline_response?.timeline?.instructions ??
+      json?.data?.user?.result?.timeline_v2?.timeline?.instructions ??
+      json?.data?.user?.result?.timeline?.instructions ??
+      []
+    );
+  }
+
   function extractUsersFromResponse(json) {
     if (!json?.data) return [];
     const users = [];
@@ -56,15 +66,28 @@
 
     function pushUser(result) {
       if (!result || result.__typename === "UserUnavailable") return;
+      // Nested wrapper sometimes seen in newer schemas
+      if (result.result && (result.result.rest_id || result.result.legacy || result.result.core)) {
+        result = result.result;
+      }
+      if (!result || result.__typename === "UserUnavailable") return;
       const legacy = result.legacy ?? {};
-      const restId = result.rest_id || result.id_str;
-      const screen = legacy.screen_name || result.core?.screen_name;
+      const restId = result.rest_id || result.id_str || result.id;
+      const screen =
+        legacy.screen_name ||
+        result.core?.screen_name ||
+        result.core?.screenName ||
+        result.screen_name;
       if (!restId || !screen || seen.has(String(restId))) return;
+      // Skip non-user objects that happen to have ids
+      if (result.__typename && result.__typename !== "User" && !legacy.screen_name && !result.core) {
+        return;
+      }
       seen.add(String(restId));
       users.push({
         id: String(restId),
         username: screen,
-        name: legacy.name ?? result.core?.name ?? null,
+        name: legacy.name ?? result.core?.name ?? result.name ?? null,
         verified: !!(result.is_blue_verified || legacy.verified),
         protected: legacy.protected ?? false,
         followers_count: legacy.followers_count ?? null,
@@ -74,7 +97,7 @@
     }
 
     function walk(node, depth) {
-      if (!node || depth > 12) return;
+      if (!node || depth > 14) return;
       if (Array.isArray(node)) {
         for (const item of node) walk(item, depth + 1);
         return;
@@ -84,14 +107,17 @@
       // User result shapes used by timeline + user modules
       if (
         (node.__typename === "User" || node.rest_id || node.legacy?.screen_name) &&
-        (node.legacy?.screen_name || node.core?.screen_name)
+        (node.legacy?.screen_name || node.core?.screen_name || node.core?.screenName)
       ) {
         pushUser(node);
       }
 
       if (node.user_results?.result) pushUser(node.user_results.result);
+      if (node.userResult?.result) pushUser(node.userResult.result);
       if (node.user?.result) pushUser(node.user.result);
-      if (node.result && (node.result.rest_id || node.result.legacy)) pushUser(node.result);
+      if (node.result && (node.result.rest_id || node.result.legacy || node.result.core)) {
+        pushUser(node.result);
+      }
 
       for (const k of Object.keys(node)) {
         const v = node[k];
@@ -99,48 +125,61 @@
       }
     }
 
-    try {
-      // Preferred path: timeline instructions
-      const instructions =
-        json.data.user?.result?.timeline?.timeline?.instructions ??
-        json.data.user?.result?.timeline_response?.timeline?.instructions ??
-        json.data.user?.result?.timeline_v2?.timeline?.instructions ??
+    function processEntry(entry) {
+      if (!entry) return;
+      const result =
+        entry.content?.itemContent?.user_results?.result ??
+        entry.content?.itemContent?.user_results ??
+        entry.content?.itemContent?.user?.result ??
+        entry.itemContent?.user_results?.result ??
+        entry.itemContent?.user?.result ??
+        entry.content?.content?.userResult?.result ??
+        entry.item?.itemContent?.user_results?.result;
+
+      if (result) pushUser(result);
+
+      // TimelineTimelineModule / nested items
+      const items =
+        entry.content?.items ??
+        entry.content?.moduleItems ??
+        entry.items ??
+        entry.moduleItems ??
         [];
+      for (const it of items) {
+        const r =
+          it?.item?.itemContent?.user_results?.result ??
+          it?.itemContent?.user_results?.result ??
+          it?.user_results?.result;
+        if (r) pushUser(r);
+        else walk(it, 0);
+      }
+
+      // Always walk entry to catch schema variants
+      walk(entry, 0);
+    }
+
+    try {
+      const instructions = getTimelineInstructions(json);
 
       for (const instr of instructions) {
-        if (
-          instr.type !== "TimelineAddEntries" &&
-          instr.type !== "TimelineReplaceEntry" &&
-          instr.type !== "TimelineAddToModule"
-        ) {
-          // still walk entries if present
-        }
+        // TimelineAddEntries / ReplaceEntry
         const entries = instr.entries ?? (instr.entry ? [instr.entry] : []);
-        for (const entry of entries) {
-          const result =
-            entry.content?.itemContent?.user_results?.result ??
-            entry.content?.itemContent?.user?.result ??
-            entry.itemContent?.user_results?.result ??
-            entry.itemContent?.user?.result ??
-            entry.content?.content?.userResult?.result;
+        for (const entry of entries) processEntry(entry);
 
-          if (result) pushUser(result);
-          else walk(entry, 0);
+        // TimelineAddToModule — subsequent pages often use this (was previously skipped)
+        const moduleItems = instr.moduleItems ?? instr.items ?? [];
+        for (const it of moduleItems) {
+          const r =
+            it?.item?.itemContent?.user_results?.result ??
+            it?.itemContent?.user_results?.result ??
+            it?.user_results?.result;
+          if (r) pushUser(r);
+          else walk(it, 0);
         }
       }
 
-      // Single-user responses (UserByScreenName)
-      if (!users.length) {
-        const userResult = json.data.user?.result;
-        if (userResult) pushUser(userResult);
-      }
-
-      // Viewer (self)
-      const viewerResult = json.data.viewer?.user_results?.result;
-      if (viewerResult) pushUser(viewerResult);
-
-      // Deep fallback for schema changes
-      if (!users.length) walk(json.data, 0);
+      // Always deep-walk the payload so we never miss users after partial preferred-path hits
+      walk(json.data, 0);
     } catch (e) {
       console.warn("[auto-x] user extraction error:", e);
     }
@@ -150,31 +189,95 @@
 
   function extractCursorFromResponse(json) {
     try {
-      const instructions =
-        json.data?.user?.result?.timeline?.timeline?.instructions ??
-        json.data?.user?.result?.timeline_response?.timeline?.instructions ??
-        json.data?.user?.result?.timeline_v2?.timeline?.instructions ??
-        [];
+      const instructions = getTimelineInstructions(json);
+      let bottom = undefined;
       for (const instr of instructions) {
         for (const entry of instr.entries ?? []) {
-          const c = entry.content;
+          const c = entry.content || entry;
+          const entryType = c?.entryType || c?.__typename || c?.type;
+          const cursorType = c?.cursorType || entry.content?.cursorType;
           if (
-            c?.entryType === "TimelineTimelineCursor" ||
-            c?.__typename === "TimelineTimelineCursor" ||
-            c?.type === "TimelineTimelineCursor" ||
+            entryType === "TimelineTimelineCursor" ||
+            cursorType === "Bottom" ||
+            cursorType === "ShowMore" ||
             entry.content?.cursorType
           ) {
-            const cursorType = c.cursorType || entry.content?.cursorType;
-            if (cursorType === "Bottom" || cursorType === "ShowMore") {
-              return c.value ?? entry.content?.value ?? null;
+            if (cursorType === "Bottom" || cursorType === "ShowMore" || !cursorType) {
+              const val = c.value ?? entry.content?.value ?? null;
+              if (val != null) bottom = val;
             }
           }
         }
+        // Some payloads put cursors on the instruction itself
+        if (instr.cursor?.value && (instr.cursor.cursorType === "Bottom" || !instr.cursor.cursorType)) {
+          bottom = instr.cursor.value;
+        }
       }
+      // Deep fallback for cursor
+      if (bottom === undefined) {
+        const walkCursor = (node, depth) => {
+          if (!node || depth > 12 || bottom !== undefined) return;
+          if (Array.isArray(node)) {
+            for (const n of node) walkCursor(n, depth + 1);
+            return;
+          }
+          if (typeof node !== "object") return;
+          if (
+            (node.cursorType === "Bottom" || node.cursorType === "ShowMore") &&
+            typeof node.value === "string"
+          ) {
+            bottom = node.value;
+            return;
+          }
+          for (const k of Object.keys(node)) walkCursor(node[k], depth + 1);
+        };
+        walkCursor(json.data, 0);
+      }
+      return bottom;
     } catch {
       // ignore
     }
     return undefined;
+  }
+
+  /** Recent GraphQL batches — replay if content script was not yet listening */
+  const recentGraphqlBatches = [];
+  const RECENT_BATCH_TTL_MS = 3 * 60 * 1000;
+  const RECENT_BATCH_MAX = 40;
+
+  function rememberGraphqlBatch(payload) {
+    recentGraphqlBatches.push({ ...payload, _at: Date.now() });
+    while (recentGraphqlBatches.length > RECENT_BATCH_MAX) recentGraphqlBatches.shift();
+    const cutoff = Date.now() - RECENT_BATCH_TTL_MS;
+    while (recentGraphqlBatches.length && recentGraphqlBatches[0]._at < cutoff) {
+      recentGraphqlBatches.shift();
+    }
+  }
+
+  function endpointMatchesStream(endpoint, stream) {
+    if (!stream) return true;
+    const ep = String(endpoint || "");
+    if (stream === "followers") {
+      // Followers* but not Following
+      return /Follower/i.test(ep) && !/^Following$/i.test(ep);
+    }
+    if (stream === "following") {
+      return /Following/i.test(ep);
+    }
+    return true;
+  }
+
+  function replayGraphqlBatches(stream) {
+    const cutoff = Date.now() - RECENT_BATCH_TTL_MS;
+    let n = 0;
+    for (const b of recentGraphqlBatches) {
+      if (b._at < cutoff) continue;
+      if (!endpointMatchesStream(b.endpoint, stream)) continue;
+      const { _at, ...rest } = b;
+      postToContent(rest);
+      n++;
+    }
+    return n;
   }
 
   // ── Learn GraphQL query IDs from observed requests ─────────────
@@ -217,14 +320,17 @@
     try {
       const users = extractUsersFromResponse(json);
       const cursor = extractCursorFromResponse(json);
-      if (users.length) {
-        postToContent({
-          type: "GRAPHQL_DATA",
-          endpoint,
-          users,
-          cursor,
-          hasMore: cursor != null,
-        });
+      // Always forward list responses (even empty) so walk can detect end-of-list
+      const payload = {
+        type: "GRAPHQL_DATA",
+        endpoint,
+        users,
+        cursor: cursor === undefined ? null : cursor,
+        hasMore: cursor != null,
+      };
+      rememberGraphqlBatch(payload);
+      if (users.length || cursor != null) {
+        postToContent(payload);
       }
     } catch {
       // ignore parse errors
@@ -386,6 +492,12 @@
         }
       }
       console.log("[auto-x] seeded queries:", [...seenQueries.keys()]);
+      return;
+    }
+
+    if (msg.type === "REPLAY_GRAPHQL") {
+      const n = replayGraphqlBatches(msg.stream || null);
+      console.log("[auto-x] replayed graphql batches:", n, msg.stream || "all");
       return;
     }
 

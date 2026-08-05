@@ -192,32 +192,35 @@
 
   // ── Batch ingest (passive — only stores data when lists load) ──
 
+  function currentPathStream() {
+    if (location.pathname.includes("/followers")) return "followers";
+    if (location.pathname.includes("/following")) return "following";
+    return null;
+  }
+
   function flushBatch() {
     if (!batchBuffer.length) return;
-    const stream =
-      activeWalk?.stream ||
-      (location.pathname.includes("/followers")
-        ? "followers"
-        : location.pathname.includes("/following")
-          ? "following"
-          : null);
+    const stream = activeWalk?.stream || currentPathStream();
     if (!stream) return;
 
-    const batch = batchBuffer.splice(0, BATCH_MAX);
-    sendToBg({
-      type: "INGEST_BATCH",
-      walk: { stream },
-      users: batch.map((u) => ({
-        id: u.id,
-        username: u.username,
-        name: u.name ?? null,
-        verified: u.verified ?? false,
-        protected: u.protected ?? false,
-        followers_count: u.followers_count ?? null,
-        following_count: u.following_count ?? null,
-        tweet_count: u.tweet_count ?? null,
-      })),
-    });
+    // Drain entire buffer in chunks so stop/end never drops a partial page
+    while (batchBuffer.length) {
+      const batch = batchBuffer.splice(0, BATCH_MAX);
+      sendToBg({
+        type: "INGEST_BATCH",
+        walk: { stream },
+        users: batch.map((u) => ({
+          id: u.id,
+          username: u.username,
+          name: u.name ?? null,
+          verified: u.verified ?? false,
+          protected: u.protected ?? false,
+          followers_count: u.followers_count ?? null,
+          following_count: u.following_count ?? null,
+          tweet_count: u.tweet_count ?? null,
+        })),
+      });
+    }
   }
 
   function scheduleFlush() {
@@ -254,12 +257,24 @@
 
     if (msg.type === "GRAPHQL_DATA") {
       if (!sessionUser?.username) tryDetect();
-      addToBatch(msg.users || []);
+      if (msg.users?.length) addToBatch(msg.users);
+      // Track empty pages / end of list during walk
+      if (activeWalk) {
+        if (msg.users?.length) {
+          activeWalk.idlePages = 0;
+          activeWalk.lastUsersAt = Date.now();
+        } else {
+          activeWalk.idlePages = (activeWalk.idlePages || 0) + 1;
+        }
+        if (msg.hasMore === false || (msg.cursor == null && !msg.users?.length)) {
+          activeWalk.noMore = true;
+        }
+      }
       if (msg.cursor !== undefined) {
         sendToBg({
           type: "CURSOR_UPDATE",
           walk: activeWalk || {
-            stream: location.pathname.includes("/following") ? "following" : "followers",
+            stream: currentPathStream() || "followers",
           },
           cursor: msg.cursor,
           hasMore: msg.hasMore,
@@ -290,21 +305,41 @@
 
   api.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
     if (msg.type === "START_WALK") {
-      // Explicit sync only — auto-scroll here is intentional and user-triggered
-      activeWalk = { stream: msg.stream };
-      batchBuffer = [];
+      // Explicit sync only — auto-scroll is intentional and user-triggered.
+      // Heartbeat may re-dispatch; do not reset progress if already walking same stream.
+      if (activeWalk && activeWalk.stream === msg.stream) {
+        if (!scrollTimer) startAutoScroll();
+        sendResponse({ ok: true, already: true });
+        return true;
+      }
+      activeWalk = {
+        stream: msg.stream,
+        idlePages: 0,
+        noMore: false,
+        stuckScrolls: 0,
+        lastHeight: 0,
+        lastUsersAt: Date.now(),
+        startedAt: Date.now(),
+      };
+      // Keep any users already captured on this page; do not wipe buffer
       console.log("[auto-x] walk started:", msg.stream);
+      // Replay first-page GraphQL that may have arrived before content was ready
+      window.postMessage(
+        { source: "autox-content", type: "REPLAY_GRAPHQL", stream: msg.stream },
+        "*",
+      );
       startAutoScroll();
       sendResponse({ ok: true });
     } else if (msg.type === "STOP_WALK") {
-      if (activeWalk) sendToBg({ type: "WALK_ENDED", walk: activeWalk });
-      activeWalk = null;
-      batchBuffer = [];
       stopAutoScroll();
       if (batchTimer) {
         clearTimeout(batchTimer);
         batchTimer = null;
       }
+      // Flush remaining users before ending — previously dropped ~1 page
+      flushBatch();
+      if (activeWalk) sendToBg({ type: "WALK_ENDED", walk: { stream: activeWalk.stream } });
+      activeWalk = null;
       sendResponse({ ok: true });
     } else if (msg.type === "EXECUTE_ACTION") {
       // API-level follow via MAIN world — does not click DOM buttons
@@ -358,18 +393,56 @@
 
   let scrollTimer = null;
 
+  function endWalkNatural(reason) {
+    if (!activeWalk) return;
+    console.log("[auto-x] walk finished:", activeWalk.stream, reason || "");
+    stopAutoScroll();
+    if (batchTimer) {
+      clearTimeout(batchTimer);
+      batchTimer = null;
+    }
+    flushBatch();
+    sendToBg({ type: "WALK_ENDED", walk: { stream: activeWalk.stream } });
+    activeWalk = null;
+  }
+
   function autoScroll() {
     if (!activeWalk) return;
-    window.scrollTo(
-      0,
-      document.documentElement.scrollHeight || document.body.scrollHeight,
-    );
-    scrollTimer = setTimeout(autoScroll, 3000);
+
+    const h = document.documentElement.scrollHeight || document.body.scrollHeight || 0;
+    if (activeWalk.lastHeight && h <= activeWalk.lastHeight + 8) {
+      activeWalk.stuckScrolls = (activeWalk.stuckScrolls || 0) + 1;
+    } else {
+      activeWalk.stuckScrolls = 0;
+      activeWalk.lastHeight = h;
+    }
+
+    // End when list stops growing and no new users for a while, or API says no more
+    const idleMs = Date.now() - (activeWalk.lastUsersAt || activeWalk.startedAt || Date.now());
+    if (
+      activeWalk.noMore ||
+      (activeWalk.stuckScrolls >= 4 && idleMs > 8000) ||
+      (activeWalk.idlePages >= 3 && activeWalk.stuckScrolls >= 2)
+    ) {
+      endWalkNatural(
+        activeWalk.noMore ? "no-more-cursor" : "scroll-stable",
+      );
+      return;
+    }
+
+    window.scrollTo(0, h);
+    // Also nudge a bit past bottom for virtualized lists
+    try {
+      window.scrollBy(0, 400);
+    } catch {
+      /* ignore */
+    }
+    scrollTimer = setTimeout(autoScroll, 2500);
   }
 
   function startAutoScroll() {
     stopAutoScroll();
-    scrollTimer = setTimeout(autoScroll, 2000);
+    scrollTimer = setTimeout(autoScroll, 1500);
   }
 
   function stopAutoScroll() {
@@ -385,7 +458,7 @@
     () => {
       if (!activeWalk) return;
       if (scrollTimer) clearTimeout(scrollTimer);
-      scrollTimer = setTimeout(autoScroll, 6000);
+      scrollTimer = setTimeout(autoScroll, 5000);
     },
     { passive: true },
   );
