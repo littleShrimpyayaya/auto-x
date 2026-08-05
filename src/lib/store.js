@@ -28,6 +28,13 @@
     syncStatus: {
       followers: { lastSync: null, count: 0 },
       following: { lastSync: null, count: 0 },
+      profile: {
+        followersCount: null,
+        followingCount: null,
+        id: null,
+        username: null,
+        updatedAt: null,
+      },
     },
     actionLog: [],
   };
@@ -54,6 +61,10 @@
           ...DEFAULTS.syncStatus.following,
           ...(data.syncStatus?.following || {}),
         },
+        profile: {
+          ...DEFAULTS.syncStatus.profile,
+          ...(data.syncStatus?.profile || {}),
+        },
       },
       pendingActions: Array.isArray(data.pendingActions) ? data.pendingActions : [],
       actionLog: Array.isArray(data.actionLog) ? data.actionLog : [],
@@ -74,6 +85,27 @@
     await api.storage.local.set({ [STORE_KEY]: data });
   }
 
+  /**
+   * Build following lookup by id AND username (ids can mismatch across partial syncs).
+   */
+  function buildFollowingIndex(data) {
+    const byId = new Set();
+    const byName = new Set();
+    for (const [id, u] of Object.entries(data.following || {})) {
+      byId.add(String(id));
+      const name = u?.username ? String(u.username).toLowerCase() : "";
+      if (name && !name.startsWith("id:")) byName.add(name);
+    }
+    return { byId, byName };
+  }
+
+  function isFollowingUser(index, id, username) {
+    if (index.byId.has(String(id))) return true;
+    const name = username ? String(username).toLowerCase() : "";
+    if (name && !name.startsWith("id:") && index.byName.has(name)) return true;
+    return false;
+  }
+
   function getNonMutualFollowers(data) {
     const toFollow = [];
     const pending = new Set((data.pendingActions || []).map((a) => String(a.userId)));
@@ -81,14 +113,24 @@
     const selfName = data.sessionUser?.username
       ? String(data.sessionUser.username).toLowerCase()
       : null;
+    const followingIdx = buildFollowingIndex(data);
+    const seenNames = new Set();
+
     for (const [id, user] of Object.entries(data.followers || {})) {
       const sid = String(id);
       if (selfId && sid === selfId) continue;
-      if (selfName && String(user?.username || "").toLowerCase() === selfName) continue;
+      const uname = user?.username ? String(user.username) : "id:" + sid;
+      const unameL = uname.toLowerCase();
+      if (selfName && unameL === selfName) continue;
       if (user?.unavailable) continue; // suspended / gone — cannot follow
-      if (data.following?.[sid] || data.following?.[id]) continue;
+      if (isFollowingUser(followingIdx, sid, uname)) continue;
       if (pending.has(sid)) continue;
-      toFollow.push({ ...user, id: sid, username: user?.username || "id:" + sid });
+      // Dedupe same handle under different keys
+      if (!unameL.startsWith("id:")) {
+        if (seenNames.has(unameL)) continue;
+        seenNames.add(unameL);
+      }
+      toFollow.push({ ...user, id: sid, username: uname });
     }
     toFollow.sort((a, b) => {
       const ta = a._seenAt || "";
@@ -96,6 +138,21 @@
       return tb.localeCompare(ta);
     });
     return toFollow;
+  }
+
+  function getNonMutualStats(data) {
+    const list = getNonMutualFollowers(data);
+    const fl = Object.keys(data.followers || {}).length;
+    const fg = Object.keys(data.following || {}).length;
+    const unavailable = Object.values(data.followers || {}).filter((u) => u?.unavailable).length;
+    return {
+      count: list.length,
+      followers: fl,
+      following: fg,
+      unavailable,
+      // Rough mutual estimate: followers that appear in following (by id or name)
+      mutualEstimate: Math.max(0, fl - unavailable - list.length),
+    };
   }
 
   function addToLog(data, entry) {
@@ -136,6 +193,7 @@
     load,
     save,
     getNonMutualFollowers,
+    getNonMutualStats,
     addToLog,
     recordFollowResult,
     checkDateRollover,

@@ -8,7 +8,7 @@ if (typeof importScripts === "function") {
 
 const api = self.autoxBrowser || (typeof browser !== "undefined" ? browser : chrome);
 const store = self.autoxStore;
-const VERSION = "0.3.6";
+const VERSION = "0.3.9"; // auto-follow ∥ graph sync (no mutual interrupt)
 const PANEL_PATH = "src/panel/panel.html";
 
 let connectedTabId = null;
@@ -20,17 +20,45 @@ let processQueueTimer = null;
 let activeActionTimer = null;
 /** Live probe from content: { loggedIn, user, tabId, at } */
 let liveSession = null;
+/**
+ * Auto graph sync after connect: followers → following, no manual start needed.
+ * { queue, idx, phase: 'running'|'done'|'error'|'idle', error, startedAt, finishedAt }
+ */
+let autoSyncPlan = null;
 
 const DEFAULT_SETTINGS = {
-  minIntervalSec: 60,
+  minIntervalSec: 5,
   maxFollowsPerDay: 50,
 };
 
 async function getSettings() {
   const cfg = await api.storage.local.get("autox_settings");
-  const s = { ...DEFAULT_SETTINGS, ...(cfg.autox_settings || {}) };
-  // migrate legacy followBackEnabled into autoFollowRunning only on first load — ignore here
-  return s;
+  const raw = cfg.autox_settings || {};
+  let minIntervalSec = Number(raw.minIntervalSec);
+  // Migrate old default 60s (and prior min floor 30s) → 5s
+  if (!minIntervalSec || minIntervalSec === 60 || (minIntervalSec >= 30 && !raw._v37)) {
+    minIntervalSec = 5;
+    try {
+      await api.storage.local.set({
+        autox_settings: {
+          minIntervalSec: 5,
+          maxFollowsPerDay: Math.min(
+            200,
+            Math.max(1, Number(raw.maxFollowsPerDay) || DEFAULT_SETTINGS.maxFollowsPerDay),
+          ),
+          _v37: true,
+        },
+      });
+    } catch {
+      /* ignore */
+    }
+  }
+  minIntervalSec = Math.max(5, Math.min(600, minIntervalSec || 5));
+  const maxFollowsPerDay = Math.min(
+    200,
+    Math.max(1, Number(raw.maxFollowsPerDay) || DEFAULT_SETTINGS.maxFollowsPerDay),
+  );
+  return { minIntervalSec, maxFollowsPerDay };
 }
 
 async function loadData() {
@@ -56,6 +84,15 @@ function isXUrl(url) {
   } catch {
     return false;
   }
+}
+
+function recountSync(stream) {
+  if (!data) return 0;
+  const target = stream === "followers" ? data.followers : data.following;
+  const n = Object.keys(target || {}).length;
+  if (!data.syncStatus[stream]) data.syncStatus[stream] = { lastSync: null, count: 0 };
+  data.syncStatus[stream].count = n;
+  return n;
 }
 
 function ingestUsers(users, stream) {
@@ -97,9 +134,28 @@ function ingestUsers(users, stream) {
     count++;
   }
   data.syncStatus[stream].lastSync = new Date().toISOString();
-  data.syncStatus[stream].count = Object.keys(target).length;
+  recountSync(stream);
   persistData();
   return count;
+}
+
+function applyProfileMeta(meta) {
+  if (!data || !meta) return;
+  if (!data.syncStatus.profile) data.syncStatus.profile = {};
+  if (meta.followers_count != null) {
+    data.syncStatus.profile.followersCount = Number(meta.followers_count);
+  }
+  if (meta.following_count != null) {
+    data.syncStatus.profile.followingCount = Number(meta.following_count);
+  }
+  if (meta.id) data.syncStatus.profile.id = String(meta.id);
+  if (meta.username) data.syncStatus.profile.username = meta.username;
+  data.syncStatus.profile.updatedAt = new Date().toISOString();
+  // Keep session id if missing
+  if (meta.id && data.sessionUser && !data.sessionUser.id) {
+    data.sessionUser.id = String(meta.id);
+  }
+  persistData();
 }
 
 function scheduleProcessQueue(delayMs) {
@@ -115,6 +171,37 @@ function clearActiveActionWatch() {
     clearTimeout(activeActionTimer);
     activeActionTimer = null;
   }
+}
+
+/** Graph list sync running (followers/following walk or auto pipeline) */
+function isGraphSyncBusy() {
+  return !!(pendingWalk || (autoSyncPlan && autoSyncPlan.phase === "running"));
+}
+
+/** Tab may be mid-navigation for list sync — content script briefly unavailable */
+function isSyncNavigating() {
+  if (!pendingWalk?.navAt) return false;
+  return Date.now() - pendingWalk.navAt < 4500;
+}
+
+/**
+ * Soft-release a follow attempt without counting as failure.
+ * Used when list sync reloads the tab — auto-follow must not be "interrupted" as failed.
+ */
+function softReleaseFollow(userId, reason) {
+  clearActiveActionWatch();
+  if (activeAction && String(activeAction.userId) === String(userId)) {
+    activeAction = null;
+  } else if (activeAction && !userId) {
+    activeAction = null;
+  }
+  if (data && userId != null) {
+    data.pendingActions = (data.pendingActions || []).filter(
+      (a) => String(a.userId) !== String(userId),
+    );
+  }
+  console.log("[auto-x] follow soft-retry:", reason || "", userId || "");
+  if (data?.autoFollowRunning) scheduleProcessQueue(2500);
 }
 
 async function computeFollowBacks() {
@@ -161,6 +248,13 @@ async function executeAction(userId, username, name) {
   if (activeAction) return { deferred: true, reason: "busy" };
   if (!data?.autoFollowRunning) return { deferred: true, reason: "stopped" };
 
+  // List sync is navigating the tab — defer follow, do NOT stop auto-follow
+  if (isSyncNavigating()) {
+    console.log("[auto-x] defer follow while list sync navigates (auto-follow stays on)");
+    scheduleProcessQueue(2800);
+    return { deferred: true, reason: "sync-nav" };
+  }
+
   const tabId = await ensureConnectedTab();
   if (!tabId) {
     console.warn("[auto-x] no X tab for follow — will retry");
@@ -185,10 +279,14 @@ async function executeAction(userId, username, name) {
 
   activeAction = { userId, username, name: name || null, startedAt: Date.now() };
   clearActiveActionWatch();
-  // If page never responds, free the slot and retry
+  // If page never responds: during graph sync soft-retry; otherwise record timeout
   activeActionTimer = setTimeout(async () => {
     if (!activeAction || activeAction.userId !== userId) return;
     console.warn("[auto-x] follow timeout @" + username);
+    if (isGraphSyncBusy()) {
+      softReleaseFollow(userId, "timeout-during-sync");
+      return;
+    }
     activeAction = null;
     data.pendingActions = (data.pendingActions || []).filter((a) => a.userId !== userId);
     store.recordFollowResult(data, {
@@ -208,10 +306,22 @@ async function executeAction(userId, username, name) {
       actionType: "follow",
       targetUserId: userId,
     });
-    console.log("[auto-x] follow dispatched → @" + username + " (" + userId + ")");
+    console.log(
+      "[auto-x] follow dispatched → @" +
+        username +
+        " (" +
+        userId +
+        ")" +
+        (isGraphSyncBusy() ? " [parallel-with-sync]" : ""),
+    );
     return { ok: true };
   } catch (e) {
     console.error("[auto-x] execute error:", e);
+    // Tab reloading for list sync — keep auto-follow alive, soft retry only
+    if (isGraphSyncBusy() || /receiving end|context invalidated|message port/i.test(e.message || "")) {
+      softReleaseFollow(userId, "tab-unreachable-soft");
+      return { deferred: true, reason: "tab-soft", error: e.message };
+    }
     clearActiveActionWatch();
     data.pendingActions = data.pendingActions.filter((a) => a.userId !== userId);
     store.recordFollowResult(data, {
@@ -243,34 +353,54 @@ async function onActionResult(msg) {
 
   data.pendingActions = data.pendingActions.filter((a) => a.userId !== uid);
 
-  if (msg.ok) {
-    if (data.followers[uid]) {
-      data.following[uid] = {
-        ...data.followers[uid],
-        _followedAt: new Date().toISOString(),
-      };
-      data.syncStatus.following.count = Object.keys(data.following).length;
-    } else {
-      data.following[uid] = {
-        id: uid,
-        username: uname,
-        name: name || null,
-        _followedAt: new Date().toISOString(),
-      };
+  // Only count real verified follows — fake 403 "success" no longer gets ok:true
+  // IMPORTANT: only writes data.following — never mutates data.followers (sync list intact)
+  if (msg.ok && (msg.following === true || msg.verified === true || msg.alreadyFollowing)) {
+    const base = data.followers[uid] || data.followers[String(uid)] || {};
+    data.following[uid] = {
+      id: String(uid),
+      username: uname || base.username || null,
+      name: name || base.name || null,
+      verified: base.verified,
+      protected: base.protected,
+      _followedAt: new Date().toISOString(),
+      _fromAutoFollow: true,
+    };
+    // Do not touch followers map or followers.lastSync — graph sync owns those
+    if (data.syncStatus?.following) {
       data.syncStatus.following.count = Object.keys(data.following).length;
     }
-    data.stats.dailyFollows = (data.stats.dailyFollows || 0) + 1;
+    // alreadyFollowing: still "ok" for queue progress but don't inflate daily if re-hit
+    if (!msg.alreadyFollowing) {
+      data.stats.dailyFollows = (data.stats.dailyFollows || 0) + 1;
+    }
     data.stats.lastActionAt = new Date().toISOString();
-    store.recordFollowResult(data, { ok: true, username: uname, name });
-    store.addToLog(data, { type: "follow", targetUser: "@" + uname, result: "ok" });
+    store.recordFollowResult(data, {
+      ok: true,
+      username: uname,
+      name,
+      error: msg.alreadyFollowing ? "已关注" : msg.pendingFollow ? "已请求关注(待通过)" : null,
+    });
+    store.addToLog(data, {
+      type: "follow",
+      targetUser: "@" + uname,
+      result: msg.alreadyFollowing
+        ? "ok: already"
+        : msg.pendingFollow
+          ? "ok: pending"
+          : "ok" + (msg.verified ? "+verified" : ""),
+    });
     console.log(
       "[auto-x] ✓ 成功关注 @" + uname + (name ? " (" + name + ")" : "") +
+        (msg.alreadyFollowing ? " (本来已关注)" : "") +
+        (msg.pendingFollow ? " (待通过)" : "") +
+        (msg.verified ? " [已校验]" : "") +
         " | 今日成功 " + data.stats.dailyFollows +
         (msg.method ? " via " + msg.method : ""),
     );
   } else {
     data.stats.lastActionAt = new Date().toISOString();
-    const err = msg.error || "unknown";
+    const err = msg.error || (msg.ok ? "未通过关注校验" : "unknown");
     store.recordFollowResult(data, { ok: false, username: uname, name, error: err });
     store.addToLog(data, {
       type: "follow",
@@ -487,10 +617,18 @@ async function connectAccount() {
       (data.sessionUser.name ? " (" + data.sessionUser.name + ")" : ""),
   );
 
+  // Connect success → auto sync followers then following in background
+  setTimeout(() => {
+    startAutoGraphSync({ reason: "connect" }).catch((e) =>
+      console.warn("[auto-x] auto sync start failed", e),
+    );
+  }, 800);
+
   return {
     ok: true,
     user: data.sessionUser,
     connected: true,
+    autoSync: true,
   };
 }
 
@@ -501,8 +639,106 @@ async function disconnectAccount() {
   data.pendingActions = [];
   await persistData();
   activeAction = null;
-  await stopSync();
+  autoSyncPlan = null;
+  await stopSync({ clearPlan: true });
   return { ok: true };
+}
+
+/**
+ * Queue: followers → following. Runs after connect; UI shows progress only.
+ */
+async function startAutoGraphSync(opts = {}) {
+  await loadData();
+  if (!data.connection?.connected) {
+    return { ok: false, error: "请先连接账户" };
+  }
+  if (autoSyncPlan?.phase === "running" || pendingWalk) {
+    return {
+      ok: true,
+      already: true,
+      phase: autoSyncPlan?.phase || "running",
+      stream: pendingWalk?.stream || autoSyncPlan?.queue?.[autoSyncPlan.idx] || null,
+    };
+  }
+
+  autoSyncPlan = {
+    queue: ["followers", "following"],
+    idx: 0,
+    phase: "running",
+    error: null,
+    startedAt: Date.now(),
+    finishedAt: null,
+    reason: opts.reason || "manual",
+  };
+  console.log("[auto-x] auto graph sync started (" + autoSyncPlan.reason + ")");
+  return runAutoSyncStep();
+}
+
+async function runAutoSyncStep() {
+  if (!autoSyncPlan || autoSyncPlan.phase !== "running") {
+    return { ok: false, error: "no auto sync plan" };
+  }
+  if (autoSyncPlan.idx >= autoSyncPlan.queue.length) {
+    autoSyncPlan.phase = "done";
+    autoSyncPlan.finishedAt = Date.now();
+    await loadData();
+    recountSync("followers");
+    recountSync("following");
+    await persistData();
+    const fl = Object.keys(data.followers || {}).length;
+    const fg = Object.keys(data.following || {}).length;
+    const nm = store.getNonMutualFollowers(data).length;
+    console.log(
+      "[auto-x] auto graph sync done | followers=" +
+        fl +
+        " following=" +
+        fg +
+        " nonMutual=" +
+        nm,
+    );
+    if (data.autoFollowRunning) scheduleProcessQueue(1500);
+    return { ok: true, done: true, followers: fl, following: fg, nonMutual: nm };
+  }
+
+  const stream = autoSyncPlan.queue[autoSyncPlan.idx];
+  const r = await startSync(stream, { auto: true, background: true });
+  if (!r.ok) {
+    // If busy with same stream, treat as ok
+    if (r.busy && r.walkStream === stream) return { ok: true, stream };
+    autoSyncPlan.error = r.error || "同步启动失败";
+    autoSyncPlan.phase = "error";
+    console.warn("[auto-x] auto sync step failed", stream, r.error);
+    return r;
+  }
+  return { ok: true, stream, auto: true };
+}
+
+async function advanceAutoSyncAfterWalk(stream) {
+  if (!autoSyncPlan || autoSyncPlan.phase !== "running") return;
+  const current = autoSyncPlan.queue[autoSyncPlan.idx];
+  // Only advance when the ended stream matches the current step (ignore dup/stale ends)
+  if (stream && current && stream !== current) {
+    console.log(
+      "[auto-x] ignore WALK_ENDED for",
+      stream,
+      "(current step is",
+      current + ")",
+    );
+    return;
+  }
+  if (
+    autoSyncPlan.lastEnded === (stream || current) &&
+    Date.now() - (autoSyncPlan.lastEndedAt || 0) < 4000
+  ) {
+    return;
+  }
+  autoSyncPlan.lastEnded = stream || current;
+  autoSyncPlan.lastEndedAt = Date.now();
+  autoSyncPlan.idx += 1;
+  // Brief pause so page can settle before navigating to next list
+  setTimeout(() => {
+    runAutoSyncStep().catch((e) => console.warn("[auto-x] auto sync advance", e));
+  }, 1800);
 }
 
 async function startAutoFollow() {
@@ -540,9 +776,13 @@ async function startAutoFollow() {
   const settings = await getSettings();
   const followerCount = Object.keys(data.followers || {}).length;
   if (followerCount === 0) {
+    // Kick auto sync if not running
+    if (!autoSyncPlan || autoSyncPlan.phase !== "running") {
+      startAutoGraphSync({ reason: "pre-follow" }).catch(() => {});
+    }
     return {
       ok: false,
-      error: "本地还没有粉丝名单，请先点「同步粉丝」",
+      error: "本地还没有粉丝名单，已开始自动同步，请稍候再试",
       nonMutual: 0,
     };
   }
@@ -550,10 +790,11 @@ async function startAutoFollow() {
     return {
       ok: false,
       error:
-        "没有可回关的人（粉丝都已在关注列表中，或需先「同步粉丝」且勿只同步关注）。当前粉丝 " +
+        "没有可回关的人（可能都已互关，或关注列表尚未同步完）。粉丝 " +
         followerCount +
         " · 关注 " +
-        Object.keys(data.following || {}).length,
+        Object.keys(data.following || {}).length +
+        " · 可点「重新同步」",
       nonMutual: 0,
       followers: followerCount,
       following: Object.keys(data.following || {}).length,
@@ -587,11 +828,11 @@ async function stopAutoFollow() {
   await loadData();
   data.autoFollowRunning = false;
   activeAction = null;
+  clearActiveActionWatch();
   data.pendingActions = [];
   await persistData();
-  // Also stop any list-sync scroll — "stop" must leave the page alone
-  await stopSync();
-  console.log("[auto-x] 自动关注已停止 🛑");
+  // Do NOT cancel graph auto-sync / pendingWalk — independent pipelines
+  console.log("[auto-x] 自动关注已停止 🛑 (graph sync untouched)");
   return { ok: true, running: false };
 }
 
@@ -607,11 +848,16 @@ function listUrlMatchesStream(url, stream) {
   return false;
 }
 
-async function stopSync() {
+async function stopSync(opts = {}) {
+  // Never touches autoFollowRunning / activeAction — sync stop ≠ follow stop
   const stream = pendingWalk?.stream || null;
   const tabId = pendingWalk?.tabId || connectedTabId;
   pendingWalk = null;
   await api.storage.local.remove("pendingWalk");
+  if (opts.clearPlan !== false && autoSyncPlan?.phase === "running") {
+    autoSyncPlan.phase = "idle";
+    autoSyncPlan.error = opts.reason || "stopped";
+  }
   // Stop scroll on every X tab we can reach (content self-guards too)
   const targets = new Set();
   if (tabId) targets.add(tabId);
@@ -635,7 +881,7 @@ async function stopSync() {
   return { ok: true, stopped: true, stream };
 }
 
-async function startSync(stream) {
+async function startSync(stream, opts = {}) {
   await loadData();
   if (stream !== "followers" && stream !== "following") {
     return { ok: false, error: "未知同步类型" };
@@ -649,7 +895,7 @@ async function startSync(stream) {
     if (pendingWalk.stream === stream) {
       return {
         ok: false,
-        error: "该列表正在同步中，可点击「停止同步」结束",
+        error: "该列表正在同步中",
         busy: true,
         walkStream: pendingWalk.stream,
       };
@@ -659,25 +905,19 @@ async function startSync(stream) {
       error:
         "当前正在同步「" +
         (pendingWalk.stream === "followers" ? "粉丝" : "关注") +
-        "」，请先停止后再同步另一列表（不能同时进行）",
+        "」",
       busy: true,
       walkStream: pendingWalk.stream,
     };
   }
 
-  if (!connectedTabId) {
-    if (data.connection.tabId) connectedTabId = data.connection.tabId;
-  }
-  if (!connectedTabId) {
-    const det = await detectLoginState();
-    if (det.tabId) connectedTabId = det.tabId;
-  }
-  if (!connectedTabId) return { ok: false, error: "请先打开 X.com 标签页" };
+  const tabId = await ensureConnectedTab();
+  if (!tabId) return { ok: false, error: "请先打开 X.com 标签页" };
 
   let username = data.sessionUser?.username;
   if (!username) {
     try {
-      const resp = await api.tabs.sendMessage(connectedTabId, { type: "GET_SESSION" });
+      const resp = await api.tabs.sendMessage(tabId, { type: "GET_SESSION" });
       if (resp?.user?.username) username = resp.user.username;
     } catch {
       /* ignore */
@@ -688,32 +928,35 @@ async function startSync(stream) {
   const targetUrl = "https://x.com/" + username + "/" + stream;
   pendingWalk = {
     stream,
-    tabId: connectedTabId,
+    tabId,
     username,
     targetUrl,
     navAt: Date.now(),
     dispatchOk: false,
+    auto: !!opts.auto,
   };
   await api.storage.local.set({
     pendingWalk: {
       stream,
-      tabId: connectedTabId,
+      tabId,
       username,
       targetUrl,
       at: Date.now(),
       navAt: Date.now(),
+      auto: !!opts.auto,
     },
   });
 
-  // Navigating for sync is explicit user action from popup
+  // background:true keeps focus on current tab (auto sync after connect)
+  const activate = opts.background ? false : true;
   try {
-    await api.tabs.update(connectedTabId, { url: targetUrl, active: true });
+    await api.tabs.update(tabId, { url: targetUrl, active: activate });
   } catch (e) {
     pendingWalk = null;
     await api.storage.local.remove("pendingWalk");
     return { ok: false, error: e.message };
   }
-  return { ok: true, walkStream: stream };
+  return { ok: true, walkStream: stream, auto: !!opts.auto };
 }
 
 async function tryDispatchWalk(tabId, tabUrlFromHeartbeat) {
@@ -785,6 +1028,23 @@ async function pushKnownQueries(tabId) {
 function buildStatus() {
   const successList = data.stats?.successList || [];
   const failList = data.stats?.failList || [];
+  // Always derive live counts from maps (avoids stale syncStatus)
+  const flLive = Object.keys(data.followers || {}).length;
+  const fgLive = Object.keys(data.following || {}).length;
+  if (data.syncStatus?.followers) data.syncStatus.followers.count = flLive;
+  if (data.syncStatus?.following) data.syncStatus.following.count = fgLive;
+  const nonMutual = store.getNonMutualStats
+    ? store.getNonMutualStats(data)
+    : { count: store.getNonMutualFollowers(data).length };
+
+  const autoPhase = autoSyncPlan?.phase || "idle";
+  const autoIdx = autoSyncPlan?.idx ?? 0;
+  const autoQueue = autoSyncPlan?.queue || ["followers", "following"];
+  const autoCurrent =
+    autoPhase === "running"
+      ? pendingWalk?.stream || autoQueue[autoIdx] || null
+      : null;
+
   return {
     version: VERSION,
     connection: data.connection || { connected: false },
@@ -793,8 +1053,15 @@ function buildStatus() {
     sessionUser: data.sessionUser || null,
     liveLoggedIn: !!(liveSession && liveSession.loggedIn),
     liveUser: liveSession?.user || null,
-    followers: data.syncStatus.followers,
-    following: data.syncStatus.following,
+    followers: {
+      ...(data.syncStatus.followers || {}),
+      count: flLive,
+    },
+    following: {
+      ...(data.syncStatus.following || {}),
+      count: fgLive,
+    },
+    profileCounts: data.syncStatus?.profile || null,
     dailyFollows: data.stats.dailyFollows || 0,
     pendingActions: (data.pendingActions || []).length,
     lastActionAt: data.stats.lastActionAt,
@@ -805,11 +1072,24 @@ function buildStatus() {
     failList: failList.slice(0, 30),
     walkActive: !!pendingWalk,
     walkStream: pendingWalk?.stream || null,
+    walkAuto: !!(pendingWalk && pendingWalk.auto),
     hasConnectedTab: !!connectedTabId,
-    nonMutualCount: store.getNonMutualFollowers(data).length,
+    nonMutualCount: nonMutual.count ?? 0,
+    nonMutualDetail: nonMutual,
+    graphSyncBusy: isGraphSyncBusy(),
     activeFollow: activeAction
       ? { username: activeAction.username, userId: activeAction.userId }
       : null,
+    autoSync: {
+      phase: autoPhase,
+      current: autoCurrent,
+      idx: autoIdx,
+      total: autoQueue.length,
+      queue: autoQueue,
+      error: autoSyncPlan?.error || null,
+      startedAt: autoSyncPlan?.startedAt || null,
+      finishedAt: autoSyncPlan?.finishedAt || null,
+    },
   };
 }
 
@@ -904,27 +1184,62 @@ api.runtime.onMessage.addListener((msg, sender, sendResponse) => {
           await loadData();
           if (msg.users?.length) {
             const n = ingestUsers(msg.users, msg.walk?.stream || "followers");
-            console.log("[auto-x] ingested", n, "users from", msg.walk?.stream);
+            console.log(
+              "[auto-x] ingested",
+              n,
+              "users from",
+              msg.walk?.stream,
+              "| total",
+              msg.walk?.stream === "following"
+                ? Object.keys(data.following).length
+                : Object.keys(data.followers).length,
+            );
           }
+          if (msg.profileMeta) applyProfileMeta(msg.profileMeta);
           sendResponse({ ok: true });
-          if (msg.walk?.stream === "followers") {
+          if (msg.walk?.stream === "followers" && data?.autoFollowRunning) {
             setTimeout(() => processQueue(), 3000);
           }
           break;
         }
+        case "PROFILE_META": {
+          await loadData();
+          applyProfileMeta(msg.meta || msg);
+          sendResponse({ ok: true });
+          break;
+        }
         case "WALK_ENDED": {
           await loadData();
-          if (msg.walk?.stream) {
-            data.syncStatus[msg.walk.stream].lastSync = new Date().toISOString();
+          const endedStream = msg.walk?.stream || null;
+          if (endedStream) {
+            if (!data.syncStatus[endedStream]) {
+              data.syncStatus[endedStream] = { lastSync: null, count: 0 };
+            }
+            data.syncStatus[endedStream].lastSync = new Date().toISOString();
+            recountSync(endedStream);
             await persistData();
           }
-          if (pendingWalk && msg.walk?.stream === pendingWalk.stream) {
+          if (pendingWalk && (!endedStream || endedStream === pendingWalk.stream)) {
             pendingWalk = null;
             await api.storage.local.remove("pendingWalk");
           }
-          console.log("[auto-x] WALK_ENDED", msg.walk?.stream, msg.reason || "");
+          // Never clear activeAction / autoFollowRunning here — independent of walk
+          console.log(
+            "[auto-x] WALK_ENDED",
+            endedStream,
+            msg.reason || "",
+            "seen=",
+            msg.seenCount ?? "?",
+            "| autoFollow=",
+            !!data.autoFollowRunning,
+          );
           sendResponse({ ok: true });
-          if (data?.autoFollowRunning) setTimeout(() => processQueue(), 3000);
+          // Chain next auto-sync step (followers → following)
+          if (autoSyncPlan?.phase === "running") {
+            advanceAutoSyncAfterWalk(endedStream);
+          }
+          // Resume/keep auto-follow after list page settles
+          if (data?.autoFollowRunning) scheduleProcessQueue(2000);
           break;
         }
         case "ACTION_COMPLETED":
@@ -967,10 +1282,17 @@ api.runtime.onMessage.addListener((msg, sender, sendResponse) => {
           sendResponse(await stopAutoFollow());
           break;
         case "START_SYNC":
-          sendResponse(await startSync(msg.stream));
+          // Manual single-stream: cancel auto plan chaining for this session
+          if (autoSyncPlan?.phase === "running") {
+            autoSyncPlan.phase = "idle";
+          }
+          sendResponse(await startSync(msg.stream, { auto: false, background: false }));
+          break;
+        case "START_AUTO_SYNC":
+          sendResponse(await startAutoGraphSync({ reason: msg.reason || "manual" }));
           break;
         case "STOP_SYNC":
-          sendResponse(await stopSync());
+          sendResponse(await stopSync({ clearPlan: true, reason: "user-stop" }));
           break;
         case "CLEAR_RESULTS": {
           await loadData();
@@ -998,11 +1320,12 @@ api.runtime.onMessage.addListener((msg, sender, sendResponse) => {
           break;
         case "SAVE_SETTINGS": {
           const next = {
-            minIntervalSec: Math.max(30, Number(msg.settings?.minIntervalSec) || 60),
+            minIntervalSec: Math.max(5, Math.min(600, Number(msg.settings?.minIntervalSec) || 5)),
             maxFollowsPerDay: Math.min(
               200,
               Math.max(1, Number(msg.settings?.maxFollowsPerDay) || 50),
             ),
+            _v37: true,
           };
           await api.storage.local.set({ autox_settings: next });
           sendResponse({ ok: true });

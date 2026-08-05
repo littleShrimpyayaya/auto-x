@@ -222,6 +222,7 @@
           name: u.name ?? null,
           verified: u.verified ?? false,
           protected: u.protected ?? false,
+          unavailable: !!u.unavailable,
           followers_count: u.followers_count ?? null,
           following_count: u.following_count ?? null,
           tweet_count: u.tweet_count ?? null,
@@ -351,8 +352,17 @@
     if (event.source !== window || event.data?.source !== "autox-hook") return;
     const msg = event.data;
 
+    if (msg.type === "PROFILE_META") {
+      if (msg.meta) sendToBg({ type: "PROFILE_META", meta: msg.meta });
+      return;
+    }
+
     if (msg.type === "GRAPHQL_DATA") {
       if (!sessionUser?.username) tryDetect();
+
+      if (msg.profileMeta) {
+        sendToBg({ type: "PROFILE_META", meta: msg.profileMeta });
+      }
 
       const pathStream = currentPathStream();
       const walkStream = activeWalk?.stream || null;

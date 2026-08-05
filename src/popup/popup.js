@@ -159,7 +159,7 @@ async function refresh() {
         setConnBadge("connected", "已连接");
         gateStatus.textContent = "状态：已连接";
         gateHint.textContent =
-          "账户已成功绑定。可同步图谱或开始自动关注。右下「解除绑定」才会断开（不会退出 X 网站登录）。";
+          "账户已绑定。连接后会自动同步粉丝与关注；可开始自动回关。右下「解除绑定」才会断开（不会退出 X 登录）。";
       }
 
       show(btnLogin, false);
@@ -188,16 +188,51 @@ async function refresh() {
       const streamLabel =
         walkStream === "followers" ? "粉丝" : walkStream === "following" ? "关注" : walkStream || "";
       const nonMutual = status.nonMutualCount ?? 0;
+      const autoSync = status.autoSync || {};
+      const profile = status.profileCounts || {};
+      const pf = profile.followersCount;
+      const pg = profile.followingCount;
+      const autoRunning = autoSync.phase === "running" || walkActive;
+
+      let syncLine = "";
+      if (autoSync.phase === "running" || walkActive) {
+        const step =
+          autoSync.current === "followers" || walkStream === "followers"
+            ? "粉丝"
+            : autoSync.current === "following" || walkStream === "following"
+              ? "关注"
+              : streamLabel || "…";
+        const stepN = (autoSync.idx || 0) + 1;
+        const stepT = autoSync.total || 2;
+        syncLine =
+          `<b style="color:#1d9bf0">自动同步中：${step}</b>（步骤 ${Math.min(stepN, stepT)}/${stepT}）` +
+          `<br>请稍候，到底后会自动进入下一步，无需手动操作。`;
+      } else if (autoSync.phase === "done") {
+        syncLine = `<span style="color:#00ba7c">✓ 自动同步已完成</span>`;
+      } else if (autoSync.phase === "error") {
+        syncLine = `<span style="color:#f4212e">同步出错：${autoSync.error || "未知"}</span> · 可点「重新同步」`;
+      } else if (!status.followers?.lastSync && !status.following?.lastSync) {
+        syncLine = `连接后将自动同步粉丝与关注…`;
+      } else {
+        syncLine = `图谱已就绪 · 需要时可点「重新同步」`;
+      }
+
+      const flHint =
+        pf != null ? `本地 <b>${fl}</b>${pf !== fl ? ` / 主页约 ${pf}` : ""}` : `<b>${fl}</b>`;
+      const fgHint =
+        pg != null ? `本地 <b>${fg}</b>${pg !== fg ? ` / 主页约 ${pg}` : ""}` : `<b>${fg}</b>`;
+
       syncStatus.innerHTML =
-        `粉丝 <b>${fl}</b> · 关注 <b>${fg}</b>` +
+        `粉丝 ${flHint} · 关注 ${fgHint}` +
         `<div class="hint" style="margin-top:4px">` +
-        `待回关（粉了你你未回）: <b style="color:#1d9bf0">${nonMutual}</b><br>` +
-        `粉丝: ${fmtTime(status.followers?.lastSync)} · 关注: ${fmtTime(status.following?.lastSync)}` +
-        (walkActive
-          ? `<br><b style="color:#1d9bf0">正在同步${streamLabel}…</b> 到底会自动停止，也可点红色按钮停止`
+        `待回关: <b style="color:#1d9bf0">${nonMutual}</b>` +
+        (status.nonMutualDetail?.unavailable
+          ? ` · 不可用粉丝 ${status.nonMutualDetail.unavailable}`
           : "") +
+        `<br>粉丝同步: ${fmtTime(status.followers?.lastSync)} · 关注同步: ${fmtTime(status.following?.lastSync)}` +
+        `<br>${syncLine}` +
         `</div>`;
-      updateSyncButtons(walkActive, walkStream);
+      updateResyncButton(autoRunning);
 
       show(controlsCard, true);
       if (running) {
@@ -208,16 +243,23 @@ async function refresh() {
           : "";
         autoHint.textContent =
           cur +
-          `待回关 ${nonMutual} 人。停止后会结束队列；自动关注走 API，不滚动页面。`;
+          `待回关 ${nonMutual} 人。` +
+          (status.graphSyncBusy || autoRunning
+            ? "图谱同步与回关并行：同步不中断回关；回关只更新「已关注」，不改粉丝名单。"
+            : "停止只结束回关队列，不影响图谱同步。");
       } else {
         btnAuto.textContent = "开始自动关注";
         btnAuto.className = "btn primary btn-lg";
-        autoHint.textContent =
-          fl === 0
-            ? "请先「同步粉丝」建立名单，再开始自动关注。"
-            : nonMutual === 0
-              ? "当前没有待回关用户（可能都已互关，或需再同步粉丝）。"
-              : `待回关 ${nonMutual} 人。关闭面板不会停止；按间隔通过 API 关注。`;
+        if (autoRunning || status.graphSyncBusy) {
+          autoHint.textContent =
+            "图谱同步进行中也可直接开始回关：两者并行，互不中断；回关不会改动粉丝/关注同步名单数量逻辑。";
+        } else if (fl === 0) {
+          autoHint.textContent = "粉丝名单尚未同步完成，请稍候自动同步，或点「重新同步」。";
+        } else if (nonMutual === 0) {
+          autoHint.textContent = "当前没有待回关用户（可能都已互关）。可「重新同步」刷新名单。";
+        } else {
+          autoHint.textContent = `待回关 ${nonMutual} 人。关闭面板不会停止；与图谱同步互不干扰。`;
+        }
       }
 
       show(usageCard, true);
@@ -384,74 +426,40 @@ btnAuto.addEventListener("click", async () => {
   }
 });
 
-const btnSyncFollowers = $("btn-sync-followers");
-const btnSyncFollowing = $("btn-sync-following");
+const btnResync = $("btn-resync");
 
-/**
- * Sync is exclusive: only one list walk at a time.
- * Active stream → stop button; the other is grayed out.
- */
-function updateSyncButtons(walkActive, walkStream) {
-  if (!btnSyncFollowers || !btnSyncFollowing) return;
-
-  if (walkActive && walkStream === "followers") {
-    btnSyncFollowers.textContent = "🛑 停止同步粉丝";
-    btnSyncFollowers.className = "btn stop";
-    btnSyncFollowers.disabled = false;
-    btnSyncFollowers.title = "点击停止当前粉丝同步";
-    btnSyncFollowing.textContent = "同步关注";
-    btnSyncFollowing.className = "btn";
-    btnSyncFollowing.disabled = true;
-    btnSyncFollowing.title = "请先停止粉丝同步，两者不能同时进行";
-  } else if (walkActive && walkStream === "following") {
-    btnSyncFollowing.textContent = "🛑 停止同步关注";
-    btnSyncFollowing.className = "btn stop";
-    btnSyncFollowing.disabled = false;
-    btnSyncFollowing.title = "点击停止当前关注同步";
-    btnSyncFollowers.textContent = "同步粉丝";
-    btnSyncFollowers.className = "btn";
-    btnSyncFollowers.disabled = true;
-    btnSyncFollowers.title = "请先停止关注同步，两者不能同时进行";
+function updateResyncButton(autoRunning) {
+  if (!btnResync) return;
+  if (autoRunning) {
+    btnResync.textContent = "同步进行中…";
+    btnResync.disabled = true;
+    btnResync.className = "btn";
+    btnResync.title = "正在自动同步粉丝/关注，请稍候";
   } else {
-    btnSyncFollowers.textContent = "同步粉丝";
-    btnSyncFollowers.className = "btn";
-    btnSyncFollowers.disabled = false;
-    btnSyncFollowers.title = "打开粉丝列表并自动翻页同步";
-    btnSyncFollowing.textContent = "同步关注";
-    btnSyncFollowing.className = "btn";
-    btnSyncFollowing.disabled = false;
-    btnSyncFollowing.title = "打开关注列表并自动翻页同步";
+    btnResync.textContent = "重新同步";
+    btnResync.disabled = false;
+    btnResync.className = "btn";
+    btnResync.title = "重新自动同步粉丝与关注";
   }
 }
 
-async function onSyncButtonClick(stream) {
-  const status = await send("GET_STATUS");
-  if (status?.walkActive && status.walkStream === stream) {
-    await send("STOP_SYNC");
-    await refresh();
-    return;
-  }
-  if (status?.walkActive && status.walkStream && status.walkStream !== stream) {
-    const other = status.walkStream === "followers" ? "粉丝" : "关注";
-    if (gateHint) {
-      gateHint.textContent =
-        `正在同步「${other}」，请先停止后再同步另一列表（不能同时进行）。`;
+if (btnResync) {
+  btnResync.addEventListener("click", async () => {
+    btnResync.disabled = true;
+    btnResync.textContent = "启动中…";
+    try {
+      // Cancel any stuck walk then restart full auto pipeline
+      await send("STOP_SYNC");
+      await new Promise((r) => setTimeout(r, 400));
+      const r = await send("START_AUTO_SYNC", { reason: "manual-resync" });
+      if (r && r.ok === false && gateHint) {
+        gateHint.textContent = r.error || "无法开始同步";
+      }
+    } finally {
+      await refresh();
     }
-    await refresh();
-    return;
-  }
-
-  const r = await send("START_SYNC", { stream });
-  if (r && r.ok === false) {
-    if (gateHint) gateHint.textContent = r.error || "同步失败";
-    await refresh();
-    return;
-  }
-  await refresh();
+  });
 }
-
-btnSyncFollowers.addEventListener("click", () => onSyncButtonClick("followers"));
-btnSyncFollowing.addEventListener("click", () => onSyncButtonClick("following"));
 
 $("btn-clear-results").addEventListener("click", async () => {
   await send("CLEAR_RESULTS");

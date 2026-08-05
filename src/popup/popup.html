@@ -67,15 +67,14 @@
       </div>
     </section>
 
-    <!-- Sync graph -->
+    <!-- Sync graph (auto after connect) -->
     <section id="sync" class="card hidden">
       <div class="label">图谱同步</div>
-      <div id="sync-status">未同步</div>
+      <div id="sync-status">连接后将自动同步…</div>
       <div class="actions">
-        <button id="btn-sync-followers" class="btn" type="button" title="打开粉丝列表并自动翻页同步">同步粉丝</button>
-        <button id="btn-sync-following" class="btn" type="button" title="打开关注列表并自动翻页同步">同步关注</button>
+        <button id="btn-resync" class="btn" type="button" title="重新自动同步粉丝与关注">重新同步</button>
       </div>
-      <div class="hint">同一时间只能同步一种列表；进行中按钮会变为「停止」。仅在粉丝/关注列表页翻页，不会刷首页推文。关闭面板不影响后台自动关注。</div>
+      <div class="hint">连接后自动同步粉丝→关注。可与「自动关注」同时进行：同步不中断回关，回关不改粉丝名单。</div>
     </section>
 
     <!-- Main control -->

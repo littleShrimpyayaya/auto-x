@@ -392,12 +392,48 @@
     return false;
   }
 
+  function extractProfileMeta(json) {
+    try {
+      const r = json?.data?.user?.result;
+      if (!r || r.__typename === "UserUnavailable") return null;
+      const legacy = r.legacy || {};
+      const core = r.core || {};
+      const followers =
+        legacy.followers_count ?? r.legacy?.followers_count ?? null;
+      const following = legacy.friends_count ?? r.legacy?.friends_count ?? null;
+      const username = legacy.screen_name || core.screen_name || core.screenName || null;
+      const id = r.rest_id != null ? String(r.rest_id) : null;
+      if (followers == null && following == null && !id) return null;
+      return {
+        id,
+        username,
+        followers_count: followers != null ? Number(followers) : null,
+        following_count: following != null ? Number(following) : null,
+      };
+    } catch {
+      return null;
+    }
+  }
+
   function handleGraphqlResponse(url, method, json) {
     if (method !== "GET" && method !== "POST") return;
     const match = url.match(GRAPHQL_RE);
     if (!match) return;
     const endpoint = match[2];
     learnQueryId(url);
+
+    // Profile counts from UserByScreenName / UserByRestId
+    if (
+      endpoint === "UserByScreenName" ||
+      endpoint === "UserByRestId" ||
+      endpoint === "UserResultByScreenName" ||
+      /^UserBy/i.test(endpoint)
+    ) {
+      const meta = extractProfileMeta(json);
+      if (meta) {
+        postToContent({ type: "PROFILE_META", meta });
+      }
+    }
 
     if (!isFollowersEndpoint(endpoint)) return;
 
@@ -412,12 +448,16 @@
       if (bottom != null) hasMore = true;
       else if (sawTimeline) hasMore = false;
 
+      // Owner profile counts often sit on the same Followers/Following payload
+      const profileMeta = extractProfileMeta(json);
+
       const payload = {
         type: "GRAPHQL_DATA",
         endpoint,
         users,
         cursor: bottom,
         hasMore,
+        profileMeta,
       };
       rememberGraphqlBatch(payload);
       // Always forward list responses (including empty final page) so walk can auto-stop
@@ -504,6 +544,68 @@
     return h;
   }
 
+  function extractApiErrors(json) {
+    if (!json) return [];
+    if (Array.isArray(json.errors)) {
+      return json.errors.map((e) => e.message || e.code || JSON.stringify(e));
+    }
+    if (json.error) return [String(json.error)];
+    if (json.errors && typeof json.errors === "object") {
+      return [JSON.stringify(json.errors)];
+    }
+    return [];
+  }
+
+  /** True only for explicit "already following" style errors — not every 403 */
+  function isAlreadyFollowingError(status, json) {
+    const blob = JSON.stringify(json || {}).toLowerCase();
+    if (/already\s*(follow|requested)|you.?re already|previously followed|已关注|已经关注/.test(blob)) {
+      return true;
+    }
+    // Twitter legacy codes: 160 already requested, 162 blocked, 108 user not found — only 160/34-ish already
+    const codes = (json?.errors || []).map((e) => e.code).filter((c) => c != null);
+    if (codes.includes(160)) return true; // already requested to follow
+    // Some builds return 403 with code 158 (blocked) — NOT success
+    return false;
+  }
+
+  /**
+   * Authoritative check: am I following this user right now?
+   * GET friendships/show.json
+   */
+  async function verifyFollowing(targetUserId) {
+    const url =
+      "https://x.com/i/api/1.1/friendships/show.json?target_id=" +
+      encodeURIComponent(String(targetUserId));
+    const resp = await origFetch.call(window, url, {
+      method: "GET",
+      headers: mutationHeaders(),
+      credentials: "include",
+    });
+    let json = {};
+    try {
+      json = await resp.json();
+    } catch {
+      /* empty */
+    }
+    if (!resp.ok) {
+      const errs = extractApiErrors(json);
+      throw new Error(
+        "verify failed: " + resp.status + (errs.length ? " " + errs.join("; ") : ""),
+      );
+    }
+    const following = !!(
+      json?.relationship?.source?.following ||
+      json?.relationship?.source?.following_requested
+    );
+    const pending = !!json?.relationship?.source?.following_requested;
+    return {
+      following: following || pending,
+      pendingFollow: pending && !json?.relationship?.source?.following,
+      raw: json,
+    };
+  }
+
   /** Stable v1.1 friendships API — works without learning GraphQL hash */
   async function followRest(targetUserId) {
     const resp = await origFetch.call(window, "https://x.com/i/api/1.1/friendships/create.json", {
@@ -521,24 +623,33 @@
     } catch {
       /* empty */
     }
-    if (resp.ok) {
-      return {
-        following: true,
-        method: "rest",
-        pendingFollow: false,
-        username: json.screen_name || null,
-      };
+    const errs = extractApiErrors(json);
+    if (errs.length && !resp.ok) {
+      if (isAlreadyFollowingError(resp.status, json)) {
+        return { following: true, alreadyFollowing: true, method: "rest", pendingFollow: false };
+      }
+      throw new Error("REST Follow: " + errs.join("; "));
     }
-    // Already following
-    if (resp.status === 403 && /already|followed/i.test(JSON.stringify(json))) {
-      return { following: true, alreadyFollowing: true, method: "rest" };
+    if (!resp.ok) {
+      if (isAlreadyFollowingError(resp.status, json)) {
+        return { following: true, alreadyFollowing: true, method: "rest", pendingFollow: false };
+      }
+      // NEVER treat generic 403/404 as success (was causing fake ✓)
+      throw new Error(
+        "REST Follow failed: " + resp.status + " " + JSON.stringify(json).slice(0, 200),
+      );
     }
-    if (resp.status === 403 || resp.status === 404) {
-      return { following: true, alreadyFollowing: true, method: "rest" };
+    // 200 body should be a user object; require positive signal when present
+    if (json && typeof json === "object" && "following" in json && json.following === false) {
+      throw new Error("REST returned following=false");
     }
-    throw new Error(
-      "REST Follow failed: " + resp.status + " " + JSON.stringify(json).slice(0, 180),
-    );
+    return {
+      following: true,
+      method: "rest",
+      pendingFollow: false,
+      username: json.screen_name || null,
+      needsVerify: true,
+    };
   }
 
   async function unfollowRest(targetUserId) {
@@ -575,38 +686,88 @@
     } catch {
       /* empty */
     }
-    if (resp.ok) {
-      return {
-        following: true,
-        method: "graphql",
-        pendingFollow: json?.data?.follow?.following === false,
-      };
+    const errs = extractApiErrors(json);
+    if (errs.length) {
+      if (isAlreadyFollowingError(resp.status, json)) {
+        return { following: true, alreadyFollowing: true, method: "graphql", needsVerify: true };
+      }
+      throw new Error("GraphQL Follow: " + errs.join("; "));
     }
-    if (resp.status === 403 || resp.status === 404) {
-      return { following: true, alreadyFollowing: true, method: "graphql" };
+    if (!resp.ok) {
+      if (isAlreadyFollowingError(resp.status, json)) {
+        return { following: true, alreadyFollowing: true, method: "graphql", needsVerify: true };
+      }
+      throw new Error(
+        "GraphQL Follow failed: " + resp.status + " " + JSON.stringify(json).slice(0, 200),
+      );
     }
-    throw new Error(
-      "GraphQL Follow failed: " + resp.status + " " + JSON.stringify(json).slice(0, 180),
-    );
+    // GraphQL sometimes returns 200 with empty/unrelated data — must verify
+    const pendingFollow = json?.data?.follow?.following === false;
+    return {
+      following: true,
+      method: "graphql",
+      pendingFollow,
+      needsVerify: true,
+    };
   }
 
   async function executeFollow(targetUserId) {
     const q = seenQueries.get("Follow");
     const errors = [];
-    // Prefer REST (stable); GraphQL if learned as secondary
+    let attempt = null;
+
+    // Prefer REST (stable); GraphQL as secondary
     try {
-      return await followRest(targetUserId);
+      attempt = await followRest(targetUserId);
     } catch (e) {
       errors.push(e.message || String(e));
-    }
-    if (q?.hash) {
-      try {
-        return await followGraphql(targetUserId, q.hash);
-      } catch (e) {
-        errors.push(e.message || String(e));
+      if (q?.hash) {
+        try {
+          attempt = await followGraphql(targetUserId, q.hash);
+        } catch (e2) {
+          errors.push(e2.message || String(e2));
+        }
       }
     }
-    throw new Error(errors.join(" | ") || "Follow failed");
+
+    if (!attempt) {
+      throw new Error(errors.join(" | ") || "Follow failed");
+    }
+
+    // Authoritative verification — never report success unless show.json says so
+    // (or alreadyFollowing was explicit)
+    try {
+      // brief delay so X indexes the relationship
+      await new Promise((r) => setTimeout(r, 400));
+      const v = await verifyFollowing(targetUserId);
+      if (v.following) {
+        return {
+          following: true,
+          alreadyFollowing: !!attempt.alreadyFollowing,
+          pendingFollow: !!v.pendingFollow,
+          method: attempt.method || "verified",
+          username: attempt.username || null,
+          verified: true,
+        };
+      }
+      // create returned ok but relationship not established
+      throw new Error(
+        "关注未生效（接口返回成功但 friendships/show 仍显示未关注）",
+      );
+    } catch (e) {
+      // If verify itself fails (network), do not claim success
+      if (attempt.alreadyFollowing && /verify failed/i.test(e.message || "")) {
+        // alreadyFollowing from explicit error codes — accept with warning
+        return {
+          following: true,
+          alreadyFollowing: true,
+          method: attempt.method,
+          verified: false,
+          warning: e.message,
+        };
+      }
+      throw new Error(e.message || String(e));
+    }
   }
 
   async function executeUnfollow(targetUserId) {
