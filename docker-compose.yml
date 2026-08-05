@@ -1,0 +1,158 @@
+# 统一编排文件 - 支持独立启动 nginx（静态页面）
+# 启动全部: docker compose up -d
+# 仅启动 nginx（静态页面）: docker compose up -d nginx
+
+services:
+
+  # =============================================
+  # Nginx - 可独立启动，访问静态页面
+  # =============================================
+  nginx:
+    image: "docker.m.daocloud.io/library/nginx:1.27-alpine"
+    container_name: nginx
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./nginx/nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+      - ./nginx/nginx/certs:/etc/nginx/certs:ro
+      - ./nginx/web:/var/www/web:ro
+      - ./nginx/logs:/var/log/nginx
+    command: ["nginx", "-g", "daemon off;"]
+    networks:
+      - backend
+    depends_on:
+      - drogon
+    healthcheck:
+      # 80 端口提供 /healthz（不强制跳转 HTTPS），避免 alpine wget 跟 301 后 SSL 探测失败
+      test: ["CMD-SHELL", "wget -q --spider http://127.0.0.1/healthz || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 5s
+
+  # =============================================
+  # Backend (Drogon)
+  # =============================================
+  drogon:
+    image: "backend-builder:latest"
+    container_name: drogon
+    restart: unless-stopped
+    command: ["/app/output/bin/drogonserver"]
+    environment:
+      - REDIS_HOST=redis
+      - REDIS_PORT=6379
+      - SUPER_ADMIN_PHONE_NO=${SUPER_ADMIN_PHONE_NO:-}
+      # OCR 配置 - 使用 PaddleOCR 自建服务
+      - OCR_BACKEND_TYPE=${OCR_BACKEND_TYPE:-paddle}
+      - PADDLEOCR_URL=${PADDLEOCR_URL:-http://paddleocr:9393}
+    volumes:
+      - ./backend:/app
+      - ./backend/tools/keys:/etc/application/keys
+      - ./backend/output:/app/output
+      - ./backend/var/www:/var/www
+      - drogon_data:/app/data
+      - drogon_uploads:/app/uploads
+      - ./backend/logs/drogon:/app/logs
+      - file_storage:/data/files
+      - /coredumps:/coredumps
+
+    ulimits:
+      core: -1
+    networks:
+      - backend
+    depends_on:
+      redis:
+        condition: service_started
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "python3 -c \"import urllib.request; urllib.request.urlopen('http://localhost:8080/api/health')\""]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 45s
+
+  # =============================================
+  # PostgreSQL (primary DB; SQLite config kept as config.sqlite.json)
+  # =============================================
+  postgres:
+    image: "docker.m.daocloud.io/library/postgres:16-alpine"
+    container_name: postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: massage
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-massage_pg_pass}
+      POSTGRES_DB: massage
+      TZ: Asia/Shanghai
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    networks:
+      - backend
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U massage -d massage"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
+
+  # =============================================
+  # Redis
+  # =============================================
+  redis:
+    image: "docker.m.daocloud.io/library/redis:7-alpine"
+    container_name: redis
+    restart: unless-stopped
+    command: ["redis-server", "--appendonly", "yes", "--bind", "0.0.0.0", "--protected-mode", "no"]
+    volumes:
+      - redis_data:/data
+    networks:
+      - backend
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+
+  # =============================================
+  # PaddleOCR Service - 自建OCR服务（可选）
+  # =============================================
+  # 构建镜像: docker build -t paddleocr-serving -f paddleocr/Dockerfile .
+  # 使用本地构建的镜像，无需登录即可拉取
+  # 如果不启动此服务，系统会自动降级使用Mock OCR后端
+  #paddleocr:
+  #  image: "paddleocr-serving:latest"
+  #  build:
+  #    context: ./paddleocr
+  #    dockerfile: Dockerfile
+  #  container_name: paddleocr
+  #  restart: unless-stopped
+  #  # 不暴露端口，仅供 Docker 内网访问
+  #  environment:
+  #    - TZ=Asia/Shanghai
+  #    - FLAGS_rpc_deadline=5000
+  #  volumes:
+  #    - ./paddleocr/config.yml:/app/config.yml
+  #    - paddleocr_models:/root/.paddleocr
+  #  networks:
+  #    - backend
+  #  healthcheck:
+  #    test: ["CMD", "curl", "-f", "http://localhost:9393/health", "||", "exit", "0"]
+  #    interval: 30s
+  #    timeout: 10s
+  #    retries: 3
+  #    start_period: 60s
+
+networks:
+  backend:
+    name: webpage_backend
+    driver: bridge
+
+volumes:
+  redis_data:
+  drogon_data:
+  drogon_uploads:
+  file_storage:
+  postgres_data:
+#paddleocr_models:
