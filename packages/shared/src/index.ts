@@ -63,8 +63,10 @@ export function settingsFromEnv(): AppSettings {
     maxUnfollowsPerDay: n("MAX_UNFOLLOWS_PER_DAY", live ? 40 : 50),
     maxFollowsPerHour: n("MAX_FOLLOWS_PER_HOUR", live ? 6 : 8),
     maxUnfollowsPerHour: n("MAX_UNFOLLOWS_PER_HOUR", live ? 6 : 8),
-    // Real X: conservative write spacing (default 45s). Mock can be fast.
-    writeMinIntervalMs: n("WRITE_MIN_INTERVAL_MS", live ? 45_000 : 200),
+    // Manage follows: 50/15min ≈ 18s min; use 20s+ for safety (headers still authoritative).
+    // https://docs.x.com/x-api/fundamentals/rate-limits
+    // 50 follow writes / 15min ≈ 18s; default 20s (RateBudget also enforces)
+    writeMinIntervalMs: n("WRITE_MIN_INTERVAL_MS", live ? 20_000 : 50),
     followBackEnabled: b("FOLLOW_BACK_ENABLED", true),
     mutualExpandEnabled: b("MUTUAL_EXPAND_ENABLED", false),
     candidateManualApproval: b("CANDIDATE_MANUAL_APPROVAL", true),

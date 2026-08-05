@@ -1,8 +1,10 @@
+import { getRateBudget, type RateEvent } from "./rate-budget.js";
 import type { FollowResult, Page, XCapabilities, XClient, XUser } from "./types.js";
 
 /** Deterministic mock graph for offline dev only. */
 export class MockXClient implements XClient {
   readonly mode = "mock" as const;
+  private budget = getRateBudget();
 
   me: XUser = {
     id: "100",
@@ -53,7 +55,16 @@ export class MockXClient implements XClient {
     this.me.following_count = this.following.size;
   }
 
+  onRateEvent(fn: (e: RateEvent) => void) {
+    return this.budget.onEvent(fn);
+  }
+
+  rateSnapshots() {
+    return this.budget.allSnapshots();
+  }
+
   async getMe(): Promise<XUser> {
+    await this.budget.acquire("getMe");
     this.refreshCounts();
     return { ...this.me };
   }
@@ -70,15 +81,18 @@ export class MockXClient implements XClient {
   }
 
   async getFollowers(_userId: string, token?: string | null, maxResults = 100) {
+    await this.budget.acquire("followers");
     return this.page([...this.followers], token, maxResults);
   }
 
   async getFollowing(userId: string, token?: string | null, maxResults = 100) {
+    await this.budget.acquire("following");
     if (userId === this.me.id) return this.page([...this.following], token, maxResults);
     return this.page(this.foafFollowing.get(userId) ?? [], token, maxResults);
   }
 
   async follow(_source: string, target: string): Promise<FollowResult> {
+    await this.budget.acquire("follow");
     if (this.following.has(target)) return { pendingFollow: false, alreadyFollowing: true };
     if (target === "105") {
       this.following.add(target);
@@ -91,6 +105,7 @@ export class MockXClient implements XClient {
   }
 
   async unfollow(_source: string, target: string): Promise<void> {
+    await this.budget.acquire("unfollow");
     this.following.delete(target);
     this.refreshCounts();
   }

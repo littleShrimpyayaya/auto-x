@@ -62,6 +62,10 @@
         <h2>运行时</h2>
         <div id="runtime">—</div>
       </section>
+      <section class="card">
+        <h2>X 限流预算（官方 15min 窗口）</h2>
+        <div id="rates" style="font-size:.85rem">—</div>
+      </section>
       <section class="card" style="grid-column:1/-1">
         <h2>任务队列（含 @username）</h2>
         <div style="overflow:auto">
@@ -137,6 +141,32 @@ async function refresh() {
   document.getElementById('stats').innerHTML = st.empty ? '无账号' :
     `粉丝 ${st.followers} · 关注 ${st.following} · 观察 ${st.watching}<br/>今日 follow ${st.dailyFollows} / unfollow ${st.dailyUnfollows}<br/>小时 follow ${st.hourlyFollows} / unfollow ${st.hourlyUnfollows}<br/>jobs ${JSON.stringify(st.jobs||{})}`;
 
+  try {
+    const rl = await api('/api/v1/rate-limits');
+    const budgets = (rl.live && rl.live.budgets) || [];
+    const prog = rl.progress;
+    let html = '<div style="color:var(--mut);margin-bottom:.5rem">预扣配额（85% 官方上限）+ 最小间隔，避免 429</div>';
+    if (rl.live?.lastEvent) {
+      html += '<div class="'+(rl.live.lastType==='blocked_429'?'bad':'')+'">最近: '+rl.live.lastEvent+'</div>';
+    }
+    if (prog) {
+      html += '<div>同步: '+prog.stream+' · '+prog.phase+' · 页 '+ (prog.pagesDone||0) + (prog.error?(' · <span class="bad">'+prog.error+'</span>'):'')+'</div>';
+    }
+    if (budgets.length) {
+      html += '<table><thead><tr><th>端点</th><th>剩余</th><th>限额</th><th>间隔</th></tr></thead><tbody>';
+      for (const b of budgets) {
+        html += '<tr><td>'+b.bucket+'</td><td>'+b.remaining+'</td><td>'+b.limit+'</td><td>'+b.minIntervalMs+'ms</td></tr>';
+      }
+      html += '</tbody></table>';
+    } else {
+      html += '<div style="color:var(--mut)">启动自动化后 worker 会刷新预算</div>';
+    }
+    if (rl.lastError) html += '<div class="bad">last_error: '+rl.lastError+'</div>';
+    document.getElementById('rates').innerHTML = html;
+  } catch (e) {
+    document.getElementById('rates').textContent = 'rate-limits: ' + e.message;
+  }
+
   const jobs = await api('/api/v1/jobs?limit=40');
   document.getElementById('jobs').innerHTML = (jobs.jobs||[]).map(j =>
     `<tr><td>${j.id}</td><td>${j.type}</td><td><span class="tag">${j.status}</span></td><td>${j.username?'@'+j.username:'@unknown'} ${j.name||''}</td><td>${j.source||''}</td></tr>`
@@ -175,8 +205,11 @@ function connectWs() {
       const msg = JSON.parse(ev.data);
       document.getElementById('wsState').textContent = 'ws: ok';
       log(msg.type + ' ' + JSON.stringify(msg.payload).slice(0,180));
-      if (['stats.updated','job.updated','runtime.changed','sync.progress'].includes(msg.type)) {
+      if (['stats.updated','job.updated','runtime.changed','sync.progress','x.rate','x.error'].includes(msg.type)) {
         refresh().catch(()=>{});
+      }
+      if (msg.type === 'x.rate' || msg.type === 'x.error') {
+        // already logged above
       }
     } catch {}
   };

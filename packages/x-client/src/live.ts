@@ -2,11 +2,12 @@
  * Live X API client via official TypeScript XDK:
  * https://docs.x.com/xdks/typescript/overview
  *
- * Auth: OAuth 1.0a User Context (required for follow/unfollow).
- * Package: @xdevplatform/xdk
+ * Rate avoidance: https://docs.x.com/x-api/fundamentals/rate-limits
+ * - Follows lookup 300/15min, Manage follows 50/15min, getMe 75/15min
  */
 import { Client, OAuth1 } from "@xdevplatform/xdk";
 import { classifyXError, XApiError } from "./errors.js";
+import { getRateBudget, type RateBucket, type RateEvent } from "./rate-budget.js";
 import type { FollowResult, Page, XCapabilities, XClient, XUser } from "./types.js";
 
 const USER_FIELDS = [
@@ -52,8 +53,44 @@ function sleep(ms: number) {
   return new Promise((r) => setTimeout(r, ms));
 }
 
-/** Normalize either plain response or SDK paginator. */
-async function pageFromFollowersResult(
+function extractRateHeaders(errOrRes: unknown): {
+  limit?: number;
+  remaining?: number;
+  resetUnix?: number;
+} | null {
+  const e = errOrRes as {
+    headers?: Record<string, string> | { get?: (k: string) => string | null };
+    response?: { headers?: Record<string, string> | { get?: (k: string) => string | null } };
+    rateLimit?: { limit?: number; remaining?: number; reset?: number };
+  };
+  if (e.rateLimit) {
+    return {
+      limit: e.rateLimit.limit,
+      remaining: e.rateLimit.remaining,
+      resetUnix: e.rateLimit.reset,
+    };
+  }
+  const h = e.headers ?? e.response?.headers;
+  if (!h) return null;
+  const get = (k: string) => {
+    if (typeof (h as { get?: (x: string) => string | null }).get === "function") {
+      return (h as { get: (x: string) => string | null }).get(k);
+    }
+    const o = h as Record<string, string>;
+    return o[k] ?? o[k.toLowerCase()] ?? null;
+  };
+  const limit = get("x-rate-limit-limit");
+  const remaining = get("x-rate-limit-remaining");
+  const reset = get("x-rate-limit-reset");
+  if (!limit && !remaining && !reset) return null;
+  return {
+    limit: limit != null ? Number(limit) : undefined,
+    remaining: remaining != null ? Number(remaining) : undefined,
+    resetUnix: reset != null ? Number(reset) : undefined,
+  };
+}
+
+async function pageFromResult(
   res: unknown,
 ): Promise<{ data: SdkUser[]; nextToken: string | null }> {
   const r = res as {
@@ -63,18 +100,13 @@ async function pageFromFollowersResult(
     done?: boolean;
     fetchNext?: () => Promise<void>;
   };
-
-  // Paginator style (docs): await fetchNext then read items
   if (typeof r.fetchNext === "function") {
-    if (!r.items?.length) {
-      await r.fetchNext();
-    }
+    if (!r.items?.length) await r.fetchNext();
     return {
       data: r.items ?? [],
-      nextToken: r.meta?.nextToken ?? (r.done === false ? r.meta?.nextToken ?? null : null),
+      nextToken: r.meta?.nextToken ?? null,
     };
   }
-
   return {
     data: r.data ?? [],
     nextToken: r.meta?.nextToken ?? null,
@@ -85,6 +117,7 @@ export class LiveXClient implements XClient {
   readonly mode = "live" as const;
   private client: Client;
   private maxRetries: number;
+  private budget = getRateBudget();
 
   constructor() {
     const apiKey = process.env.X_API_KEY?.trim();
@@ -96,8 +129,6 @@ export class LiveXClient implements XClient {
         "Live X client requires X_API_KEY, X_API_SECRET, X_ACCESS_TOKEN, X_ACCESS_SECRET (OAuth 1.0a)",
       );
     }
-
-    // https://docs.x.com/xdks/typescript/authentication#oauth-10a-user-context
     const oauth1 = new OAuth1({
       apiKey,
       apiSecret,
@@ -108,27 +139,40 @@ export class LiveXClient implements XClient {
     this.maxRetries = Number(process.env.X_API_MAX_RETRIES ?? 5);
   }
 
-  private async withRetry<T>(label: string, fn: () => Promise<T>): Promise<T> {
+  /** Subscribe to rate-budget events (for UI / event_log). */
+  onRateEvent(fn: (e: RateEvent) => void) {
+    return this.budget.onEvent(fn);
+  }
+
+  rateSnapshots() {
+    return this.budget.allSnapshots();
+  }
+
+  private async withBudget<T>(bucket: RateBucket, label: string, fn: () => Promise<T>): Promise<T> {
     let attempt = 0;
     // eslint-disable-next-line no-constant-condition
     while (true) {
+      await this.budget.acquire(bucket);
       try {
-        return await fn();
+        const result = await fn();
+        this.budget.noteHeaders(bucket, extractRateHeaders(result));
+        return result;
       } catch (err) {
+        const headers = extractRateHeaders(err);
+        if (headers) this.budget.noteHeaders(bucket, headers);
         const xe = classifyXError(err);
-        if (xe.kind === "rate_limit" && attempt < this.maxRetries) {
-          const wait = xe.retryAfterMs ?? Math.min(300_000, 15_000 * 2 ** attempt);
-          console.warn(
-            `[xdk] ${label} rate limited; sleep ${Math.round(wait / 1000)}s (attempt ${attempt + 1})`,
-          );
-          await sleep(wait);
-          attempt += 1;
-          continue;
+        if (xe.kind === "rate_limit") {
+          this.budget.note429(bucket, xe.retryAfterMs);
+          if (attempt < this.maxRetries) {
+            const wait = xe.retryAfterMs ?? 60_000;
+            console.warn(`[xdk] ${label} 429; budget block + sleep ${Math.round(wait / 1000)}s`);
+            await sleep(Math.min(wait, 120_000));
+            attempt += 1;
+            continue;
+          }
         }
         if (xe.kind === "network" && attempt < this.maxRetries) {
-          const wait = Math.min(60_000, 2000 * 2 ** attempt);
-          console.warn(`[xdk] ${label} network error; retry in ${wait}ms`);
-          await sleep(wait);
+          await sleep(Math.min(60_000, 2000 * 2 ** attempt));
           attempt += 1;
           continue;
         }
@@ -138,7 +182,7 @@ export class LiveXClient implements XClient {
   }
 
   async getMe(): Promise<XUser> {
-    return this.withRetry("users.getMe", async () => {
+    return this.withBudget("getMe", "users.getMe", async () => {
       const res = await this.client.users.getMe({
         userFields: [...USER_FIELDS] as never,
       });
@@ -151,13 +195,13 @@ export class LiveXClient implements XClient {
 
   async getFollowers(userId: string, token?: string | null, maxResults = 100): Promise<Page<XUser>> {
     const max = Math.min(100, Math.max(1, maxResults));
-    return this.withRetry("users.getFollowers", async () => {
+    return this.withBudget("followers", "users.getFollowers", async () => {
       const res = await this.client.users.getFollowers(userId, {
         maxResults: max,
         paginationToken: token || undefined,
         userFields: [...USER_FIELDS] as never,
       });
-      const page = await pageFromFollowersResult(res);
+      const page = await pageFromResult(res);
       return {
         data: page.data.filter((u) => u.id).map(mapUser),
         nextToken: page.nextToken,
@@ -167,13 +211,13 @@ export class LiveXClient implements XClient {
 
   async getFollowing(userId: string, token?: string | null, maxResults = 100): Promise<Page<XUser>> {
     const max = Math.min(100, Math.max(1, maxResults));
-    return this.withRetry("users.getFollowing", async () => {
+    return this.withBudget("following", "users.getFollowing", async () => {
       const res = await this.client.users.getFollowing(userId, {
         maxResults: max,
         paginationToken: token || undefined,
         userFields: [...USER_FIELDS] as never,
       });
-      const page = await pageFromFollowersResult(res);
+      const page = await pageFromResult(res);
       return {
         data: page.data.filter((u) => u.id).map(mapUser),
         nextToken: page.nextToken,
@@ -182,7 +226,7 @@ export class LiveXClient implements XClient {
   }
 
   async follow(sourceUserId: string, targetUserId: string): Promise<FollowResult> {
-    return this.withRetry("users.followUser", async () => {
+    return this.withBudget("follow", "users.followUser", async () => {
       try {
         const res = await this.client.users.followUser(sourceUserId, {
           targetUserId,
@@ -202,7 +246,7 @@ export class LiveXClient implements XClient {
   }
 
   async unfollow(sourceUserId: string, targetUserId: string): Promise<void> {
-    await this.withRetry("users.unfollowUser", async () => {
+    await this.withBudget("unfollow", "users.unfollowUser", async () => {
       try {
         await this.client.users.unfollowUser(sourceUserId, targetUserId);
       } catch (err) {

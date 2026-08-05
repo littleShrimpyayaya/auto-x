@@ -340,6 +340,29 @@ app.get("/api/v1/capabilities", async (c) => {
   });
 });
 
+/** Official X rate budgets + last wait/429 (worker updates runtime.x_rate). */
+app.get("/api/v1/rate-limits", async (c) => {
+  const rt = await getRuntime();
+  return c.json({
+    /** Docs: https://docs.x.com/x-api/fundamentals/rate-limits */
+    official: {
+      window: "15 minutes (unless noted)",
+      perUser: {
+        "GET /2/users/me": "75/15min",
+        "GET /2/users/:id/followers": "300/15min",
+        "GET /2/users/:id/following": "300/15min",
+        "POST /2/users/:id/following": "50/15min",
+        "DELETE following": "50/15min",
+      },
+      strategy:
+        "Preemptive sliding window at 85% of official limit + min spacing; honor x-rate-limit-* headers; on 429 wait until reset.",
+    },
+    live: rt?.x_rate ?? null,
+    progress: rt?.x_progress ?? null,
+    lastError: rt?.last_error ?? null,
+  });
+});
+
 // --- HTTP + WS on same port ---
 const port = Number(process.env.PORT ?? 3000);
 if (!process.env.DATABASE_URL) {

@@ -34,6 +34,55 @@ let lastWriteAt = 0;
 let stopping = false;
 let caps: XCapabilities | null = null;
 let lastProbeAt = 0;
+let lastRatePush = 0;
+
+/** Wire rate-budget + X errors into event_log + WS (user-visible progress). */
+function wireRateVisibility() {
+  if (!x.onRateEvent) return;
+  x.onRateEvent((ev) => {
+    const level = ev.type === "blocked_429" ? "warn" : ev.type === "wait" ? "info" : "debug";
+    // throttle noisy acquire/debug
+    if (ev.type === "acquire" && level === "debug") return;
+    void logEvent(
+      "x_rate",
+      ev.message,
+      {
+        type: ev.type,
+        bucket: ev.bucket,
+        waitMs: ev.waitMs,
+        snapshot: ev.snapshot,
+      },
+      level === "debug" ? "info" : level,
+    ).catch(() => {});
+    void pgNotify(
+      WS_CHANNEL,
+      envelope("x.rate", {
+        type: ev.type,
+        bucket: ev.bucket,
+        message: ev.message,
+        waitMs: ev.waitMs,
+        snapshot: ev.snapshot,
+        budgets: x.rateSnapshots?.() ?? [],
+      }),
+    ).catch(() => {});
+    // persist summary for REST pollers (throttle 2s)
+    const now = Date.now();
+    if (now - lastRatePush > 2000) {
+      lastRatePush = now;
+      void setRuntime({
+        x_rate: {
+          lastEvent: ev.message,
+          lastType: ev.type,
+          lastBucket: ev.bucket,
+          waitMs: ev.waitMs ?? 0,
+          budgets: x.rateSnapshots?.() ?? [],
+          updatedAt: new Date().toISOString(),
+        },
+      }).catch(() => {});
+    }
+  });
+}
+wireRateVisibility();
 
 function sleep(ms: number) {
   return new Promise((r) => setTimeout(r, ms));
@@ -112,6 +161,16 @@ async function syncStream(accountId: string, stream: "followers" | "following") 
          WHERE account_id=$1 AND stream=$2`,
         [accountId, stream, token, pages],
       );
+      await setRuntime({
+        x_progress: {
+          stream,
+          phase: "full_in_progress",
+          pagesDone: pages,
+          walkGen,
+          cursorPresent: !!token,
+          at: new Date().toISOString(),
+        },
+      });
       await pgNotify(
         WS_CHANNEL,
         envelope("sync.progress", {
@@ -120,21 +179,50 @@ async function syncStream(accountId: string, stream: "followers" | "following") 
           pagesDone: pages,
           walkGen,
           cursorPresent: !!token,
+          rate: x.rateSnapshots?.() ?? [],
         }),
       );
       if (!token) break;
-      // be gentle on read rate limits between pages
-      if (x.mode === "live") await sleep(Number(process.env.SYNC_PAGE_DELAY_MS ?? 1100));
+      // RateBudget already spaces calls; optional extra delay for live
     }
     await completeFullWalk(accountId, stream, walkGen);
     await logEvent("sync", `full ${stream} walk_gen=${walkGen} pages=${pages}`, { accountId });
   } catch (e) {
     const msg = e instanceof Error ? e.message : String(e);
+    const xe = e instanceof XApiError ? e : null;
     // leave phase=full_in_progress + cursor for resume; do NOT soft-delete
-    await logEvent("sync", `interrupted ${stream}: ${msg}`, { walkGen, pages }, "error");
-    await setRuntime({ last_error: `sync ${stream}: ${msg}` });
-    if (e instanceof XApiError && e.kind === "rate_limit" && e.retryAfterMs) {
-      await sleep(Math.min(e.retryAfterMs, 300_000));
+    await logEvent(
+      "sync",
+      xe?.kind === "rate_limit"
+        ? `同步限流中断 ${stream}: ${msg}（保留游标，窗口恢复后自动续传）`
+        : `同步中断 ${stream}: ${msg}`,
+      { walkGen, pages, kind: xe?.kind, retryAfterMs: xe?.retryAfterMs },
+      "error",
+    );
+    await setRuntime({
+      last_error: `sync ${stream}: ${msg}`,
+      x_progress: {
+        stream,
+        phase: "interrupted",
+        pagesDone: pages,
+        walkGen,
+        error: msg,
+        kind: xe?.kind ?? "unknown",
+        at: new Date().toISOString(),
+      },
+    });
+    await pgNotify(
+      WS_CHANNEL,
+      envelope("x.error", {
+        source: "sync",
+        stream,
+        message: msg,
+        kind: xe?.kind,
+        retryAfterMs: xe?.retryAfterMs,
+      }),
+    );
+    if (xe?.kind === "rate_limit" && xe.retryAfterMs) {
+      await sleep(Math.min(xe.retryAfterMs, 300_000));
     }
     throw e;
   }
@@ -513,6 +601,21 @@ async function executeOne(accountId: string) {
          WHERE id=$1`,
         [job.id, String(xe.retryAfterMs ?? 60_000), msg],
       );
+      await logEvent("executor", `任务 #${job.id} 限流，将自动重试: ${msg}`, {
+        kind: "rate_limit",
+        retryAfterMs: xe.retryAfterMs,
+      }, "warn");
+      await pgNotify(
+        WS_CHANNEL,
+        envelope("x.error", {
+          source: "executor",
+          jobId: job.id,
+          type: job.type,
+          message: msg,
+          kind: "rate_limit",
+          retryAfterMs: xe.retryAfterMs,
+        }),
+      );
       await sleep(Math.min(xe.retryAfterMs ?? 60_000, 120_000));
       return true;
     }
@@ -525,7 +628,26 @@ async function executeOne(accountId: string) {
        WHERE id=$1`,
       [job.id, dead ? "dead" : "pending", msg],
     );
-    await logEvent("executor", `job ${job.id} failed: ${msg}`, { kind: xe?.kind }, "error");
+    await logEvent(
+      "executor",
+      xe?.kind === "rate_limit"
+        ? `任务 #${job.id} 限流，将自动重试: ${msg}`
+        : `任务 #${job.id} 失败: ${msg}`,
+      { kind: xe?.kind, type: job.type, target: job.target_user_id },
+      "error",
+    );
+    await pgNotify(
+      WS_CHANNEL,
+      envelope("x.error", {
+        source: "executor",
+        jobId: job.id,
+        type: job.type,
+        targetUserId: job.target_user_id,
+        message: msg,
+        kind: xe?.kind,
+        retryAfterMs: xe?.retryAfterMs,
+      }),
+    );
   }
   return true;
 }

@@ -41,4 +41,7 @@ export interface XClient {
   unfollow(sourceUserId: string, targetUserId: string): Promise<void>;
   /** Non-destructive capability probe (live hits real API; mock returns all true). */
   probeCapabilities(): Promise<XCapabilities>;
+  /** Optional: rate-budget events for UI progress */
+  onRateEvent?(fn: (e: import("./rate-budget.js").RateEvent) => void): () => void;
+  rateSnapshots?(): import("./rate-budget.js").RateBucketSnapshot[];
 }

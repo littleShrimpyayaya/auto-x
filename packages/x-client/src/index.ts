@@ -4,6 +4,7 @@ import type { XClient } from "./types.js";
 
 export * from "./types.js";
 export * from "./errors.js";
+export * from "./rate-budget.js";
 export { MockXClient } from "./mock.js";
 export { LiveXClient } from "./live.js";
 
