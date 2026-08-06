@@ -160,10 +160,10 @@ export function createServer(taskManager: TaskManager): express.Express {
 
   app.post('/api/compute-follow-back', async (_req, res) => {
     try {
-      const list = await taskManager.computeFollowBack();
-      res.json({ ok: true, users: list, count: list.length });
+      taskManager.startComputeFollowBack();
+      res.json({ ok: true, message: '扫描已启动，完成后结果自动刷新', scanning: true });
     } catch (err: any) {
-      res.status(500).json({ error: err.message });
+      res.status(409).json({ error: err.message });
     }
   });
 
@@ -345,6 +345,13 @@ export function createServer(taskManager: TaskManager): express.Express {
       // 立即发当前这条
       const result = await taskManager.postNow(postText);
 
+      // 记录发帖时间到配置上，用于下次重启时计算剩余时间
+      if (result.ok) {
+        const updated = loadPostConfig();
+        updated.lastPostAt = new Date().toISOString();
+        savePostConfig(updated);
+      }
+
       // 若开启自动，启动周期（从现在起 interval 后再发）
       if (wantAuto) {
         taskManager.startPostSchedule(interval, postText);
@@ -446,6 +453,7 @@ export function createServer(taskManager: TaskManager): express.Express {
         autoPostEnabled: body.autoPostEnabled ?? existing.autoPostEnabled,
         autoPostIntervalMinutes: body.autoPostIntervalMinutes ?? existing.autoPostIntervalMinutes,
         autoPostTemplateIndex: body.autoPostTemplateIndex ?? existing.autoPostTemplateIndex,
+        lastPostAt: body.lastPostAt ?? existing.lastPostAt,
       };
 
       savePostConfig(config);

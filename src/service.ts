@@ -147,25 +147,29 @@ export class Service {
 
       // 写入 users + pending_follow，便于后续批量回关
       if (result.length > 0) {
-        await this.repo.upsertUsers(
-          result.map((u) => ({
-            id: u.userId !== '0' ? u.userId : u.username,
+        // 只写入有有效数字 ID 的用户
+        const usersWithId = result
+          .filter((u) => u.userId !== '0' && /^\d+$/.test(u.userId))
+          .map((u) => ({
+            id: u.userId,
             username: u.username,
             name: u.name,
             profileImageUrl: u.profileImageUrl,
-          })),
-        );
-        const ids = result
-          .map((u) => (u.userId !== '0' ? u.userId : u.username))
-          .filter(Boolean);
-        if (ids.length > 0) {
-          await this.repo.upsertPendingFollowWithInfo(
-            result.map((u) => ({
-              userId: u.userId !== '0' ? u.userId : u.username,
-              username: u.username,
-              name: u.name,
-            })),
-          );
+          }));
+        if (usersWithId.length > 0) {
+          await this.repo.upsertUsers(usersWithId);
+        }
+
+        // pending_follow 也只写有效数字 ID 的
+        const pendingItems = result
+          .filter((u) => u.userId !== '0' && /^\d+$/.test(u.userId))
+          .map((u) => ({
+            userId: u.userId,
+            username: u.username,
+            name: u.name,
+          }));
+        if (pendingItems.length > 0) {
+          await this.repo.upsertPendingFollowWithInfo(pendingItems);
         }
       }
 

@@ -337,38 +337,69 @@
       return userIds;
     }
 
+    let followBackPollTimer = null;
+
     async function computeFollowBack() {
       const btn = document.getElementById('btn-compute-follow');
       const statusEl = document.getElementById('compute-follow-status');
-      btn.textContent = '扫描中...';
+      btn.textContent = '启动扫描...';
       btn.disabled = true;
-      statusEl.textContent = '正在打开粉丝列表，识别回关按钮…';
+      statusEl.textContent = '后台扫描中，请等待…';
       statusEl.style.color = '#1d9bf0';
 
       try {
         const res = await fetch('/api/compute-follow-back', { method: 'POST' });
         const data = await res.json();
         if (data.ok) {
-          followListData = data.users || [];
-          renderUserList('follow-list-items', followListData, 'follow');
-          document.getElementById('follow-list').style.display = 'block';
-          statusEl.textContent = '找到 ' + data.count + ' 个待回关粉丝';
-          statusEl.style.color = '#00ba7c';
-          document.getElementById('follow-queue-count').textContent = '待回关: ' + data.count;
-          refreshStatus();
-          showToast('待回关: ' + data.count + ' 人', 'success');
+          statusEl.textContent = '后台扫描中… 结果出来会自动显示';
+          statusEl.style.color = '#1d9bf0';
+          // 开始轮询等待结果
+          if (followBackPollTimer) clearInterval(followBackPollTimer);
+          followBackPollTimer = setInterval(checkFollowBackScan, 2000);
         } else {
-          statusEl.textContent = data.error || '计算失败';
+          statusEl.textContent = data.error || '启动失败';
           statusEl.style.color = '#f4212e';
-          showToast(data.error || '计算失败', 'error');
+          showToast(data.error || '启动失败', 'error');
+          btn.textContent = '计算待回关';
+          btn.disabled = false;
         }
       } catch (e) {
         statusEl.textContent = '请求失败';
         statusEl.style.color = '#f4212e';
         showToast('计算待回关失败', 'error');
+        btn.textContent = '计算待回关';
+        btn.disabled = false;
       }
-      btn.textContent = '计算待回关';
-      btn.disabled = false;
+    }
+
+    function checkFollowBackScan() {
+      if (!lastData || !lastData.computedFollowBack) return;
+      const scan = lastData.computedFollowBack;
+      const btn = document.getElementById('btn-compute-follow');
+      const statusEl = document.getElementById('compute-follow-status');
+
+      if (scan.status === 'done') {
+        if (followBackPollTimer) { clearInterval(followBackPollTimer); followBackPollTimer = null; }
+        followListData = scan.users || [];
+        renderUserList('follow-list-items', followListData, 'follow');
+        document.getElementById('follow-list').style.display = 'block';
+        statusEl.textContent = '找到 ' + scan.count + ' 个待回关粉丝';
+        statusEl.style.color = '#00ba7c';
+        document.getElementById('follow-queue-count').textContent = '待回关: ' + scan.count;
+        showToast('待回关: ' + scan.count + ' 人', 'success');
+        btn.textContent = '计算待回关';
+        btn.disabled = false;
+      } else if (scan.status === 'error') {
+        if (followBackPollTimer) { clearInterval(followBackPollTimer); followBackPollTimer = null; }
+        statusEl.textContent = scan.error || '扫描失败';
+        statusEl.style.color = '#f4212e';
+        showToast(scan.error || '扫描失败', 'error');
+        btn.textContent = '计算待回关';
+        btn.disabled = false;
+      } else if (scan.status === 'scanning') {
+        statusEl.textContent = '后台扫描中… 已收集 ' + (scan.count || 0) + ' 个';
+        statusEl.style.color = '#1d9bf0';
+      }
     }
 
     async function batchFollow() {
@@ -573,6 +604,11 @@
 
         // Post schedule
         updatePostScheduleUI(data);
+
+        // Follow-back scan (async)
+        if (data.computedFollowBack && data.computedFollowBack.status !== 'idle') {
+          checkFollowBackScan();
+        }
       } catch (err) {
         // Server not ready
       }

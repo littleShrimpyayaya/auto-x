@@ -43,6 +43,12 @@ export interface StatusInfo {
     nextRunAt: string | null;
   };
   connected: boolean;
+  computedFollowBack: {
+    status: string;
+    users: Array<{ userId: string; username: string; name: string; profileImageUrl?: string }> | null;
+    count: number;
+    error: string | null;
+  };
 }
 
 export class TaskManager {
@@ -52,6 +58,16 @@ export class TaskManager {
   private taskMessage = '';
   private taskStartedAt: string | null = null;
   private taskFinishedAt: string | null = null;
+
+  // 后台扫描结果
+  private followBackScanResults: Array<{
+    userId: string;
+    username: string;
+    name: string;
+    profileImageUrl?: string;
+  }> | null = null;
+  private followBackScanStatus: 'idle' | 'scanning' | 'done' | 'error' = 'idle';
+  private followBackScanError: string | null = null;
 
   private autoFollowTimer: ReturnType<typeof setInterval> | null = null;
   private autoFollowInterval = 0;
@@ -295,27 +311,47 @@ export class TaskManager {
     return { ok: false };
   }
 
-  startPostSchedule(intervalMinutes: number, templateText: string): void {
+  startPostSchedule(intervalMinutes: number, templateText: string, firstDelayMs?: number): void {
     this.stopPostSchedule();
     this.postInterval = intervalMinutes;
     this.postTemplateText = templateText;
 
     const intervalMs = intervalMinutes * 60 * 1000;
-    this.postNextRunAt = new Date(Date.now() + intervalMs).toISOString();
+    // firstDelayMs: 首次触发的延迟（用于恢复定时时对齐周期）；未指定则用完整周期
+    const firstDelay = typeof firstDelayMs === 'number' ? Math.max(0, firstDelayMs) : intervalMs;
 
-    this.postTimer = setInterval(async () => {
+    let isFirst = true;
+
+    const doPost = async () => {
       if (this.service['xClient'] instanceof BrowserClient) {
         console.log('[Post] 定时发帖...');
         try {
           await (this.service['xClient'] as BrowserClient).postTweet(templateText);
+          // 记录最近一次发帖时间
+          const cfg = loadPostConfig();
+          cfg.lastPostAt = new Date().toISOString();
+          savePostConfig(cfg);
         } catch (err) {
           console.error('[Post] 定时发帖失败:', err);
         }
       }
-      this.postNextRunAt = new Date(Date.now() + intervalMs).toISOString();
-    }, intervalMs);
+      if (isFirst) {
+        // 首次 setTimeout 之后，切换到 setInterval
+        isFirst = false;
+        if (this.postTimer) clearTimeout(this.postTimer);
+        this.postNextRunAt = new Date(Date.now() + intervalMs).toISOString();
+        this.postTimer = setInterval(doPost, intervalMs);
+      } else {
+        this.postNextRunAt = new Date(Date.now() + intervalMs).toISOString();
+      }
+    };
 
-    console.log(`[Post] 定时发帖已启动，间隔 ${intervalMinutes} 分钟，下次 ${this.postNextRunAt}`);
+    this.postNextRunAt = new Date(Date.now() + firstDelay).toISOString();
+
+    // 用 setTimeout 处理首次触发，支持非完整周期间隔
+    this.postTimer = setTimeout(doPost, firstDelay);
+
+    console.log(`[Post] 定时发帖已启动，间隔 ${intervalMinutes} 分钟，首次 ${this.postNextRunAt}`);
   }
 
   stopPostSchedule(): void {
@@ -329,7 +365,7 @@ export class TaskManager {
     console.log('[Post] 定时发帖已停止');
   }
 
-  /** 进程启动时按已保存配置恢复定时（不立刻发，只等周期） */
+  /** 进程启动时按已保存配置恢复定时（根据上次发推时间计算剩余等待） */
   restorePostScheduleFromConfig(): void {
     const cfg = loadPostConfig();
     if (!cfg.autoPostEnabled) return;
@@ -340,8 +376,54 @@ export class TaskManager {
       console.warn('[Post] 配置开启了自动发推，但没有模板文案，跳过恢复');
       return;
     }
-    this.startPostSchedule(interval, text);
+
+    const intervalMs = interval * 60 * 1000;
+    let firstDelay = intervalMs;
+
+    if (cfg.lastPostAt) {
+      const lastTime = new Date(cfg.lastPostAt).getTime();
+      const elapsed = Date.now() - lastTime;
+      if (elapsed >= intervalMs) {
+        // 已经过了下一个发推时间 → 立即发
+        console.log('[Post] 上次发推已超过周期，立即补发');
+        firstDelay = 1000; // 1 秒后立刻发
+      } else {
+        // 还没到 → 等剩余时间
+        firstDelay = intervalMs - elapsed;
+        console.log(`[Post] 距下次发推还有 ${Math.round(firstDelay / 60000)} 分钟`);
+      }
+    } else {
+      // 无历史记录：以当前时间为基准写入，避免每次重启都重置倒计时
+      console.log('[Post] 无历史发帖记录，以当前时间为基准，等一个完整周期');
+      cfg.lastPostAt = new Date().toISOString();
+      savePostConfig(cfg);
+    }
+
+    this.startPostSchedule(interval, text, firstDelay);
     console.log(`[Post] 已从配置恢复自动发推，每 ${interval} 分钟`);
+  }
+
+  /** 启动后台扫描待回关（不阻塞请求，结果通过 /api/status 获取） */
+  startComputeFollowBack(): void {
+    if (this.followBackScanStatus === 'scanning') {
+      throw new Error('扫描进行中，请等待完成后再试');
+    }
+    this.followBackScanStatus = 'scanning';
+    this.followBackScanResults = null;
+    this.followBackScanError = null;
+
+    // 后台启动，不用 runTask 占住主任务槽
+    this.service.computeFollowBackWithDetails(this.userId)
+      .then((results) => {
+        this.followBackScanResults = results;
+        this.followBackScanStatus = 'done';
+        console.log(`[TaskManager] 后台扫描完成: ${results.length} 个待回关`);
+      })
+      .catch((err) => {
+        this.followBackScanStatus = 'error';
+        this.followBackScanError = err.message;
+        console.error('[TaskManager] 后台扫描失败:', err);
+      });
   }
 
   async computeFollowBack(): Promise<Array<{
@@ -423,6 +505,12 @@ export class TaskManager {
         nextRunAt: this.postNextRunAt,
       },
       connected: this.connected,
+      computedFollowBack: {
+        status: this.followBackScanStatus,
+        users: this.followBackScanResults,
+        count: this.followBackScanResults?.length ?? 0,
+        error: this.followBackScanError,
+      },
     };
   }
 }

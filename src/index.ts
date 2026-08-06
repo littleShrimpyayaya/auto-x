@@ -81,6 +81,19 @@ async function main() {
   });
 }
 
+// 防止未捕获异常导致进程退出
+process.on('unhandledRejection', (reason) => {
+  console.error('[进程] unhandledRejection:', reason);
+});
+process.on('uncaughtException', (err) => {
+  console.error('[进程] uncaughtException:', err);
+  if (err.message?.includes('EADDRINUSE')) process.exit(1);
+});
+process.on('SIGTERM', () => {
+  console.log('[进程] 收到 SIGTERM，优雅退出');
+  process.exit(0);
+});
+
 main().catch((err) => {
   console.error('Fatal error:', err);
   process.exit(1);

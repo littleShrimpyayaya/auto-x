@@ -149,6 +149,9 @@ export class BrowserClient {
         '--no-sandbox',
         '--disable-setuid-sandbox',
         '--disable-blink-features=AutomationControlled',
+        '--disable-dev-shm-usage',
+        '--disable-gpu',
+        '--single-process',
       ],
     });
 
@@ -475,11 +478,19 @@ export class BrowserClient {
           profileImageUrl?: string;
           needsFollowBack: boolean;
           buttonHint: string;
+          userId: string;
         };
 
         const SKIP = new Set(['home', 'explore', 'notifications', 'messages', 'i', 'settings', 'compose']);
 
-        /** 是否为「需要回关」按钮（Follow / Follow back / 回关 / 关注） */
+        /** 从按钮 data-testid 中提取用户 ID（如 "123456-follow" → "123456"） */
+        function extractUserIdFromButton(btn: Element): string {
+          const testId = ((btn as HTMLElement).getAttribute('data-testid') || '');
+          const m = testId.match(/^(\d+)-(?:follow|unfollow|pending)/);
+          return m ? m[1] : '';
+        }
+
+        /** 是否为「需要回关」按钮 — 只匹配 Follow back / 回关（排除推荐用户的 Follow / 关注） */
         function isFollowBackButton(btn: Element): boolean {
           const rawText = (btn.textContent || '').replace(/\s+/g, ' ').trim();
           const text = rawText.toLowerCase();
@@ -502,24 +513,40 @@ export class BrowserClient {
             return false;
           }
 
-          // data-testid 形如 "123456-follow"（未关注）
-          if (/-follow$/.test(testId)) return true;
-
-          // 中英文回关 / 关注文案
+          // ⚠ 排除纯「关注 / Follow」（推荐用户），只保留「回关 / Follow back」
           if (
             text === 'follow' ||
-            text === 'follow back' ||
-            text === '回关' ||
             text === '关注'
+          ) {
+            return false;
+          }
+
+          // data-testid 形如 "123456-follow" + 上下文必须是 follow back
+          if (/-follow$/.test(testId)) {
+            // 按钮 text/aria 里必须带 "back" 或 "回" 才认定是回关
+            if (
+              text.includes('back') ||
+              text === '回关' ||
+              aria.includes('follow back') ||
+              aria.includes('回关')
+            ) {
+              return true;
+            }
+            return false;
+          }
+
+          // 中英文回关文案
+          if (
+            text === 'follow back' ||
+            text === '回关'
           ) {
             return true;
           }
 
-          // aria-label: "Follow @user" / "Follow back @user" / "回关 @user"
+          // aria-label: "Follow back @user" / "回关 @user"
           if (
-            /^follow(\s+back)?\s+@/.test(aria) ||
-            aria.startsWith('回关') ||
-            aria.startsWith('关注 @')
+            /^follow\s+back\s+@/.test(aria) ||
+            aria.startsWith('回关')
           ) {
             return true;
           }
@@ -556,10 +583,11 @@ export class BrowserClient {
             cell.querySelector('img[src*="twimg.com"]');
           const profileImageUrl = img?.getAttribute('src') || undefined;
 
-          // 找关注相关按钮
+          // 找关注相关按钮，同时提取用户 ID
           const allBtns = cell.querySelectorAll('button, [role="button"], [data-testid*="follow"]');
           let needsFollowBack = false;
           let buttonHint = '';
+          let domUserId = '';
           for (const btn of allBtns) {
             const t = ((btn.textContent || '').replace(/\s+/g, ' ').trim());
             const a = (btn as HTMLElement).getAttribute('aria-label') || '';
@@ -567,9 +595,20 @@ export class BrowserClient {
             if (t || a || d.includes('follow')) {
               buttonHint = `text="${t}" aria="${a}" testid="${d}"`;
             }
+            if (!domUserId) {
+              domUserId = extractUserIdFromButton(btn);
+            }
             if (isFollowBackButton(btn)) {
               needsFollowBack = true;
               break;
+            }
+          }
+
+          // 备用：尝试从链接的 data-user-id 获取
+          if (!domUserId) {
+            const userLink = cell.querySelector(`a[href="/${username}"]`);
+            if (userLink) {
+              domUserId = userLink.getAttribute('data-user-id') || '';
             }
           }
 
@@ -579,6 +618,7 @@ export class BrowserClient {
             profileImageUrl,
             needsFollowBack,
             buttonHint,
+            userId: domUserId,
           });
         }
         return results;
@@ -594,13 +634,23 @@ export class BrowserClient {
 
         const gql = gqlByUsername.get(key);
         // GraphQL 若明确说已经 following，以 GraphQL 为准跳过（避免误检）
-        if (gql?.following === true) continue;
+        if (gql?.following === true) {
+          console.log(`[BrowserClient] ⏭ 跳过 @${user.username} — GraphQL 显示已关注 (following=true)`);
+          continue;
+        }
 
-        const userId = gql?.id || this.idCache.get(user.username) || '0';
+        // ID 优先级：GraphQL → idCache → DOM 提取 → '0'
+        const userIdSource = gql?.id ? 'gql' : this.idCache.get(user.username) ? 'cache' : user.userId ? 'dom' : 'none';
+        const userId = gql?.id || this.idCache.get(user.username) || user.userId || '0';
         const profileImageUrl =
           user.profileImageUrl ||
           gql?.profileImageUrl ||
           undefined;
+
+        console.log(
+          `[BrowserClient] ✅ @${user.username}  name="${user.name}"  userId=${userId}(${userIdSource})  ` +
+          `btn=${user.buttonHint}  img=${profileImageUrl ? 'yes' : 'no'}`,
+        );
 
         needFollow.push({
           userId,
@@ -623,11 +673,11 @@ export class BrowserClient {
       prevSeenAll = seenAllUsers.size;
 
       // 滚动加载更多粉丝
-      for (let r = 0; r < 3; r++) {
+      for (let r = 0; r < 4; r++) {
         await this.scrollUserList();
-        await this.page!.waitForTimeout(600);
+        await this.page!.waitForTimeout(200);
       }
-      await this.page!.waitForTimeout(2000 + Math.random() * 1000);
+      await this.page!.waitForTimeout(600 + Math.random() * 400);
 
       if (i === 0) {
         const sample = batch.slice(0, 5).map((u) =>
@@ -775,12 +825,12 @@ export class BrowserClient {
       }
       prevCount = seen.size;
 
-      // 多次滚动 + 更长等待，确保 X 懒加载触发
-      for (let r = 0; r < 3; r++) {
+      // 多次滚动 + 等待，确保 X 懒加载触发
+      for (let r = 0; r < 4; r++) {
         await this.scrollUserList();
-        await this.page!.waitForTimeout(600);
+        await this.page!.waitForTimeout(200);
       }
-      await this.page!.waitForTimeout(2500 + Math.random() * 1500);
+      await this.page!.waitForTimeout(800 + Math.random() * 500);
 
       if (i % 10 === 0) {
         console.log(`[BrowserClient] ${type} 进度: ${seen.size} 个用户`);
@@ -903,7 +953,7 @@ export class BrowserClient {
 
     // 额外滚动一点距离确保触发加载
     await this.page!.mouse.wheel(0, 300);
-    await this.page!.waitForTimeout(500);
+    await this.page!.waitForTimeout(200);
 
     // 再次尝试找滚动容器滚到底
     await this.page.evaluate(() => {
