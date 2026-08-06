@@ -159,8 +159,8 @@
           <h3>🔁 Follow-back Queue</h3>
           <span style="font-size: 13px; color: #888;" id="follow-queue-count"></span>
         </div>
-        <div class="section-desc">关注了你、但你还没回关的人</div>
-        <button class="btn-primary" onclick="computeFollowBack()" id="btn-compute-follow" style="margin-bottom: 10px;">Compute Follow-back</button>
+        <div class="section-desc">从「我的关注者」中扫描带「回关 / Follow」按钮的粉丝（你尚未回关的人）</div>
+        <button class="btn-primary" onclick="computeFollowBack()" id="btn-compute-follow" style="margin-bottom: 10px;">计算待回关</button>
         <span id="compute-follow-status" style="font-size: 12px; color: #888; margin-left: 8px;"></span>
         <div id="follow-list" style="display: none; max-height: 300px; overflow-y: auto; border: 1px solid #eee; border-radius: 6px;">
           <div style="padding: 8px 12px; border-bottom: 1px solid #eee; background: #fafafa; display: flex; align-items: center; gap: 8px; position: sticky; top: 0;">
@@ -223,14 +223,15 @@
         <span id="post-status" style="font-size: 13px; color: #888;"></span>
 
         <span style="color: #ddd;">|</span>
-        <label style="display: flex; align-items: center; gap: 6px; cursor: pointer; font-size: 13px; color: #666;">
-          <input type="checkbox" id="auto-post-checkbox" onchange="toggleAutoPost()" style="width: 16px; height: 16px;">
+        <label style="display: flex; align-items: center; gap: 6px; cursor: pointer; font-size: 13px; color: #666;" title="仅本地设置，点 Post Now 后才会生效并保存">
+          <input type="checkbox" id="auto-post-checkbox" onchange="onAutoPostCheckboxChange()" style="width: 16px; height: 16px;">
           Auto every
         </label>
-        <input type="number" id="post-interval-input" value="60" min="5" step="5" style="width: 65px; padding: 6px; border: 1px solid #ddd; border-radius: 6px; font-size: 13px;">
+        <input type="number" id="post-interval-input" value="60" min="5" step="5" onchange="onAutoPostCheckboxChange()" style="width: 65px; padding: 6px; border: 1px solid #ddd; border-radius: 6px; font-size: 13px;">
         <span style="font-size: 13px; color: #666;">min</span>
         <span id="post-schedule-status" style="font-size: 12px; color: #888;"></span>
       </div>
+      <div id="post-hint" style="font-size: 12px; color: #888; margin-top: 8px;">勾选 Auto 只是本地意图；点 <b>Post Now</b> 才会发推并保存定时设置</div>
     </div>
 
     <div class="card">
@@ -298,19 +299,28 @@
     function renderUserList(containerId, users, type) {
       const container = document.getElementById(containerId);
       if (!users.length) {
-        container.innerHTML = '<div style="padding: 16px; text-align: center; color: #888; font-size: 13px;">No users found — everyone is already processed!</div>';
+        container.innerHTML = '<div style="padding: 16px; text-align: center; color: #888; font-size: 13px;">没有待回关用户 — 粉丝都已回关</div>';
         return;
       }
-      container.innerHTML = users.map((u, i) => `
-        <div style="display: flex; align-items: center; gap: 10px; padding: 8px 12px; border-bottom: 1px solid #f0f0f0; font-size: 13px;">
+      container.innerHTML = users.map((u, i) => {
+        const displayName = escHtml(u.name || u.username);
+        const handle = escHtml(u.username);
+        const initial = (u.name || u.username || '?').charAt(0).toUpperCase();
+        const avatar = u.profileImageUrl
+          ? `<img src="${escHtml(u.profileImageUrl)}" alt="" style="width: 36px; height: 36px; border-radius: 50%; object-fit: cover; flex-shrink: 0; background: #eee;" onerror="this.style.display='none';this.nextElementSibling.style.display='flex';">
+             <div style="display:none;width:36px;height:36px;border-radius:50%;background:#1d9bf0;color:#fff;align-items:center;justify-content:center;font-weight:bold;font-size:14px;flex-shrink:0;">${initial}</div>`
+          : `<div style="width:36px;height:36px;border-radius:50%;background:#1d9bf0;color:#fff;display:flex;align-items:center;justify-content:center;font-weight:bold;font-size:14px;flex-shrink:0;">${initial}</div>`;
+        return `
+        <div style="display: flex; align-items: center; gap: 10px; padding: 10px 12px; border-bottom: 1px solid #f0f0f0; font-size: 13px;">
           <input type="checkbox" class="${type}-checkbox" data-idx="${i}" style="width: 15px; height: 15px; flex-shrink: 0;">
-          <div style="width: 32px; height: 32px; border-radius: 50%; background: #1d9bf0; color: #fff; display: flex; align-items: center; justify-content: center; font-weight: bold; font-size: 14px; flex-shrink: 0;">${(u.name || u.username).charAt(0).toUpperCase()}</div>
+          ${avatar}
           <div style="flex: 1; min-width: 0;">
-            <div style="font-weight: 500; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;">${escHtml(u.name || u.username)}</div>
-            <div style="color: #888; font-size: 12px;">@${escHtml(u.username)}</div>
+            <div style="font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;">${displayName}</div>
+            <div style="color: #888; font-size: 12px;">@${handle}</div>
           </div>
-        </div>
-      `).join('');
+          <a href="https://x.com/${handle}" target="_blank" rel="noopener" style="font-size: 12px; color: #1d9bf0; text-decoration: none; flex-shrink: 0;">查看</a>
+        </div>`;
+      }).join('');
     }
 
     function toggleSelectAll(type) {
@@ -330,24 +340,35 @@
     async function computeFollowBack() {
       const btn = document.getElementById('btn-compute-follow');
       const statusEl = document.getElementById('compute-follow-status');
-      btn.textContent = 'Computing...';
+      btn.textContent = '扫描中...';
       btn.disabled = true;
+      statusEl.textContent = '正在打开粉丝列表，识别回关按钮…';
+      statusEl.style.color = '#1d9bf0';
 
       try {
         const res = await fetch('/api/compute-follow-back', { method: 'POST' });
         const data = await res.json();
         if (data.ok) {
-          followListData = data.users;
+          followListData = data.users || [];
           renderUserList('follow-list-items', followListData, 'follow');
           document.getElementById('follow-list').style.display = 'block';
-          statusEl.textContent = 'Found ' + data.count + ' users';
+          statusEl.textContent = '找到 ' + data.count + ' 个待回关粉丝';
           statusEl.style.color = '#00ba7c';
+          document.getElementById('follow-queue-count').textContent = '待回关: ' + data.count;
           refreshStatus();
+          showToast('待回关: ' + data.count + ' 人', 'success');
+        } else {
+          statusEl.textContent = data.error || '计算失败';
+          statusEl.style.color = '#f4212e';
+          showToast(data.error || '计算失败', 'error');
         }
-      } catch { statusEl.textContent = 'Error'; }
-      btn.textContent = 'Compute Follow-back';
+      } catch (e) {
+        statusEl.textContent = '请求失败';
+        statusEl.style.color = '#f4212e';
+        showToast('计算待回关失败', 'error');
+      }
+      btn.textContent = '计算待回关';
       btn.disabled = false;
-      setTimeout(() => { statusEl.textContent = ''; }, 5000);
     }
 
     async function batchFollow() {
@@ -619,99 +640,181 @@
       counter.style.color = len > 260 ? '#f4212e' : len > 240 ? '#ffad1f' : '#888';
     }
 
+    // 后端当前已生效的自动发推状态（仅 refreshStatus 更新，勾选框本身不改后端）
+    let serverAutoPostEnabled = false;
+    let serverAutoPostIntervalMin = 60;
+
     function loadPostConfig() {
       fetch('/api/post/config').then(r => r.json()).then(cfg => {
         document.getElementById('post-interval-input').value = cfg.autoPostIntervalMinutes || 60;
+        document.getElementById('auto-post-checkbox').checked = !!cfg.autoPostEnabled;
+        serverAutoPostEnabled = !!cfg.autoPostEnabled;
+        serverAutoPostIntervalMin = cfg.autoPostIntervalMinutes || 60;
+        if (cfg.templates && cfg.templates[0] && !document.getElementById('post-textarea').value) {
+          document.getElementById('post-textarea').value = cfg.templates[0];
+          updateCharCount();
+        }
+        updateLocalAutoHint();
       }).catch(() => {});
     }
 
+    /** 勾选 / 改周期：只改本地 UI，不请求后端 */
+    function onAutoPostCheckboxChange() {
+      updateLocalAutoHint();
+    }
+
+    function updateLocalAutoHint() {
+      const wantAuto = document.getElementById('auto-post-checkbox').checked;
+      const interval = parseInt(document.getElementById('post-interval-input').value, 10) || 60;
+      const statusEl = document.getElementById('post-schedule-status');
+      const hintEl = document.getElementById('post-hint');
+
+      const dirty =
+        wantAuto !== serverAutoPostEnabled ||
+        (wantAuto && interval !== serverAutoPostIntervalMin);
+
+      if (wantAuto && !serverAutoPostEnabled) {
+        statusEl.textContent = '未生效 · 点 Post Now 后每 ' + interval + ' 分钟发';
+        statusEl.style.color = '#ffad1f';
+        hintEl.textContent = '已勾选 Auto，但尚未生效。点 Post Now 会：① 立即发推 ② 保存并启动定时';
+      } else if (!wantAuto && serverAutoPostEnabled) {
+        statusEl.textContent = '定时运行中 · 取消需点 Post Now 确认';
+        statusEl.style.color = '#ffad1f';
+        hintEl.textContent = '已取消勾选，但后端定时仍在跑。点 Post Now 会：① 立即发推 ② 停止定时';
+      } else if (wantAuto && dirty) {
+        statusEl.textContent = '周期已改 · 点 Post Now 生效';
+        statusEl.style.color = '#ffad1f';
+        hintEl.textContent = '周期变更未保存。点 Post Now 会：① 立即发推 ② 按新周期重启定时';
+      } else if (wantAuto && serverAutoPostEnabled) {
+        // 与后端一致时，保留 Next 时间（由 updatePostScheduleUI 写）
+        if (!statusEl.textContent.startsWith('Next:')) {
+          statusEl.textContent = '定时已开启 · 每 ' + interval + ' 分钟';
+          statusEl.style.color = '#00ba7c';
+        }
+        hintEl.textContent = '自动发推已生效。点 Post Now 会立即再发一条，并刷新定时与内容模板';
+      } else {
+        statusEl.textContent = '';
+        hintEl.textContent = '勾选 Auto 只是本地意图；点 Post Now 才会发推并保存定时设置';
+      }
+    }
+
+    /**
+     * Post Now：唯一提交入口
+     * - 立即发送当前推文
+     * - 把勾选状态 + 周期提交后端存储
+     * - 勾选则启动/刷新定时；未勾选则停止定时
+     */
     async function doPost() {
       const text = document.getElementById('post-textarea').value.trim();
       if (!text) { showToast('请输入内容', 'error'); return; }
       if (text.length > 280) { showToast('超过 280 字符限制', 'error'); return; }
 
+      const autoPostEnabled = document.getElementById('auto-post-checkbox').checked;
+      const intervalMinutes = parseInt(document.getElementById('post-interval-input').value, 10);
+
+      if (autoPostEnabled && (!intervalMinutes || intervalMinutes < 5)) {
+        showToast('自动发推间隔至少 5 分钟', 'error');
+        return;
+      }
+
       const btn = document.getElementById('btn-post-now');
       const statusEl = document.getElementById('post-status');
       btn.textContent = 'Posting...';
       btn.classList.add('loading');
+      addLog(
+        autoPostEnabled
+          ? 'Post Now + 启用定时（每 ' + intervalMinutes + ' 分钟）...'
+          : 'Post Now（不启用定时）...',
+      );
 
-      const res = await fetch('/api/post', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ text }),
-      });
-      const data = await res.json();
-      btn.textContent = 'Post Now';
-      btn.classList.remove('loading');
-
-      if (data.ok) {
-        statusEl.textContent = '✓ Posted!';
-        statusEl.style.color = '#00ba7c';
-        document.getElementById('post-textarea').value = '';
-        updateCharCount();
-        showToast('Post sent!', 'success');
-      } else {
-        statusEl.textContent = '✗ ' + (data.error || data.message || 'Failed');
-        statusEl.style.color = '#f4212e';
-        showToast(data.error || 'Post failed', 'error');
-      }
-      setTimeout(() => { statusEl.textContent = ''; }, 5000);
-    }
-
-    async function toggleAutoPost() {
-      const cb = document.getElementById('auto-post-checkbox');
-      const enabled = cb.checked;
-
-      if (!enabled) {
-        // 取消勾选 → 停止
-        const res = await fetch('/api/post/schedule', {
+      try {
+        const res = await fetch('/api/post', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ enabled: false }),
+          body: JSON.stringify({
+            text,
+            autoPostEnabled,
+            intervalMinutes: autoPostEnabled ? intervalMinutes : undefined,
+          }),
         });
-        if (res.ok) {
-          document.getElementById('post-schedule-status').textContent = '';
-          showToast('Auto post stopped', 'info');
+        const data = await res.json();
+        btn.textContent = 'Post Now';
+        btn.classList.remove('loading');
+
+        if (data.ok) {
+          statusEl.textContent = '✓ Posted!';
+          statusEl.style.color = '#00ba7c';
+          // 保留文案作为定时模板，不清空（方便周期复用同一内容）
+          // 若需要清空可取消下一行注释：
+          // document.getElementById('post-textarea').value = '';
+          updateCharCount();
+
+          serverAutoPostEnabled = !!data.autoPostEnabled;
+          serverAutoPostIntervalMin = data.intervalMinutes || intervalMinutes || 60;
+
+          if (data.autoPostEnabled) {
+            updateNextPostTime(serverAutoPostIntervalMin);
+            showToast(
+              (data.posted !== false ? '已发送 · ' : '发送失败 · ') +
+                '定时已开启，每 ' + serverAutoPostIntervalMin + ' 分钟',
+              data.posted !== false ? 'success' : 'error',
+            );
+            addLog('定时发推已开启，间隔 ' + serverAutoPostIntervalMin + ' 分钟');
+          } else {
+            document.getElementById('post-schedule-status').textContent = '';
+            showToast(data.posted !== false ? '已发送（未开启定时）' : (data.error || '发送失败'), data.posted !== false ? 'success' : 'error');
+            addLog('已发推，未开启定时');
+          }
+          updateLocalAutoHint();
+          refreshStatus();
+        } else {
+          statusEl.textContent = '✗ ' + (data.error || data.message || 'Failed');
+          statusEl.style.color = '#f4212e';
+          showToast(data.error || 'Post failed', 'error');
         }
-        return;
+      } catch (err) {
+        btn.textContent = 'Post Now';
+        btn.classList.remove('loading');
+        statusEl.textContent = '✗ Network error';
+        statusEl.style.color = '#f4212e';
+        showToast('Network error', 'error');
       }
-
-      // 勾选 → 启动
-      const text = document.getElementById('post-textarea').value.trim();
-      if (!text) { showToast('请先输入内容', 'error'); cb.checked = false; return; }
-
-      const interval = parseInt(document.getElementById('post-interval-input').value);
-      if (!interval || interval < 5) { showToast('间隔至少 5 分钟', 'error'); cb.checked = false; return; }
-
-      addLog('Starting auto post every ' + interval + ' min...');
-      const res = await fetch('/api/post/schedule', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ enabled: true, text, intervalMinutes: interval }),
-      });
-      const data = await res.json();
-      if (data.ok) {
-        showToast(data.posted ? '已发送！下次: ' + interval + ' 分钟后' : '已启动（发送失败）', data.posted ? 'success' : 'error');
-        updateNextPostTime(interval);
-      } else {
-        cb.checked = false;
-        showToast(data.error || 'Failed', 'error');
-      }
+      setTimeout(() => {
+        if (statusEl.textContent.startsWith('✓') || statusEl.textContent.startsWith('✗')) {
+          statusEl.textContent = '';
+        }
+      }, 5000);
     }
 
-    function updateNextPostTime(intervalMin) {
-      const next = new Date(Date.now() + intervalMin * 60000);
+    function updateNextPostTime(intervalMin, nextRunAtIso) {
       const el = document.getElementById('post-schedule-status');
+      const next = nextRunAtIso ? new Date(nextRunAtIso) : new Date(Date.now() + intervalMin * 60000);
       el.textContent = 'Next: ' + next.toLocaleTimeString();
       el.style.color = '#00ba7c';
     }
 
     function updatePostScheduleUI(data) {
-      if (!data?.postSchedule?.enabled) return;
+      if (!data) return;
       const ps = data.postSchedule;
-      document.getElementById('auto-post-checkbox').checked = true;
-      document.getElementById('post-interval-input').value = ps.intervalSeconds / 60;
-      updateNextPostTime(ps.intervalSeconds / 60);
+      if (ps && ps.enabled) {
+        serverAutoPostEnabled = true;
+        serverAutoPostIntervalMin = (ps.intervalSeconds || 3600) / 60;
+        const cb = document.getElementById('auto-post-checkbox');
+        const intervalInput = document.getElementById('post-interval-input');
+        // 仅当本地意图与后端一致时，用服务端 nextRunAt 展示，不重置用户未提交的勾选
+        if (cb.checked === true) {
+          const localInterval = parseInt(intervalInput.value, 10);
+          if (!localInterval || localInterval === serverAutoPostIntervalMin) {
+            intervalInput.value = serverAutoPostIntervalMin;
+          }
+          if (localInterval === serverAutoPostIntervalMin || !localInterval) {
+            updateNextPostTime(serverAutoPostIntervalMin, ps.nextRunAt || null);
+          }
+        }
+      } else {
+        serverAutoPostEnabled = false;
+      }
+      updateLocalAutoHint();
     }
 
     loadPostConfig();

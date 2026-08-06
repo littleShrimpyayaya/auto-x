@@ -68,6 +68,13 @@ async function main() {
     taskManager.setMe(me);
   }
 
+  // 若配置里已开启自动发推，重启后恢复定时（不立刻发）
+  try {
+    taskManager.restorePostScheduleFromConfig();
+  } catch (err) {
+    console.warn('[Post] 恢复自动发推失败:', (err as Error).message);
+  }
+
   const app = createServer(taskManager);
   app.listen(PORT, '0.0.0.0', () => {
     console.log(`Server running at http://localhost:${PORT}`);

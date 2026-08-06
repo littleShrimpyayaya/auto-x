@@ -128,6 +128,24 @@ export class UserRepository {
     }
   }
 
+  /** 直接用扫描结果写入 pending_follow（含 username/name，不依赖 users 表） */
+  async upsertPendingFollowWithInfo(
+    items: Array<{ userId: string; username: string; name: string }>,
+  ): Promise<void> {
+    if (items.length === 0) return;
+    for (const item of items) {
+      if (!item.userId) continue;
+      await this.pool.query(
+        `INSERT INTO pending_follow (user_id, username, name)
+         VALUES ($1, $2, $3)
+         ON CONFLICT (user_id) DO UPDATE SET
+           username = COALESCE(NULLIF(EXCLUDED.username, ''), pending_follow.username),
+           name = COALESCE(NULLIF(EXCLUDED.name, ''), pending_follow.name)`,
+        [item.userId, item.username || '', item.name || ''],
+      );
+    }
+  }
+
   async upsertPendingUnfollow(userIds: string[]): Promise<void> {
     if (userIds.length === 0) return;
     const res = await this.pool.query(

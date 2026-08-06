@@ -135,21 +135,44 @@ export class Service {
     }
   }
 
-  async computeFollowBackWithDetails(userId: string): Promise<Array<{ userId: string; username: string; name: string }>> {
-    // 直接用浏览器扫描 followers 页面中有 "Follow" 按钮的用户
+  async computeFollowBackWithDetails(userId: string): Promise<Array<{
+    userId: string;
+    username: string;
+    name: string;
+    profileImageUrl?: string;
+  }>> {
+    // 浏览器模式：进入「我的关注者」页面，只收集带回关/Follow 按钮的用户
     if (this.xClient instanceof BrowserClient) {
       const result = await (this.xClient as BrowserClient).scanFollowBack();
 
-      // 同步到 pending_follow 表
-      const ids = result.map(u => u.userId).filter(id => id !== '0');
-      if (ids.length > 0) {
-        await this.repo.upsertPendingFollow(ids);
+      // 写入 users + pending_follow，便于后续批量回关
+      if (result.length > 0) {
+        await this.repo.upsertUsers(
+          result.map((u) => ({
+            id: u.userId !== '0' ? u.userId : u.username,
+            username: u.username,
+            name: u.name,
+            profileImageUrl: u.profileImageUrl,
+          })),
+        );
+        const ids = result
+          .map((u) => (u.userId !== '0' ? u.userId : u.username))
+          .filter(Boolean);
+        if (ids.length > 0) {
+          await this.repo.upsertPendingFollowWithInfo(
+            result.map((u) => ({
+              userId: u.userId !== '0' ? u.userId : u.username,
+              username: u.username,
+              name: u.name,
+            })),
+          );
+        }
       }
 
       return result;
     }
 
-    // API 模式 fallback
+    // API 模式 fallback：粉丝 − 已关注 = 待回关
     await this.syncFollowers(userId);
     await this.syncFollowing(userId);
     const followerIds = await this.repo.getRelationshipIds(userId, 'follower');
@@ -159,7 +182,7 @@ export class Service {
       if (!followingIds.has(fid)) needFollow.push(fid);
     }
     await this.repo.upsertPendingFollow(needFollow);
-    const result: Array<{ userId: string; username: string; name: string }> = [];
+    const result: Array<{ userId: string; username: string; name: string; profileImageUrl?: string }> = [];
     for (const id of needFollow) {
       const u = await this.repo.getUser(id);
       result.push({ userId: id, username: u?.username || id, name: u?.name || '' });

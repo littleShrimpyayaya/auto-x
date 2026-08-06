@@ -13,9 +13,21 @@ chromium.use(StealthPlugin());
 
 const USER_PROFILE_DIR = 'data/browser-profile';
 
+/** GraphQL 用户摘要：含关注关系与头像 */
+interface GqlUserInfo {
+  id: string;
+  username: string;
+  name: string;
+  profileImageUrl?: string;
+  /** 我是否已关注对方 */
+  following?: boolean;
+  /** 对方是否关注我 */
+  followedBy?: boolean;
+}
+
 // 从 GraphQL 响应中提取用户数据（类似旧插件 injector.js 的逻辑）
-function extractGraphQLUsers(json: any): Array<{ id: string; username: string; name: string }> {
-  const users: Array<{ id: string; username: string; name: string }> = [];
+function extractGraphQLUsers(json: any): GqlUserInfo[] {
+  const users: GqlUserInfo[] = [];
   const seen = new Set<string>();
 
   function pushUser(result: any) {
@@ -33,10 +45,36 @@ function extractGraphQLUsers(json: any): Array<{ id: string; username: string; n
     if (seen.has(id)) return;
     seen.add(id);
 
+    const rel = result.relationship_perspectives || result.relationshipPerspectives || {};
+    const following =
+      typeof rel.following === 'boolean'
+        ? rel.following
+        : typeof legacy.following === 'boolean'
+          ? legacy.following
+          : undefined;
+    const followedBy =
+      typeof rel.followed_by === 'boolean'
+        ? rel.followed_by
+        : typeof legacy.followed_by === 'boolean'
+          ? legacy.followed_by
+          : undefined;
+
+    const profileImageUrl =
+      legacy.profile_image_url_https ||
+      legacy.profile_image_url ||
+      result.avatar?.image_url ||
+      result.profile_image_url_https ||
+      undefined;
+
     users.push({
       id,
       username: screenName,
       name: legacy.name || result.name || screenName,
+      profileImageUrl: profileImageUrl
+        ? String(profileImageUrl).replace('_normal', '_400x400')
+        : undefined,
+      following,
+      followedBy,
     });
   }
 
@@ -75,6 +113,14 @@ function extractGraphQLUsers(json: any): Array<{ id: string; username: string; n
 
   walk(json, 0);
   return users;
+}
+
+/** 待回关用户（粉丝列表中带 Follow/回关 按钮） */
+export interface FollowBackCandidate {
+  userId: string;
+  username: string;
+  name: string;
+  profileImageUrl?: string;
 }
 
 export class BrowserClient {
@@ -371,8 +417,11 @@ export class BrowserClient {
 
   // ── 扫描待回关用户 ──────────────────────────────────
 
-  /** 扫描 followers 页面，找出所有显示 Follow 按钮（未回关）的用户 */
-  async scanFollowBack(): Promise<Array<{ userId: string; username: string; name: string }>> {
+  /**
+   * 扫描「我的关注者」页面，只收集带「回关 / Follow / Follow back」按钮的用户。
+   * 已关注（Following / 正在关注）的粉丝不计入待回关。
+   */
+  async scanFollowBack(): Promise<FollowBackCandidate[]> {
     this.ensureReady();
     const username = this.myUsername;
     if (!username) throw new Error('未登录');
@@ -380,8 +429,8 @@ export class BrowserClient {
     const url = `https://x.com/${username}/followers`;
     console.log(`[BrowserClient] 扫描待回关: ${url}`);
 
-    // 网络拦截获取用户 ID（username ↔ id 双向映射）
-    const idMap = new Map<string, string>();
+    // GraphQL：补全 userId / 头像 / following 状态
+    const gqlByUsername = new Map<string, GqlUserInfo>();
     const onResponse = async (response: any) => {
       const reqUrl = response.url();
       if (!reqUrl.includes('/graphql/')) return;
@@ -389,8 +438,9 @@ export class BrowserClient {
         const json = await response.json();
         for (const u of extractGraphQLUsers(json)) {
           if (u.id && u.username) {
-            idMap.set(u.username, u.id);
-            idMap.set(u.id, u.username);
+            gqlByUsername.set(u.username.toLowerCase(), u);
+            this.usernameCache.set(u.id, u.username);
+            this.idCache.set(u.username, u.id);
           }
         }
       } catch { /* ignore */ }
@@ -404,88 +454,175 @@ export class BrowserClient {
       await this.page!.waitForSelector('[data-testid="UserCell"]', { timeout: 10000 });
     } catch {
       this.page!.off('response', onResponse);
+      console.warn('[BrowserClient] 粉丝列表未加载');
       return [];
     }
 
-    const needFollow: Array<{ userId: string; username: string; name: string }> = [];
-    const seen = new Set<string>();
-    let prevCount = 0;
+    const needFollow: FollowBackCandidate[] = [];
+    const needFollowKeys = new Set<string>(); // username lowercased
+    const seenAllUsers = new Set<string>();   // 页面上见过的所有粉丝（含已关注）
+    let prevSeenAll = 0;
     let noNewCount = 0;
     const MAX_SCROLLS = 800;
-    const MAX_NO_NEW = 8;
+    const MAX_NO_NEW = 10;
 
     for (let i = 0; i < MAX_SCROLLS; i++) {
-      // 扫描当前页面上有 "Follow" 按钮的用户
+      // 扫描当前视口：只收「需要回关」的 UserCell，同时统计所有出现过的粉丝
       const batch = await this.page!.evaluate(() => {
-        const results: Array<{ username: string; name: string }> = [];
+        type CellResult = {
+          username: string;
+          name: string;
+          profileImageUrl?: string;
+          needsFollowBack: boolean;
+          buttonHint: string;
+        };
+
+        const SKIP = new Set(['home', 'explore', 'notifications', 'messages', 'i', 'settings', 'compose']);
+
+        /** 是否为「需要回关」按钮（Follow / Follow back / 回关 / 关注） */
+        function isFollowBackButton(btn: Element): boolean {
+          const rawText = (btn.textContent || '').replace(/\s+/g, ' ').trim();
+          const text = rawText.toLowerCase();
+          const aria = ((btn as HTMLElement).getAttribute('aria-label') || '').toLowerCase();
+          const testId = ((btn as HTMLElement).getAttribute('data-testid') || '').toLowerCase();
+
+          // 已关注 / 请求中 / 取关 —— 明确排除
+          if (
+            text === 'following' ||
+            text === 'pending' ||
+            text === 'unfollow' ||
+            text === '正在关注' ||
+            text === '已请求' ||
+            text === '取消关注' ||
+            testId.includes('unfollow') ||
+            aria.includes('following @') ||
+            aria.includes('unfollow @') ||
+            aria.includes('正在关注')
+          ) {
+            return false;
+          }
+
+          // data-testid 形如 "123456-follow"（未关注）
+          if (/-follow$/.test(testId)) return true;
+
+          // 中英文回关 / 关注文案
+          if (
+            text === 'follow' ||
+            text === 'follow back' ||
+            text === '回关' ||
+            text === '关注'
+          ) {
+            return true;
+          }
+
+          // aria-label: "Follow @user" / "Follow back @user" / "回关 @user"
+          if (
+            /^follow(\s+back)?\s+@/.test(aria) ||
+            aria.startsWith('回关') ||
+            aria.startsWith('关注 @')
+          ) {
+            return true;
+          }
+
+          return false;
+        }
+
+        const results: CellResult[] = [];
         const cells = document.querySelectorAll('[data-testid="UserCell"]');
 
         for (const cell of cells) {
-          // 查找 Follow 按钮：遍历所有 button 和 [role="button"]
-          const allBtns = cell.querySelectorAll('button, [role="button"], [data-testid*="follow"]');
-          let needsFollow = false;
-          for (const btn of allBtns) {
-            const text = ((btn.textContent || '').trim()).toLowerCase();
-            const aria = ((btn as HTMLElement).getAttribute('aria-label') || '').toLowerCase();
-            const testId = ((btn as HTMLElement).getAttribute('data-testid') || '').toLowerCase();
-
-            // 按钮文案是 Follow（排除 Following / Unfollow / Pending）
-            if (text === 'follow') { needsFollow = true; break; }
-
-            // data-testid 包含 follow 但不包含 unfollow
-            if (testId.includes('follow') && !testId.includes('unfollow')) { needsFollow = true; break; }
-
-            // aria-label 包含 "Follow @" 模式（X 常用）
-            if (aria.startsWith('follow @')) { needsFollow = true; break; }
-          }
-          if (!needsFollow) continue;
-
-          // 提取用户名
-          const links = cell.querySelectorAll('a[role="link"]');
+          // 提取 username / name
           let username = '';
           let name = '';
+          const links = cell.querySelectorAll('a[role="link"]');
           for (const link of links) {
             const href = link.getAttribute('href') || '';
-            const m = href.match(/^\/(\w+)$/);
-            if (m && !['home','explore','notifications','messages','i'].includes(m[1])) {
-              username = m[1];
-              const spans = link.querySelectorAll('span');
-              for (const span of spans) {
-                const t = (span.textContent || '').trim();
-                if (t.startsWith('@')) continue;
-                if (t && t.length < 100 && !name) name = t;
-              }
-              if (username) break;
+            const m = href.match(/^\/([A-Za-z0-9_]+)$/);
+            if (!m || SKIP.has(m[1].toLowerCase())) continue;
+            username = m[1];
+            const spans = link.querySelectorAll('span');
+            for (const span of spans) {
+              const t = (span.textContent || '').trim();
+              if (!t || t.startsWith('@')) continue;
+              if (t.length < 100 && !name) name = t;
+            }
+            break;
+          }
+          if (!username) continue;
+
+          // 头像
+          const img =
+            cell.querySelector('img[src*="profile_images"]') ||
+            cell.querySelector('img[src*="twimg.com"]');
+          const profileImageUrl = img?.getAttribute('src') || undefined;
+
+          // 找关注相关按钮
+          const allBtns = cell.querySelectorAll('button, [role="button"], [data-testid*="follow"]');
+          let needsFollowBack = false;
+          let buttonHint = '';
+          for (const btn of allBtns) {
+            const t = ((btn.textContent || '').replace(/\s+/g, ' ').trim());
+            const a = (btn as HTMLElement).getAttribute('aria-label') || '';
+            const d = (btn as HTMLElement).getAttribute('data-testid') || '';
+            if (t || a || d.includes('follow')) {
+              buttonHint = `text="${t}" aria="${a}" testid="${d}"`;
+            }
+            if (isFollowBackButton(btn)) {
+              needsFollowBack = true;
+              break;
             }
           }
-          if (username) {
-            results.push({ username, name: name || username });
-          }
+
+          results.push({
+            username,
+            name: name || username,
+            profileImageUrl,
+            needsFollowBack,
+            buttonHint,
+          });
         }
         return results;
       });
 
       for (const user of batch) {
-        if (!seen.has(user.username)) {
-          seen.add(user.username);
-          const gqlId = idMap.get(user.username) || '0';
-          needFollow.push({
-            userId: gqlId || '0',
-            username: user.username,
-            name: user.name,
-          });
-        }
+        const key = user.username.toLowerCase();
+        seenAllUsers.add(key);
+
+        if (!user.needsFollowBack) continue;
+        if (needFollowKeys.has(key)) continue;
+        needFollowKeys.add(key);
+
+        const gql = gqlByUsername.get(key);
+        // GraphQL 若明确说已经 following，以 GraphQL 为准跳过（避免误检）
+        if (gql?.following === true) continue;
+
+        const userId = gql?.id || this.idCache.get(user.username) || '0';
+        const profileImageUrl =
+          user.profileImageUrl ||
+          gql?.profileImageUrl ||
+          undefined;
+
+        needFollow.push({
+          userId,
+          username: user.username,
+          name: gql?.name || user.name,
+          profileImageUrl,
+        });
       }
 
-      if (batch.length === 0 || seen.size <= prevCount) {
+      // 终止条件：连续多轮没有新的「粉丝」出现（不是没有新待回关）
+      if (seenAllUsers.size <= prevSeenAll) {
         noNewCount++;
-        if (noNewCount >= MAX_NO_NEW) break;
+        if (noNewCount >= MAX_NO_NEW) {
+          console.log(`[BrowserClient] 粉丝列表滚动结束（连续 ${MAX_NO_NEW} 轮无新用户）`);
+          break;
+        }
       } else {
         noNewCount = 0;
       }
-      prevCount = seen.size;
+      prevSeenAll = seenAllUsers.size;
 
-      // 滚动加载
+      // 滚动加载更多粉丝
       for (let r = 0; r < 3; r++) {
         await this.scrollUserList();
         await this.page!.waitForTimeout(600);
@@ -493,31 +630,35 @@ export class BrowserClient {
       await this.page!.waitForTimeout(2000 + Math.random() * 1000);
 
       if (i === 0) {
-        // 首次：输出页面中前几个按钮的信息用于调试
-        const debugBtns = await this.page!.evaluate(() => {
-          const cells = document.querySelectorAll('[data-testid="UserCell"]');
-          const info: string[] = [];
-          let count = 0;
-          for (const cell of cells) {
-            if (count >= 5) break;
-            const btns = cell.querySelectorAll('button, [role="button"]');
-            for (const btn of btns) {
-              info.push(`text="${(btn.textContent||'').trim()}" aria="${btn.getAttribute('aria-label')||''}" testid="${btn.getAttribute('data-testid')||''}"`);
-            }
-            count++;
-          }
-          return info.join(' | ');
-        });
-        console.log(`[BrowserClient] 前几个用户按钮: ${debugBtns}`);
+        const sample = batch.slice(0, 5).map((u) =>
+          `@${u.username} need=${u.needsFollowBack} ${u.buttonHint}`
+        ).join(' | ');
+        console.log(`[BrowserClient] 首屏按钮样例: ${sample}`);
       }
 
       if (i % 10 === 0) {
-        console.log(`[BrowserClient] 扫描进度: ${needFollow.length} 个待回关 (已查看 ${seen.size} 个粉丝)`);
+        console.log(
+          `[BrowserClient] 扫描进度: ${needFollow.length} 个待回关 / 已查看 ${seenAllUsers.size} 个粉丝`,
+        );
       }
     }
 
     this.page!.off('response', onResponse);
-    console.log(`[BrowserClient] 扫描完成: ${needFollow.length} 个待回关`);
+
+    // 对仍缺 userId 的，再试一次 GraphQL 缓存
+    for (const u of needFollow) {
+      if (u.userId !== '0') continue;
+      const gql = gqlByUsername.get(u.username.toLowerCase());
+      if (gql?.id) {
+        u.userId = gql.id;
+        if (!u.profileImageUrl && gql.profileImageUrl) u.profileImageUrl = gql.profileImageUrl;
+        if (gql.name) u.name = gql.name;
+      }
+    }
+
+    console.log(
+      `[BrowserClient] 扫描完成: ${needFollow.length} 个待回关（共查看 ${seenAllUsers.size} 个粉丝）`,
+    );
     return needFollow;
   }
 
@@ -693,17 +834,35 @@ export class BrowserClient {
             connectionStatus.push('following');
           }
 
-          // 对于 followers 列表：检查是否已关注（按钮显示 "Following"）
-          // 对于 following 列表：检查对方是否关注你（"Follows you" 标记）
-          const btnText = cell.querySelector('[role="button"]')?.textContent?.trim().toLowerCase() || '';
-          const cellText = cell.textContent?.toLowerCase() || '';
+          // 对于 followers 列表：检查是否已关注（Following / 正在关注）
+          // 对于 following 列表：检查对方是否关注你（Follows you / 关注了你）
+          const btns = cell.querySelectorAll('[role="button"], button, [data-testid*="follow"]');
+          let isFollowingThem = false;
+          for (const btn of btns) {
+            const t = ((btn.textContent || '').replace(/\s+/g, ' ').trim()).toLowerCase();
+            const d = ((btn as HTMLElement).getAttribute('data-testid') || '').toLowerCase();
+            if (t === 'following' || t === '正在关注' || d.includes('unfollow')) {
+              isFollowingThem = true;
+              break;
+            }
+          }
+          const cellText = (cell.textContent || '').toLowerCase();
 
-          if (listType === 'followers' && (btnText === 'following' || btnText === '正在关注')) {
+          if (listType === 'followers' && isFollowingThem) {
             connectionStatus.push('following');
           }
-          if (listType === 'following' && cellText.includes('follows you')) {
+          if (
+            listType === 'following' &&
+            (cellText.includes('follows you') || cellText.includes('关注了你'))
+          ) {
             connectionStatus.push('followed_by');
           }
+
+          // 头像
+          const img =
+            cell.querySelector('img[src*="profile_images"]') ||
+            cell.querySelector('img[src*="twimg.com"]');
+          const profileImageUrl = img?.getAttribute('src') || undefined;
 
           // 尝试从 data 属性获取 user ID
           let id = '0';
@@ -719,6 +878,7 @@ export class BrowserClient {
             username,
             name: name || username,
             connectionStatus,
+            profileImageUrl,
           });
         } catch {
           // 跳过无法解析的 cell
@@ -771,23 +931,40 @@ export class BrowserClient {
     await this.page!.waitForTimeout(2000 + Math.random() * 2000);
 
     const result = await this.page!.evaluate(() => {
-      // 查找 Follow 按钮
-      const buttons = document.querySelectorAll('[role="button"]');
+      // 查找 Follow / 回关 / 关注 按钮
+      const buttons = document.querySelectorAll('[role="button"], button, [data-testid*="follow"]');
       for (const btn of buttons) {
-        const text = btn.textContent?.trim() || '';
-        const aria = btn.getAttribute('aria-label') || '';
+        const text = (btn.textContent || '').replace(/\s+/g, ' ').trim();
+        const textLower = text.toLowerCase();
+        const aria = (btn.getAttribute('aria-label') || '').toLowerCase();
+        const testId = (btn.getAttribute('data-testid') || '').toLowerCase();
+        const spanText = (btn.querySelector('span')?.textContent || '').trim();
 
+        // 已经关注了
         if (
-          text === 'Follow' ||
-          aria.includes('Follow @') ||
-          (btn.querySelector('span')?.textContent?.trim() === 'Follow')
+          textLower === 'following' ||
+          text === '正在关注' ||
+          aria.includes('following @') ||
+          testId.includes('unfollow')
         ) {
-          (btn as HTMLButtonElement).click();
           return { following: true, pending: false };
         }
 
-        // 已经关注了
-        if (text === 'Following' || text === '正在关注' || aria.includes('Following @')) {
+        const isFollow =
+          textLower === 'follow' ||
+          textLower === 'follow back' ||
+          text === '回关' ||
+          text === '关注' ||
+          spanText === 'Follow' ||
+          spanText === 'Follow back' ||
+          spanText === '回关' ||
+          spanText === '关注' ||
+          /^follow(\s+back)?\s+@/.test(aria) ||
+          aria.startsWith('回关') ||
+          /-follow$/.test(testId);
+
+        if (isFollow) {
+          (btn as HTMLButtonElement).click();
           return { following: true, pending: false };
         }
       }
@@ -995,20 +1172,23 @@ export class BrowserClient {
   // ── 辅助方法 ─────────────────────────────────────────
 
   private resolveUsername(userId: string): string {
-    // 缓存查找
+    // 缓存查找 userId → username
     if (this.usernameCache.has(userId)) {
       return this.usernameCache.get(userId)!;
     }
-    // 自己的 ID（可能为 '0'）
-    if ((userId === this.myId || userId === '0') && this.myUsername) {
+    // 自己的 ID
+    if (userId === this.myId && this.myUsername) {
       return this.myUsername;
     }
-    // 如果 userId 看起来像纯数字 ID，但我们有 myUsername，就用它
-    // （Sync 总是用当前登录用户的 ID）
-    if (/^\d+$/.test(userId) && this.myUsername) {
+    // 已经是 username（非纯数字），或扫描结果里用 username 作占位 id
+    if (!/^\d+$/.test(userId)) {
+      return userId;
+    }
+    // 纯数字 ID 且不在缓存：若恰好是自己，用 myUsername；否则原样返回（调用方应保证缓存）
+    if (userId === '0' && this.myUsername) {
       return this.myUsername;
     }
-    // 可能传入的就是 username
+    console.warn(`[BrowserClient] resolveUsername: 未知 userId=${userId}，缓存未命中`);
     return userId;
   }
 

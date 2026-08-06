@@ -40,6 +40,7 @@ export interface StatusInfo {
     enabled: boolean;
     intervalSeconds: number;
     templatePreview: string;
+    nextRunAt: string | null;
   };
   connected: boolean;
 }
@@ -68,6 +69,7 @@ export class TaskManager {
   private postTimer: ReturnType<typeof setInterval> | null = null;
   private postInterval = 0;
   private postTemplateText = '';
+  private postNextRunAt: string | null = null;
 
   private me: XUser | null = null;
   private connected = false;
@@ -299,14 +301,21 @@ export class TaskManager {
     this.postTemplateText = templateText;
 
     const intervalMs = intervalMinutes * 60 * 1000;
+    this.postNextRunAt = new Date(Date.now() + intervalMs).toISOString();
+
     this.postTimer = setInterval(async () => {
       if (this.service['xClient'] instanceof BrowserClient) {
         console.log('[Post] 定时发帖...');
-        await (this.service['xClient'] as BrowserClient).postTweet(templateText);
+        try {
+          await (this.service['xClient'] as BrowserClient).postTweet(templateText);
+        } catch (err) {
+          console.error('[Post] 定时发帖失败:', err);
+        }
       }
+      this.postNextRunAt = new Date(Date.now() + intervalMs).toISOString();
     }, intervalMs);
 
-    console.log(`[Post] 定时发帖已启动，间隔 ${intervalMinutes} 分钟`);
+    console.log(`[Post] 定时发帖已启动，间隔 ${intervalMinutes} 分钟，下次 ${this.postNextRunAt}`);
   }
 
   stopPostSchedule(): void {
@@ -316,10 +325,31 @@ export class TaskManager {
     }
     this.postInterval = 0;
     this.postTemplateText = '';
+    this.postNextRunAt = null;
     console.log('[Post] 定时发帖已停止');
   }
 
-  async computeFollowBack(): Promise<Array<{ userId: string; username: string; name: string }>> {
+  /** 进程启动时按已保存配置恢复定时（不立刻发，只等周期） */
+  restorePostScheduleFromConfig(): void {
+    const cfg = loadPostConfig();
+    if (!cfg.autoPostEnabled) return;
+    const interval = cfg.autoPostIntervalMinutes || 60;
+    if (interval < 5) return;
+    const text = cfg.templates?.[cfg.autoPostTemplateIndex ?? 0] || cfg.templates?.[0];
+    if (!text) {
+      console.warn('[Post] 配置开启了自动发推，但没有模板文案，跳过恢复');
+      return;
+    }
+    this.startPostSchedule(interval, text);
+    console.log(`[Post] 已从配置恢复自动发推，每 ${interval} 分钟`);
+  }
+
+  async computeFollowBack(): Promise<Array<{
+    userId: string;
+    username: string;
+    name: string;
+    profileImageUrl?: string;
+  }>> {
     return this.service.computeFollowBackWithDetails(this.userId);
   }
 
@@ -390,6 +420,7 @@ export class TaskManager {
         enabled: this.postTimer !== null,
         intervalSeconds: this.postInterval * 60,
         templatePreview: this.postTemplateText.substring(0, 50),
+        nextRunAt: this.postNextRunAt,
       },
       connected: this.connected,
     };

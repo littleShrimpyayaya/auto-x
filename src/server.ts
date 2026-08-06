@@ -288,44 +288,115 @@ export function createServer(taskManager: TaskManager): express.Express {
 
   // ── 发帖 ────────────────────────────────────────────
 
+  /**
+   * Post Now 唯一入口：
+   * 1. 立即发送 text
+   * 2. 将 autoPostEnabled + intervalMinutes + 模板文案写入配置
+   * 3. 勾选自动 → 启动/刷新定时；未勾选 → 停止定时
+   * （勾选框本身不应单独调接口启停）
+   */
   app.post('/api/post', async (req, res) => {
     try {
-      const { text } = req.body;
-      if (!text) {
+      const { text, autoPostEnabled, intervalMinutes } = req.body as {
+        text?: string;
+        autoPostEnabled?: boolean;
+        intervalMinutes?: number;
+      };
+
+      if (!text || !String(text).trim()) {
         res.status(400).json({ error: 'Post text is required' });
         return;
       }
-      if (text.length > 280) {
+      const postText = String(text).trim();
+      if (postText.length > 280) {
         res.status(400).json({ error: 'Post exceeds 280 characters' });
         return;
       }
-      const result = await taskManager.postNow(text);
-      res.json({ ok: result.ok, message: result.ok ? 'Post sent' : 'Post failed' });
+
+      const wantAuto = !!autoPostEnabled;
+      let interval = Number(intervalMinutes);
+      if (wantAuto) {
+        if (!interval || interval < 5) {
+          res.status(400).json({ error: 'Interval must be at least 5 minutes' });
+          return;
+        }
+      } else {
+        interval = interval && interval >= 5 ? interval : (loadPostConfig().autoPostIntervalMinutes || 60);
+      }
+
+      // 持久化：开关 + 周期 + 当前文案作为模板
+      const existing = loadPostConfig();
+      const templates = [...(existing.templates || [])];
+      if (templates.length === 0) templates.push(postText);
+      else templates[0] = postText;
+
+      const config: PostConfig = {
+        ...existing,
+        templates,
+        autoPostEnabled: wantAuto,
+        autoPostIntervalMinutes: interval,
+        autoPostTemplateIndex: 0,
+      };
+      savePostConfig(config);
+
+      // 先停旧定时，避免叠加
+      taskManager.stopPostSchedule();
+
+      // 立即发当前这条
+      const result = await taskManager.postNow(postText);
+
+      // 若开启自动，启动周期（从现在起 interval 后再发）
+      if (wantAuto) {
+        taskManager.startPostSchedule(interval, postText);
+      }
+
+      res.json({
+        ok: true,
+        posted: result.ok,
+        autoPostEnabled: wantAuto,
+        intervalMinutes: interval,
+        message: wantAuto
+          ? (result.ok
+            ? `Post sent; auto every ${interval} min`
+            : `Post failed; auto schedule started every ${interval} min`)
+          : (result.ok ? 'Post sent' : 'Post failed'),
+      });
     } catch (err: any) {
       res.status(500).json({ error: err.message });
     }
   });
 
-  // 统一调度：enabled=true 覆盖旧调度并立即发一条，enabled=false 停止
+  // 兼容旧接口：仅启停定时（不建议前端再单独依赖勾选触发）
   app.post('/api/post/schedule', async (req, res) => {
     try {
       const { enabled, text, intervalMinutes } = req.body;
 
-      // 先停止旧调度
       taskManager.stopPostSchedule();
 
       if (enabled) {
         if (!text) { res.status(400).json({ error: 'Post text is required' }); return; }
-        if (!intervalMinutes || intervalMinutes < 5) { res.status(400).json({ error: 'Interval must be at least 5 minutes' }); return; }
+        if (!intervalMinutes || intervalMinutes < 5) {
+          res.status(400).json({ error: 'Interval must be at least 5 minutes' });
+          return;
+        }
 
-        // 立即发一条
-        const result = await taskManager.postNow(text);
+        const existing = loadPostConfig();
+        const templates = [...(existing.templates || [])];
+        if (templates.length === 0) templates.push(text);
+        else templates[0] = text;
+        savePostConfig({
+          ...existing,
+          templates,
+          autoPostEnabled: true,
+          autoPostIntervalMinutes: intervalMinutes,
+          autoPostTemplateIndex: 0,
+        });
 
-        // 启动定时
         taskManager.startPostSchedule(intervalMinutes, text);
-
-        res.json({ ok: true, message: 'Auto post started', posted: result.ok, intervalMinutes });
+        res.json({ ok: true, message: 'Auto post started', intervalMinutes });
       } else {
+        const existing = loadPostConfig();
+        savePostConfig({ ...existing, autoPostEnabled: false });
         res.json({ ok: true, message: 'Auto post stopped' });
       }
     } catch (err: any) {
