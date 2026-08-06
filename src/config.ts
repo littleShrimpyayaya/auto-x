@@ -39,6 +39,8 @@ export function loadConfig(): AppConfig {
 
 interface FileConfig {
   x?: { bearerToken?: string; accessToken?: string };
+  mode?: 'api' | 'browser';
+  automation?: import('./auto-config.js').AutomationConfig;
 }
 
 function loadFileConfig(): FileConfig | null {
@@ -71,4 +73,13 @@ export function getXConfigStatus(): { hasBearerToken: boolean; hasAccessToken: b
     hasBearerToken: !!config.x.bearerToken,
     hasAccessToken: !!config.x.accessToken,
   };
+}
+
+export function getMode(): 'api' | 'browser' {
+  try {
+    const raw = loadFileConfig();
+    return raw?.mode ?? 'browser';
+  } catch {
+    return 'browser';
+  }
 }

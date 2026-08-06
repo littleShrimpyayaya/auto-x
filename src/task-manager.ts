@@ -1,7 +1,9 @@
 import { Service } from './service.js';
 import { UserRepository } from './user-repository.js';
 import { XClient } from './x-client.js';
+import { BrowserClient } from './browser-client.js';
 import type { XUser, PendingStats } from './types.js';
+import { loadPostConfig, savePostConfig, type PostConfig } from './auto-config.js';
 
 export type TaskType = 'sync-followers' | 'sync-following' | 'auto-follow' | 'process-follow' | 'process-unfollow';
 export type TaskStatusType = 'idle' | 'running' | 'completed' | 'error' | 'cancelled';
@@ -34,6 +36,11 @@ export interface StatusInfo {
     enabled: boolean;
     intervalSeconds: number;
   };
+  postSchedule: {
+    enabled: boolean;
+    intervalSeconds: number;
+    templatePreview: string;
+  };
   connected: boolean;
 }
 
@@ -56,6 +63,11 @@ export class TaskManager {
   private processUnfollowInterval = 0;
   private totalProcessedFollow = 0;
   private totalProcessedUnfollow = 0;
+
+  // 发帖定时器
+  private postTimer: ReturnType<typeof setInterval> | null = null;
+  private postInterval = 0;
+  private postTemplateText = '';
 
   private me: XUser | null = null;
   private connected = false;
@@ -247,6 +259,42 @@ export class TaskManager {
     this.processUnfollowInterval = 0;
   }
 
+  // ── 发帖 ─────────────────────────────────────────────
+
+  async postNow(text: string): Promise<{ ok: boolean }> {
+    if (this.service['xClient'] instanceof BrowserClient) {
+      return (this.service['xClient'] as BrowserClient).postTweet(text);
+    }
+    // X API 模式暂不支持发帖
+    return { ok: false };
+  }
+
+  startPostSchedule(intervalMinutes: number, templateText: string): void {
+    this.stopPostSchedule();
+    this.postInterval = intervalMinutes;
+    this.postTemplateText = templateText;
+
+    const intervalMs = intervalMinutes * 60 * 1000;
+    this.postTimer = setInterval(async () => {
+      if (this.service['xClient'] instanceof BrowserClient) {
+        console.log('[Post] 定时发帖...');
+        await (this.service['xClient'] as BrowserClient).postTweet(templateText);
+      }
+    }, intervalMs);
+
+    console.log(`[Post] 定时发帖已启动，间隔 ${intervalMinutes} 分钟`);
+  }
+
+  stopPostSchedule(): void {
+    if (this.postTimer) {
+      clearInterval(this.postTimer);
+      this.postTimer = null;
+    }
+    this.postInterval = 0;
+    this.postTemplateText = '';
+    console.log('[Post] 定时发帖已停止');
+  }
+
   async getStatus(): Promise<StatusInfo> {
     let followerCount = 0;
     let followingCount = 0;
@@ -288,6 +336,11 @@ export class TaskManager {
       processUnfollow: {
         enabled: this.processUnfollowTimer !== null,
         intervalSeconds: this.processUnfollowInterval,
+      },
+      postSchedule: {
+        enabled: this.postTimer !== null,
+        intervalSeconds: this.postInterval * 60,
+        templatePreview: this.postTemplateText.substring(0, 50),
       },
       connected: this.connected,
     };

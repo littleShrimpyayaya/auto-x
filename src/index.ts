@@ -1,6 +1,8 @@
-import { loadConfig } from './config.js';
+import { loadConfig, getMode } from './config.js';
+import { loadAutomationConfig } from './auto-config.js';
 import { createPool, initSchema } from './db.js';
 import { XClient } from './x-client.js';
+import { BrowserClient } from './browser-client.js';
 import { UserRepository } from './user-repository.js';
 import { Service } from './service.js';
 import { TaskManager } from './task-manager.js';
@@ -10,29 +12,60 @@ const PORT = Number(process.env.PORT) || 3000;
 
 async function main() {
   const config = loadConfig();
+  const mode = getMode();
 
   const pool = createPool(config.db);
   await initSchema(pool);
 
-  const xClient = new XClient({
-    bearerToken: config.x.bearerToken,
-    accessToken: config.x.accessToken,
-  });
-
   const repo = new UserRepository(pool);
-  const service = new Service(xClient, repo);
-  const taskManager = new TaskManager(xClient, service, repo);
 
-  if (config.x.bearerToken || config.x.accessToken) {
-    try {
-      const me = await xClient.getMyUser();
-      taskManager.setMe(me);
-      console.log(`Logged in as: @${me.username} (${me.id})`);
-    } catch (err) {
-      console.warn('X API login failed. You can configure tokens from the web UI.');
+  const isBrowser = mode === 'browser';
+
+  const client = isBrowser
+    ? new BrowserClient(loadAutomationConfig())
+    : new XClient({
+        bearerToken: config.x.bearerToken,
+        accessToken: config.x.accessToken,
+      });
+
+  if (isBrowser) {
+    console.log('[启动] 使用浏览器自动化模式');
+    const browserClient = client as BrowserClient;
+    const autoConfig = loadAutomationConfig();
+
+    if (!autoConfig.authToken) {
+      console.warn('[启动] 未配置 auth_token，浏览器将无法登录。请在 Web UI 中配置。');
+    } else {
+      try {
+        await browserClient.init();
+      } catch (err) {
+        console.warn('浏览器启动失败:', (err as Error).message);
+      }
     }
   } else {
-    console.log('No X API tokens configured. Use the web UI to set them up.');
+    console.log('[启动] 使用 X API 模式');
+  }
+
+  // 尝试登录并获取用户信息
+  let me = null;
+  try {
+    me = await client.getMyUser();
+    console.log(`Logged in as: @${me.username} (${me.id})`);
+  } catch (err) {
+    const label = isBrowser ? '浏览器登录' : 'X API login';
+    console.warn(`${label} 失败:`, (err as Error).message);
+    if (isBrowser) {
+      console.warn('请通过 Web UI 更新 auth_token 后重启服务');
+    } else {
+      console.warn('请通过 Web UI 配置 API tokens');
+    }
+  }
+
+  const service = new Service(client as any, repo);
+  const taskManager = new TaskManager(client as any, service, repo);
+
+  if (me) {
+    taskManager.setMe(me);
   }
 
   const app = createServer(taskManager);

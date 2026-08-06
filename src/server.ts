@@ -5,6 +5,7 @@ import { TaskManager } from './task-manager.js';
 import { XClient } from './x-client.js';
 import { Service } from './service.js';
 import { saveXConfig, getXConfigStatus, loadConfig } from './config.js';
+import { loadAutomationConfig, saveAutomationConfig, loadPostConfig, savePostConfig, type AutomationConfig, type PostConfig } from './auto-config.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -153,6 +154,124 @@ export function createServer(taskManager: TaskManager): express.Express {
   app.post('/api/process-unfollow/stop', (_req, res) => {
     taskManager.stopProcessUnfollowSchedule();
     res.json({ ok: true, message: 'Auto process-unfollow stopped' });
+  });
+
+  // ── 自动化配置 ──────────────────────────────────────
+
+  app.get('/api/auto-config', (_req, res) => {
+    try {
+      const config = loadAutomationConfig();
+      // 不返回敏感 cookie 的完整值，只返回是否存在
+      res.json({
+        ...config,
+        authToken: config.authToken ? '••••••••' : '',
+        ct0: config.ct0 ? '••••••••' : '',
+        hasAuthToken: !!config.authToken,
+        hasCt0: !!config.ct0,
+      });
+    } catch (err: any) {
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  app.post('/api/auto-config', (req, res) => {
+    try {
+      const body = req.body as Partial<AutomationConfig> & { authToken?: string; ct0?: string };
+
+      // 加载现有配置（保留敏感字段如果传入了占位符）
+      const existing = loadAutomationConfig();
+
+      const config: AutomationConfig = {
+        batchSizeMin: body.batchSizeMin ?? existing.batchSizeMin,
+        batchSizeMax: body.batchSizeMax ?? existing.batchSizeMax,
+        batchIntervalMinMinutes: body.batchIntervalMinMinutes ?? existing.batchIntervalMinMinutes,
+        batchIntervalMaxMinutes: body.batchIntervalMaxMinutes ?? existing.batchIntervalMaxMinutes,
+        actionIntervalMinSeconds: body.actionIntervalMinSeconds ?? existing.actionIntervalMinSeconds,
+        actionIntervalMaxSeconds: body.actionIntervalMaxSeconds ?? existing.actionIntervalMaxSeconds,
+        dailyLimit: body.dailyLimit ?? existing.dailyLimit,
+        activeHoursStart: body.activeHoursStart ?? existing.activeHoursStart,
+        activeHoursEnd: body.activeHoursEnd ?? existing.activeHoursEnd,
+        // 只有传入非占位符值时才更新 cookie
+        authToken: (body.authToken && body.authToken !== '••••••••') ? body.authToken : existing.authToken,
+        ct0: (body.ct0 && body.ct0 !== '••••••••') ? body.ct0 : existing.ct0,
+      };
+
+      saveAutomationConfig(config);
+      res.json({ ok: true, message: 'Automation settings saved' });
+    } catch (err: any) {
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  // ── 发帖 ────────────────────────────────────────────
+
+  app.post('/api/post', async (req, res) => {
+    try {
+      const { text } = req.body;
+      if (!text) {
+        res.status(400).json({ error: 'Post text is required' });
+        return;
+      }
+      if (text.length > 280) {
+        res.status(400).json({ error: 'Post exceeds 280 characters' });
+        return;
+      }
+      const result = await taskManager.postNow(text);
+      res.json({ ok: result.ok, message: result.ok ? 'Post sent' : 'Post failed' });
+    } catch (err: any) {
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  app.post('/api/post/schedule/start', (req, res) => {
+    try {
+      const { intervalMinutes, templateText } = req.body;
+      if (!intervalMinutes || intervalMinutes < 5) {
+        res.status(400).json({ error: 'Interval must be at least 5 minutes' });
+        return;
+      }
+      if (!templateText) {
+        res.status(400).json({ error: 'Template text is required' });
+        return;
+      }
+      taskManager.startPostSchedule(intervalMinutes, templateText);
+      res.json({ ok: true, message: `Auto post started every ${intervalMinutes} min` });
+    } catch (err: any) {
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  app.post('/api/post/schedule/stop', (_req, res) => {
+    taskManager.stopPostSchedule();
+    res.json({ ok: true, message: 'Auto post stopped' });
+  });
+
+  app.get('/api/post/config', (_req, res) => {
+    try {
+      const config = loadPostConfig();
+      res.json(config);
+    } catch (err: any) {
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  app.post('/api/post/config', (req, res) => {
+    try {
+      const body = req.body as Partial<PostConfig>;
+      const existing = loadPostConfig();
+
+      const config: PostConfig = {
+        templates: body.templates ?? existing.templates,
+        autoPostEnabled: body.autoPostEnabled ?? existing.autoPostEnabled,
+        autoPostIntervalMinutes: body.autoPostIntervalMinutes ?? existing.autoPostIntervalMinutes,
+        autoPostTemplateIndex: body.autoPostTemplateIndex ?? existing.autoPostTemplateIndex,
+      };
+
+      savePostConfig(config);
+      res.json({ ok: true, message: 'Post config saved' });
+    } catch (err: any) {
+      res.status(500).json({ error: err.message });
+    }
   });
 
   return app;
