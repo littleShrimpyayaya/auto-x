@@ -3,7 +3,7 @@ import { UserRepository } from './user-repository.js';
 import { XClient } from './x-client.js';
 import { BrowserClient } from './browser-client.js';
 import type { XUser, PendingStats } from './types.js';
-import { loadPostConfig, savePostConfig, type PostConfig } from './auto-config.js';
+import { loadPostConfig, savePostConfig, saveAutomationConfig, loadAutomationConfig, type PostConfig } from './auto-config.js';
 
 export type TaskType = 'sync-followers' | 'sync-following' | 'auto-follow' | 'process-follow' | 'process-unfollow';
 export type TaskStatusType = 'idle' | 'running' | 'completed' | 'error' | 'cancelled';
@@ -87,6 +87,30 @@ export class TaskManager {
   setMe(user: XUser): void {
     this.me = user;
     this.connected = true;
+  }
+
+  async reconnectBrowser(authToken: string, ct0: string): Promise<{ ok: boolean; username?: string; error?: string }> {
+    if (!(this.service['xClient'] instanceof BrowserClient)) {
+      return { ok: false, error: 'Not in browser mode' };
+    }
+
+    // 保存配置
+    const cfg = loadAutomationConfig();
+    cfg.authToken = authToken;
+    cfg.ct0 = ct0;
+    saveAutomationConfig(cfg);
+
+    try {
+      const browserClient = this.service['xClient'] as BrowserClient;
+      await browserClient.reconnect(authToken, ct0);
+      const me = await browserClient.getMyUser();
+      this.setMe(me);
+      return { ok: true, username: me.username };
+    } catch (err: any) {
+      this.connected = false;
+      this.me = null;
+      return { ok: false, error: err.message };
+    }
   }
 
   async reconnect(newXClient: XClient, newService: Service): Promise<XUser> {

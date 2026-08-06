@@ -156,6 +156,26 @@ export function createServer(taskManager: TaskManager): express.Express {
     res.json({ ok: true, message: 'Auto process-unfollow stopped' });
   });
 
+  // ── 重连 ────────────────────────────────────────────
+
+  app.post('/api/reconnect', async (req, res) => {
+    try {
+      const { authToken, ct0 } = req.body;
+      if (!authToken) {
+        res.status(400).json({ error: 'auth_token is required' });
+        return;
+      }
+      const result = await taskManager.reconnectBrowser(authToken, ct0 || '');
+      if (result.ok) {
+        res.json({ ok: true, message: `Connected as @${result.username}`, username: result.username });
+      } else {
+        res.status(400).json({ ok: false, error: result.error || 'Connection failed' });
+      }
+    } catch (err: any) {
+      res.status(500).json({ error: err.message });
+    }
+  });
+
   // ── 自动化配置 ──────────────────────────────────────
 
   app.get('/api/auto-config', (_req, res) => {

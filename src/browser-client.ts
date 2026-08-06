@@ -100,6 +100,17 @@ export class BrowserClient {
     console.log('[BrowserClient] 浏览器已启动');
   }
 
+  async reconnect(authToken: string, ct0: string): Promise<void> {
+    this.config.authToken = authToken;
+    this.config.ct0 = ct0;
+
+    // 关闭现有浏览器
+    await this.close();
+
+    // 重新初始化
+    await this.init();
+  }
+
   async close(): Promise<void> {
     if (this.page) { await this.page.close().catch(() => {}); this.page = null; }
     if (this.context) { await this.context.close().catch(() => {}); this.context = null; }

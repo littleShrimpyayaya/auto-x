@@ -80,58 +80,73 @@
   <div class="container">
     <h1>Auto-X Control Panel</h1>
 
-    <div class="card" id="config-card">
-      <h2>X API Configuration</h2>
-      <div class="config-status disconnected" id="config-status">
-        <span class="status-dot idle"></span>
-        <span>Not configured</span>
+    <div class="card" id="account-card">
+      <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 14px;">
+        <h2 style="margin: 0;">Account</h2>
+        <div id="connection-status" style="display: flex; align-items: center; gap: 6px; font-size: 13px;">
+          <span class="status-dot idle" id="conn-dot"></span>
+          <span id="conn-text">Not connected</span>
+        </div>
       </div>
-      <p style="font-size: 13px; color: #666; margin-bottom: 14px;">
-        Need API tokens? Go to
-        <a class="config-link" href="https://developer.x.com/en/portal/dashboard" target="_blank">X Developer Portal</a>
-        to create an app and generate your tokens.
-      </p>
-      <div class="form-group">
-        <label>Bearer Token</label>
-        <div class="hint">App-only authentication token for read-only operations. Find it in your app's "Keys and Tokens" page.</div>
-        <input type="password" id="bearer-token" placeholder="AAAAAAAAAAAAAAAAAAAAA...">
-      </div>
-      <div class="form-group">
-        <label>Access Token (OAuth 2.0 User Token)</label>
-        <div class="hint">User-context token for follow/unfollow. Needs <code>follows.write</code> scope. Refresh token not needed.</div>
-        <input type="password" id="access-token" placeholder="xxxxxxxxxx.xxxxxxxxxx...">
-      </div>
-      <button class="btn-success" onclick="saveConfig()">Save & Connect</button>
-    </div>
 
-    <div class="card">
-      <h2>Account</h2>
-      <div class="user-info">
-        <img id="user-avatar" src="" alt="" style="width: 64px; height: 64px; border-radius: 50%; object-fit: cover; display: none;">
-        <div class="avatar" id="avatar">-</div>
-        <div class="details">
-          <div class="name" id="user-name">
-            Not connected
-            <span id="verified-badge" style="display: none; color: #1d9bf0; font-size: 14px;" title="Verified">&#10003;</span>
+      <!-- 已连接：用户信息 -->
+      <div id="account-connected" style="display: none;">
+        <div class="user-info">
+          <img id="user-avatar" src="" alt="" style="width: 64px; height: 64px; border-radius: 50%; object-fit: cover; display: none;">
+          <div class="avatar" id="avatar">-</div>
+          <div class="details">
+            <div class="name" id="user-name">
+              <span id="verified-badge" style="display: none; color: #1d9bf0; font-size: 14px;" title="Verified">&#10003;</span>
+            </div>
+            <div class="username" id="user-username"></div>
+            <div id="verified-type" style="font-size: 12px; color: #888; display: none;"></div>
+            <div id="user-description" style="font-size: 13px; color: #555; margin-top: 4px; display: none;"></div>
           </div>
-          <div class="username" id="user-username"></div>
-          <div id="verified-type" style="font-size: 12px; color: #888; display: none;"></div>
-          <div id="user-description" style="font-size: 13px; color: #555; margin-top: 4px; display: none;"></div>
         </div>
+        <div class="stats" style="margin-top: 14px;">
+          <div class="stat">
+            <div class="value" id="me-followers">0</div>
+            <div class="label">Followers</div>
+          </div>
+          <div class="stat">
+            <div class="value" id="me-following">0</div>
+            <div class="label">Following</div>
+          </div>
+          <div class="stat">
+            <div class="value" id="me-tweets">0</div>
+            <div class="label">Tweets</div>
+          </div>
+        </div>
+        <button class="btn-outline" onclick="toggleReconnect()" style="margin-top: 12px; font-size: 12px;">Reconnect</button>
+        <div id="reconnect-area" style="display: none; margin-top: 12px; padding-top: 12px; border-top: 1px solid #eee;"></div>
       </div>
-      <div class="stats" style="margin-top: 14px;">
-        <div class="stat">
-          <div class="value" id="me-followers">0</div>
-          <div class="label">Followers</div>
+
+      <!-- 未连接：引导步骤 + 输入 -->
+      <div id="account-disconnected">
+        <div style="background: #f8f8f8; border-radius: 8px; padding: 14px; margin-bottom: 14px;">
+          <div style="font-weight: 600; font-size: 14px; margin-bottom: 8px;">📋 如何连接 X 账号</div>
+          <ol style="font-size: 13px; color: #555; margin: 0; padding-left: 20px; line-height: 1.8;">
+            <li>打开 <a href="https://x.com" target="_blank" style="color: #1d9bf0;">x.com</a> 并登录你的账号</li>
+            <li>按 <b>F12</b> 打开开发者工具</li>
+            <li>
+              <b>Chrome / Edge：</b>点击 <b>Application</b>（应用）标签 → 左侧 <b>Cookies</b> → <b>x.com</b><br>
+              <b>Firefox：</b>点击 <b>Storage</b>（存储）标签 → 左侧 <b>Cookies</b> → <b>https://x.com</b>
+            </li>
+            <li>在右侧列表中找到 <b>auth_token</b>，双击 <b>Value</b> 列复制</li>
+            <li>同样找到 <b>ct0</b>，复制其 Value</li>
+            <li>将两个值粘贴到下方输入框，点击 Connect</li>
+          </ol>
         </div>
-        <div class="stat">
-          <div class="value" id="me-following">0</div>
-          <div class="label">Following</div>
+        <div class="form-group">
+          <label>auth_token</label>
+          <input type="password" id="account-auth-token" placeholder="粘贴 auth_token 的值...">
         </div>
-        <div class="stat">
-          <div class="value" id="me-tweets">0</div>
-          <div class="label">Tweets</div>
+        <div class="form-group">
+          <label>ct0</label>
+          <input type="password" id="account-ct0" placeholder="粘贴 ct0 的值...">
         </div>
+        <button class="btn-primary" onclick="doConnect()">Connect</button>
+        <span id="connect-status" style="font-size: 13px; color: #888; margin-left: 10px;"></span>
       </div>
     </div>
 
@@ -235,22 +250,6 @@
           <span>~</span>
           <input type="number" id="auto-hour-end" min="0" max="23" value="23" style="width: 70px;">
           <span>o'clock</span>
-        </div>
-      </div>
-
-      <div class="section">
-        <div class="section-header"><h3>🔐 Auth (Cookie)</h3></div>
-        <div class="section-desc">
-          从浏览器中导出 X.com 的 auth_token cookie。
-          在 X.com 页面按 F12 → Application → Cookies → 复制 auth_token 的值。
-        </div>
-        <div class="form-group">
-          <label>auth_token</label>
-          <input type="password" id="auto-auth-token" placeholder="从浏览器 Cookie 中复制...">
-        </div>
-        <div class="form-group">
-          <label>ct0 (CSRF Token)</label>
-          <input type="password" id="auto-ct0" placeholder="从浏览器 Cookie 中复制...">
         </div>
       </div>
 
@@ -424,20 +423,94 @@
       }
     }
 
-    async function saveConfig() {
-      const bearerToken = document.getElementById('bearer-token').value.trim();
-      const accessToken = document.getElementById('access-token').value.trim();
-      if (!bearerToken && !accessToken) {
-        showToast('Please enter at least one token', 'error');
-        return;
-      }
-      const btn = document.querySelector('#config-card button');
+    // ── Account Connect ────────────────────────────────────
+
+    async function doConnect() {
+      const authToken = document.getElementById('account-auth-token').value.trim();
+      const ct0 = document.getElementById('account-ct0').value.trim();
+      if (!authToken) { showToast('请填写 auth_token', 'error'); return; }
+
+      const btn = document.querySelector('#account-disconnected button');
+      const statusEl = document.getElementById('connect-status');
       btn.textContent = 'Connecting...';
       btn.classList.add('loading');
-      addLog('Saving configuration...');
-      const result = await api('/api/config', 'POST', { bearerToken, accessToken });
-      btn.textContent = 'Save & Connect';
-      btn.classList.remove('loading');
+
+      try {
+        const res = await fetch('/api/reconnect', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ authToken, ct0 }),
+        });
+        const data = await res.json();
+        btn.textContent = 'Connect';
+        btn.classList.remove('loading');
+
+        if (data.ok) {
+          statusEl.textContent = '✓ Connected as @' + data.username + '!';
+          statusEl.style.color = '#00ba7c';
+          showToast('Connected as @' + data.username, 'success');
+          refreshStatus();
+        } else {
+          statusEl.textContent = '✗ ' + (data.error || 'Failed');
+          statusEl.style.color = '#f4212e';
+          showToast(data.error || 'Connection failed', 'error');
+        }
+      } catch (err) {
+        btn.textContent = 'Connect';
+        btn.classList.remove('loading');
+        statusEl.textContent = '✗ Network error';
+        statusEl.style.color = '#f4212e';
+      }
+    }
+
+    function toggleReconnect() {
+      const area = document.getElementById('reconnect-area');
+      if (area.style.display === 'none') {
+        area.style.display = 'block';
+        area.innerHTML = `
+          <div style="font-size: 13px; color: #666; margin-bottom: 8px;">更新 auth_token（步骤见下方连接区域）</div>
+          <div class="form-group">
+            <label>auth_token</label>
+            <input type="password" id="reconnect-auth-token" placeholder="粘贴新的 auth_token...">
+          </div>
+          <div class="form-group">
+            <label>ct0</label>
+            <input type="password" id="reconnect-ct0" placeholder="粘贴新的 ct0...">
+          </div>
+          <button class="btn-primary" onclick="doReconnect()">Update & Restart</button>
+          <span id="reconnect-status" style="font-size: 13px; color: #888; margin-left: 10px;"></span>
+        `;
+      } else {
+        area.style.display = 'none';
+      }
+    }
+
+    async function doReconnect() {
+      const authToken = document.getElementById('reconnect-auth-token').value.trim();
+      const ct0 = document.getElementById('reconnect-ct0').value.trim();
+      if (!authToken) { showToast('请填写 auth_token', 'error'); return; }
+
+      const statusEl = document.getElementById('reconnect-status');
+      try {
+        const res = await fetch('/api/reconnect', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ authToken, ct0 }),
+        });
+        const data = await res.json();
+        if (data.ok) {
+          statusEl.textContent = '✓ Reconnected as @' + data.username;
+          statusEl.style.color = '#00ba7c';
+          showToast('Reconnected as @' + data.username, 'success');
+          refreshStatus();
+        } else {
+          statusEl.textContent = '✗ ' + (data.error || 'Failed');
+          statusEl.style.color = '#f4212e';
+        }
+      } catch {
+        statusEl.textContent = '✗ Failed';
+        statusEl.style.color = '#f4212e';
+      }
     }
 
     async function doSync(type) {
@@ -577,18 +650,18 @@
         const data = await res.json();
         lastData = data;
 
-        // Config status
-        const statusEl = document.getElementById('config-status');
-        if (data.connected) {
-          statusEl.className = 'config-status connected';
-          statusEl.innerHTML = '<span class="status-dot completed"></span><span>Connected</span>';
-        } else {
-          statusEl.className = 'config-status disconnected';
-          statusEl.innerHTML = '<span class="status-dot error"></span><span>Not configured</span>';
-        }
+        // Account connection status
+        const connDot = document.getElementById('conn-dot');
+        const connText = document.getElementById('conn-text');
+        const connectedDiv = document.getElementById('account-connected');
+        const disconnectedDiv = document.getElementById('account-disconnected');
 
-        // Account
-        if (data.me) {
+        if (data.connected && data.me) {
+          connDot.className = 'status-dot completed';
+          connText.textContent = 'Connected as @' + data.me.username;
+          connectedDiv.style.display = 'block';
+          disconnectedDiv.style.display = 'none';
+
           const me = data.me;
           document.getElementById('user-name').childNodes[0].textContent = me.name + ' ';
           document.getElementById('user-username').textContent = '@' + me.username;
@@ -626,14 +699,10 @@
             document.getElementById('me-tweets').textContent = me.publicMetrics.postCount.toLocaleString();
           }
         } else {
-          document.getElementById('user-name').childNodes[0].textContent = 'Not connected ';
-          document.getElementById('user-username').textContent = '';
-          document.getElementById('avatar').textContent = '-';
-          document.getElementById('avatar').style.display = 'flex';
-          document.getElementById('user-avatar').style.display = 'none';
-          document.getElementById('verified-badge').style.display = 'none';
-          document.getElementById('verified-type').style.display = 'none';
-          document.getElementById('user-description').style.display = 'none';
+          connDot.className = 'status-dot error';
+          connText.textContent = 'Not connected';
+          connectedDiv.style.display = 'none';
+          disconnectedDiv.style.display = 'block';
         }
 
         // Dashboard stats
@@ -679,8 +748,6 @@
         document.getElementById('auto-daily-limit').value = cfg.dailyLimit;
         document.getElementById('auto-hour-start').value = cfg.activeHoursStart;
         document.getElementById('auto-hour-end').value = cfg.activeHoursEnd;
-        if (cfg.authToken) document.getElementById('auto-auth-token').value = cfg.authToken;
-        if (cfg.ct0) document.getElementById('auto-ct0').value = cfg.ct0;
       } catch { /* server not ready */ }
     }
 
@@ -704,8 +771,6 @@
             dailyLimit: parseInt(document.getElementById('auto-daily-limit').value),
             activeHoursStart: parseInt(document.getElementById('auto-hour-start').value),
             activeHoursEnd: parseInt(document.getElementById('auto-hour-end').value),
-            authToken: document.getElementById('auto-auth-token').value.trim(),
-            ct0: document.getElementById('auto-ct0').value.trim(),
           }),
         });
         const data = await res.json();
