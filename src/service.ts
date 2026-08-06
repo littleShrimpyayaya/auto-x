@@ -134,6 +134,82 @@ export class Service {
     }
   }
 
+  async computeFollowBackWithDetails(userId: string): Promise<Array<{ userId: string; username: string; name: string }>> {
+    // 先同步数据
+    await this.syncFollowers(userId);
+    await this.syncFollowing(userId);
+
+    const followerIds = await this.repo.getRelationshipIds(userId, 'follower');
+    const followingIds = new Set(await this.repo.getRelationshipIds(userId, 'following'));
+
+    const needFollow: string[] = [];
+    for (const fid of followerIds) {
+      if (!followingIds.has(fid)) needFollow.push(fid);
+    }
+
+    await this.repo.upsertPendingFollow(needFollow);
+
+    // 从 DB 获取用户详情
+    const result: Array<{ userId: string; username: string; name: string }> = [];
+    for (const id of needFollow) {
+      const u = await this.repo.getUser(id);
+      result.push({ userId: id, username: u?.username || id, name: u?.name || '' });
+    }
+    return result;
+  }
+
+  async computeUnfollowWithDetails(userId: string): Promise<Array<{ userId: string; username: string; name: string }>> {
+    const followingIds = await this.repo.getRelationshipIds(userId, 'following');
+    const followerIds = new Set(await this.repo.getRelationshipIds(userId, 'follower'));
+
+    const needUnfollow: string[] = [];
+    for (const fid of followingIds) {
+      if (!followerIds.has(fid)) needUnfollow.push(fid);
+    }
+
+    await this.repo.upsertPendingUnfollow(needUnfollow);
+
+    const result: Array<{ userId: string; username: string; name: string }> = [];
+    for (const id of needUnfollow) {
+      const u = await this.repo.getUser(id);
+      result.push({ userId: id, username: u?.username || id, name: u?.name || '' });
+    }
+    return result;
+  }
+
+  async batchFollow(userId: string, targetUserIds: string[]): Promise<{ done: number; failed: number }> {
+    let done = 0;
+    let failed = 0;
+    for (const tid of targetUserIds) {
+      try {
+        await this.xClient.follow(userId, tid);
+        await this.repo.markPendingFollowStatus(tid, 'completed');
+        await this.repo.upsertRelationships(userId, [{ id: tid, name: '', username: '' }], 'following');
+        done++;
+      } catch {
+        failed++;
+        await this.repo.markPendingFollowStatus(tid, 'failed', 'Batch follow failed');
+      }
+    }
+    return { done, failed };
+  }
+
+  async batchUnfollow(userId: string, targetUserIds: string[]): Promise<{ done: number; failed: number }> {
+    let done = 0;
+    let failed = 0;
+    for (const tid of targetUserIds) {
+      try {
+        await this.xClient.unfollow(userId, tid);
+        await this.repo.markPendingUnfollowStatus(tid, 'completed');
+        done++;
+      } catch {
+        failed++;
+        await this.repo.markPendingUnfollowStatus(tid, 'failed', 'Batch unfollow failed');
+      }
+    }
+    return { done, failed };
+  }
+
   async processOnePendingUnfollow(userId: string): Promise<ProcessResult> {
     const item = await this.repo.getNextPendingUnfollow();
     if (!item) return { processed: false };

@@ -319,6 +319,22 @@ export class TaskManager {
     console.log('[Post] 定时发帖已停止');
   }
 
+  async computeFollowBack(): Promise<Array<{ userId: string; username: string; name: string }>> {
+    return this.service.computeFollowBackWithDetails(this.userId);
+  }
+
+  async computeUnfollow(): Promise<Array<{ userId: string; username: string; name: string }>> {
+    return this.service.computeUnfollowWithDetails(this.userId);
+  }
+
+  async batchFollow(targetUserIds: string[]): Promise<{ done: number; failed: number }> {
+    return this.service.batchFollow(this.userId, targetUserIds);
+  }
+
+  async batchUnfollow(targetUserIds: string[]): Promise<{ done: number; failed: number }> {
+    return this.service.batchUnfollow(this.userId, targetUserIds);
+  }
+
   async refreshMe(): Promise<XUser | null> {
     if (this.service['xClient'] instanceof BrowserClient) {
       const me = await (this.service['xClient'] as BrowserClient).getMyUser();

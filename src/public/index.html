@@ -112,10 +112,6 @@
             <div class="value" id="me-following">0</div>
             <div class="label">Following</div>
           </div>
-          <div class="stat">
-            <div class="value" id="me-tweets">0</div>
-            <div class="label">Posts</div>
-          </div>
         </div>
         <div style="margin-top: 10px; display: flex; align-items: center; gap: 8px;">
           <button class="btn-secondary" onclick="refreshAccount()" style="font-size: 12px; padding: 6px 14px;">🔄 Refresh Stats</button>
@@ -157,56 +153,41 @@
     <div class="card">
       <h2>Dashboard</h2>
 
+      <!-- Follow-back Queue -->
       <div class="section">
-        <div class="section-header"><h3>📥 Synced Data</h3></div>
-        <div class="section-desc">已从 X API 同步到本地的数据</div>
-        <div class="stats">
-          <div class="stat">
-            <div class="value" id="follower-count">0</div>
-            <div class="label">Followers（你的粉丝）</div>
-          </div>
-          <div class="stat">
-            <div class="value" id="following-count">0</div>
-            <div class="label">Following（你关注的人）</div>
-          </div>
+        <div class="section-header">
+          <h3>🔁 Follow-back Queue</h3>
+          <span style="font-size: 13px; color: #888;" id="follow-queue-count"></span>
         </div>
-      </div>
-
-      <div class="section">
-        <div class="section-header"><h3>🔁 Follow-back Queue</h3></div>
         <div class="section-desc">关注了你、但你还没回关的人</div>
-        <div class="stats">
-          <div class="stat warn">
-            <div class="value" id="pending-follow-count">0</div>
-            <div class="label">Pending（待回关）</div>
+        <button class="btn-primary" onclick="computeFollowBack()" id="btn-compute-follow" style="margin-bottom: 10px;">Compute Follow-back</button>
+        <span id="compute-follow-status" style="font-size: 12px; color: #888; margin-left: 8px;"></span>
+        <div id="follow-list" style="display: none; max-height: 300px; overflow-y: auto; border: 1px solid #eee; border-radius: 6px;">
+          <div style="padding: 8px 12px; border-bottom: 1px solid #eee; background: #fafafa; display: flex; align-items: center; gap: 8px; position: sticky; top: 0;">
+            <input type="checkbox" id="follow-select-all" onchange="toggleSelectAll('follow')" style="width: 16px; height: 16px;">
+            <span style="font-size: 13px; color: #666;">Select All</span>
+            <button class="btn-success" onclick="batchFollow()" style="margin-left: auto; font-size: 12px; padding: 6px 14px;">Follow Selected</button>
           </div>
-          <div class="stat success">
-            <div class="value" id="pending-follow-done">0</div>
-            <div class="label">Followed（已回关）</div>
-          </div>
-          <div class="stat danger">
-            <div class="value" id="pending-follow-failed">0</div>
-            <div class="label">Failed（失败）</div>
-          </div>
+          <div id="follow-list-items"></div>
         </div>
       </div>
 
+      <!-- Unfollow Queue -->
       <div class="section">
-        <div class="section-header"><h3>🔓 Unfollow Queue</h3></div>
+        <div class="section-header">
+          <h3>🔓 Unfollow Queue</h3>
+          <span style="font-size: 13px; color: #888;" id="unfollow-queue-count"></span>
+        </div>
         <div class="section-desc">你关注了、但对方没关注你的人</div>
-        <div class="stats">
-          <div class="stat warn">
-            <div class="value" id="pending-unfollow-count">0</div>
-            <div class="label">Pending（待取关）</div>
+        <button class="btn-warning" onclick="computeUnfollow()" id="btn-compute-unfollow" style="margin-bottom: 10px;">Compute Unfollow</button>
+        <span id="compute-unfollow-status" style="font-size: 12px; color: #888; margin-left: 8px;"></span>
+        <div id="unfollow-list" style="display: none; max-height: 300px; overflow-y: auto; border: 1px solid #eee; border-radius: 6px;">
+          <div style="padding: 8px 12px; border-bottom: 1px solid #eee; background: #fafafa; display: flex; align-items: center; gap: 8px; position: sticky; top: 0;">
+            <input type="checkbox" id="unfollow-select-all" onchange="toggleSelectAll('unfollow')" style="width: 16px; height: 16px;">
+            <span style="font-size: 13px; color: #666;">Select All</span>
+            <button class="btn-danger" onclick="batchUnfollow()" style="margin-left: auto; font-size: 12px; padding: 6px 14px;">Unfollow Selected</button>
           </div>
-          <div class="stat success">
-            <div class="value" id="pending-unfollow-done">0</div>
-            <div class="label">Unfollowed（已取关）</div>
-          </div>
-          <div class="stat danger">
-            <div class="value" id="pending-unfollow-failed">0</div>
-            <div class="label">Failed（失败）</div>
-          </div>
+          <div id="unfollow-list-items"></div>
         </div>
       </div>
     </div>
@@ -424,6 +405,122 @@
         addLog('Request failed: ' + err.message);
         showToast('Network error', 'error');
         return { ok: false, data: null };
+      }
+    }
+
+    // ── Compute & Batch ────────────────────────────────────
+
+    let followListData = [];
+    let unfollowListData = [];
+
+    function renderUserList(containerId, users, type) {
+      const container = document.getElementById(containerId);
+      if (!users.length) {
+        container.innerHTML = '<div style="padding: 16px; text-align: center; color: #888; font-size: 13px;">No users found — everyone is already processed!</div>';
+        return;
+      }
+      container.innerHTML = users.map((u, i) => `
+        <div style="display: flex; align-items: center; gap: 10px; padding: 8px 12px; border-bottom: 1px solid #f0f0f0; font-size: 13px;">
+          <input type="checkbox" class="${type}-checkbox" data-idx="${i}" style="width: 15px; height: 15px; flex-shrink: 0;">
+          <div style="width: 32px; height: 32px; border-radius: 50%; background: #1d9bf0; color: #fff; display: flex; align-items: center; justify-content: center; font-weight: bold; font-size: 14px; flex-shrink: 0;">${(u.name || u.username).charAt(0).toUpperCase()}</div>
+          <div style="flex: 1; min-width: 0;">
+            <div style="font-weight: 500; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;">${escHtml(u.name || u.username)}</div>
+            <div style="color: #888; font-size: 12px;">@${escHtml(u.username)}</div>
+          </div>
+        </div>
+      `).join('');
+    }
+
+    function toggleSelectAll(type) {
+      const checked = document.getElementById(type + '-select-all').checked;
+      document.querySelectorAll('.' + type + '-checkbox').forEach(cb => { cb.checked = checked; });
+    }
+
+    function getSelectedUserIds(type) {
+      const userIds = [];
+      const list = type === 'follow' ? followListData : unfollowListData;
+      document.querySelectorAll('.' + type + '-checkbox:checked').forEach(cb => {
+        const idx = parseInt(cb.dataset.idx);
+        if (list[idx]) userIds.push(list[idx].userId);
+      });
+      return userIds;
+    }
+
+    async function computeFollowBack() {
+      const btn = document.getElementById('btn-compute-follow');
+      const statusEl = document.getElementById('compute-follow-status');
+      btn.textContent = 'Computing...';
+      btn.disabled = true;
+
+      try {
+        const res = await fetch('/api/compute-follow-back', { method: 'POST' });
+        const data = await res.json();
+        if (data.ok) {
+          followListData = data.users;
+          renderUserList('follow-list-items', followListData, 'follow');
+          document.getElementById('follow-list').style.display = 'block';
+          statusEl.textContent = 'Found ' + data.count + ' users';
+          statusEl.style.color = '#00ba7c';
+          refreshStatus();
+        }
+      } catch { statusEl.textContent = 'Error'; }
+      btn.textContent = 'Compute Follow-back';
+      btn.disabled = false;
+      setTimeout(() => { statusEl.textContent = ''; }, 5000);
+    }
+
+    async function computeUnfollow() {
+      const btn = document.getElementById('btn-compute-unfollow');
+      const statusEl = document.getElementById('compute-unfollow-status');
+      btn.textContent = 'Computing...';
+      btn.disabled = true;
+
+      try {
+        const res = await fetch('/api/compute-unfollow', { method: 'POST' });
+        const data = await res.json();
+        if (data.ok) {
+          unfollowListData = data.users;
+          renderUserList('unfollow-list-items', unfollowListData, 'unfollow');
+          document.getElementById('unfollow-list').style.display = 'block';
+          statusEl.textContent = 'Found ' + data.count + ' users';
+          statusEl.style.color = '#00ba7c';
+          refreshStatus();
+        }
+      } catch { statusEl.textContent = 'Error'; }
+      btn.textContent = 'Compute Unfollow';
+      btn.disabled = false;
+      setTimeout(() => { statusEl.textContent = ''; }, 5000);
+    }
+
+    async function batchFollow() {
+      const userIds = getSelectedUserIds('follow');
+      if (!userIds.length) { showToast('No users selected', 'error'); return; }
+      addLog('Batch following ' + userIds.length + ' users...');
+      const res = await fetch('/api/batch-follow', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ userIds }),
+      });
+      const data = await res.json();
+      if (data.ok) {
+        showToast('Done: ' + data.done + ', Failed: ' + data.failed, data.failed ? 'error' : 'success');
+        computeFollowBack(); // refresh list
+      }
+    }
+
+    async function batchUnfollow() {
+      const userIds = getSelectedUserIds('unfollow');
+      if (!userIds.length) { showToast('No users selected', 'error'); return; }
+      addLog('Batch unfollowing ' + userIds.length + ' users...');
+      const res = await fetch('/api/batch-unfollow', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ userIds }),
+      });
+      const data = await res.json();
+      if (data.ok) {
+        showToast('Done: ' + data.done + ', Failed: ' + data.failed, data.failed ? 'error' : 'success');
+        computeUnfollow(); // refresh list
       }
     }
 
@@ -723,7 +820,6 @@
           if (me.publicMetrics) {
             document.getElementById('me-followers').textContent = me.publicMetrics.followersCount.toLocaleString();
             document.getElementById('me-following').textContent = me.publicMetrics.followingCount.toLocaleString();
-            document.getElementById('me-tweets').textContent = me.publicMetrics.postCount.toLocaleString();
           }
         } else {
           connDot.className = 'status-dot error';
@@ -732,17 +828,12 @@
           disconnectedDiv.style.display = 'block';
         }
 
-        // Dashboard stats
-        document.getElementById('follower-count').textContent = data.followerCount;
-        document.getElementById('following-count').textContent = data.followingCount;
-
+        // Dashboard queue counts
         if (data.pending) {
-          document.getElementById('pending-follow-count').textContent = data.pending.followPending;
-          document.getElementById('pending-follow-done').textContent = data.pending.followCompleted;
-          document.getElementById('pending-follow-failed').textContent = data.pending.followFailed;
-          document.getElementById('pending-unfollow-count').textContent = data.pending.unfollowPending;
-          document.getElementById('pending-unfollow-done').textContent = data.pending.unfollowCompleted;
-          document.getElementById('pending-unfollow-failed').textContent = data.pending.unfollowFailed;
+          document.getElementById('follow-queue-count').textContent =
+            `Pending: ${data.pending.followPending} | Done: ${data.pending.followCompleted} | Failed: ${data.pending.followFailed}`;
+          document.getElementById('unfollow-queue-count').textContent =
+            `Pending: ${data.pending.unfollowPending} | Done: ${data.pending.unfollowCompleted} | Failed: ${data.pending.unfollowFailed}`;
         }
 
         // Task status

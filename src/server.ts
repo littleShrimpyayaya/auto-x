@@ -156,6 +156,54 @@ export function createServer(taskManager: TaskManager): express.Express {
     res.json({ ok: true, message: 'Auto process-unfollow stopped' });
   });
 
+  // ── 计算队列 + 批量操作 ────────────────────────────
+
+  app.post('/api/compute-follow-back', async (_req, res) => {
+    try {
+      const list = await taskManager.computeFollowBack();
+      res.json({ ok: true, users: list, count: list.length });
+    } catch (err: any) {
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  app.post('/api/compute-unfollow', async (_req, res) => {
+    try {
+      const list = await taskManager.computeUnfollow();
+      res.json({ ok: true, users: list, count: list.length });
+    } catch (err: any) {
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  app.post('/api/batch-follow', async (req, res) => {
+    try {
+      const { userIds } = req.body;
+      if (!userIds || !Array.isArray(userIds) || userIds.length === 0) {
+        res.status(400).json({ error: 'userIds array is required' });
+        return;
+      }
+      const result = await taskManager.batchFollow(userIds);
+      res.json({ ok: true, ...result });
+    } catch (err: any) {
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  app.post('/api/batch-unfollow', async (req, res) => {
+    try {
+      const { userIds } = req.body;
+      if (!userIds || !Array.isArray(userIds) || userIds.length === 0) {
+        res.status(400).json({ error: 'userIds array is required' });
+        return;
+      }
+      const result = await taskManager.batchUnfollow(userIds);
+      res.json({ ok: true, ...result });
+    } catch (err: any) {
+      res.status(500).json({ error: err.message });
+    }
+  });
+
   // ── 重连 ────────────────────────────────────────────
 
   app.post('/api/reconnect', async (req, res) => {
