@@ -137,42 +137,57 @@
 
     <div class="card">
       <h2>Dashboard</h2>
-      <div class="stats">
-        <div class="stat">
-          <div class="value" id="follower-count">0</div>
-          <div class="label">Synced Followers</div>
-        </div>
-        <div class="stat">
-          <div class="value" id="following-count">0</div>
-          <div class="label">Synced Following</div>
-        </div>
-      </div>
-      <div class="stats" style="margin-top: 10px;">
-        <div class="stat warn">
-          <div class="value" id="pending-follow-count">0</div>
-          <div class="label">To Follow Back</div>
-        </div>
-        <div class="stat success">
-          <div class="value" id="pending-follow-done">0</div>
-          <div class="label">Followed</div>
-        </div>
-        <div class="stat danger">
-          <div class="value" id="pending-follow-failed">0</div>
-          <div class="label">Failed</div>
+
+      <div class="section">
+        <div class="section-header"><h3>📥 Synced Data</h3></div>
+        <div class="section-desc">已从 X API 同步到本地的数据</div>
+        <div class="stats">
+          <div class="stat">
+            <div class="value" id="follower-count">0</div>
+            <div class="label">Followers（你的粉丝）</div>
+          </div>
+          <div class="stat">
+            <div class="value" id="following-count">0</div>
+            <div class="label">Following（你关注的人）</div>
+          </div>
         </div>
       </div>
-      <div class="stats" style="margin-top: 10px;">
-        <div class="stat warn">
-          <div class="value" id="pending-unfollow-count">0</div>
-          <div class="label">To Unfollow</div>
+
+      <div class="section">
+        <div class="section-header"><h3>🔁 Follow-back Queue</h3></div>
+        <div class="section-desc">关注了你、但你还没回关的人</div>
+        <div class="stats">
+          <div class="stat warn">
+            <div class="value" id="pending-follow-count">0</div>
+            <div class="label">Pending（待回关）</div>
+          </div>
+          <div class="stat success">
+            <div class="value" id="pending-follow-done">0</div>
+            <div class="label">Followed（已回关）</div>
+          </div>
+          <div class="stat danger">
+            <div class="value" id="pending-follow-failed">0</div>
+            <div class="label">Failed（失败）</div>
+          </div>
         </div>
-        <div class="stat success">
-          <div class="value" id="pending-unfollow-done">0</div>
-          <div class="label">Unfollowed</div>
-        </div>
-        <div class="stat danger">
-          <div class="value" id="pending-unfollow-failed">0</div>
-          <div class="label">Failed</div>
+      </div>
+
+      <div class="section">
+        <div class="section-header"><h3>🔓 Unfollow Queue</h3></div>
+        <div class="section-desc">你关注了、但对方没关注你的人</div>
+        <div class="stats">
+          <div class="stat warn">
+            <div class="value" id="pending-unfollow-count">0</div>
+            <div class="label">Pending（待取关）</div>
+          </div>
+          <div class="stat success">
+            <div class="value" id="pending-unfollow-done">0</div>
+            <div class="label">Unfollowed（已取关）</div>
+          </div>
+          <div class="stat danger">
+            <div class="value" id="pending-unfollow-failed">0</div>
+            <div class="label">Failed（失败）</div>
+          </div>
         </div>
       </div>
     </div>
