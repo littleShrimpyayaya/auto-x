@@ -1150,33 +1150,30 @@ export class BrowserClient {
 
     await this.page!.waitForTimeout(800);
 
-    // 根据输入框类型选择填充方式（互斥，避免重复输入）
-    const inputTag = await this.page!.evaluate(() => {
-      const el = document.activeElement;
-      if (!el) return 'none';
-      const tag = el.tagName;
-      if (tag === 'TEXTAREA' || tag === 'INPUT') return 'fillable';
-      if (el.getAttribute('contenteditable') === 'true') return 'editable';
-      return tag;
-    });
-
-    if (inputTag === 'fillable') {
-      // textarea / input — 用 fill 一次性填入
-      const textarea = this.page!.locator('[data-testid="tweetTextarea_0"], [role="textbox"]').first();
-      if (await textarea.count() > 0) {
-        await textarea.fill(text);
+    // X.com 是 React 应用，必须用键盘逐字输入才能触发 React onChange 事件
+    // fill() 虽然能填入文字，但 React 内部状态不会更新，导致发空推文
+    const inputEl = this.page!.locator('[data-testid="tweetTextarea_0"], [role="textbox"]').first();
+    if (await inputEl.count() > 0) {
+      await inputEl.click();
+      // 清除可能已有的内容
+      await this.page!.keyboard.press('Control+a');
+      await this.page!.keyboard.press('Delete');
+      await this.page!.waitForTimeout(100);
+      // 逐字输入（[...text] 正确处理 emoji 等多字节字符）
+      const chars = [...text];
+      for (const ch of chars) {
+        await this.page!.keyboard.type(ch, { delay: 30 + Math.random() * 50 });
       }
+      await this.page!.waitForTimeout(300);
     } else {
-      // contenteditable div — 用键盘逐字符输入以触发 React 事件
-      for (let i = 0; i < text.length; i++) {
-        await this.page!.keyboard.type(text[i], { delay: 30 + Math.random() * 50 });
-      }
+      console.warn('[BrowserClient] 未找到发帖输入框');
+      return { ok: false };
     }
 
     await this.page!.waitForTimeout(500 + Math.random() * 500);
 
     // 点击发送按钮
-    const posted = await this.page!.evaluate(() => {
+    const btnClicked = await this.page!.evaluate(() => {
       // 方式 1：按 data-testid
       for (const sel of [
         '[data-testid="tweetButton"]',
@@ -1207,10 +1204,39 @@ export class BrowserClient {
       return false;
     });
 
-    if (posted) {
-      console.log('[BrowserClient] 发帖成功');
-    } else {
+    if (!btnClicked) {
       console.warn('[BrowserClient] 未找到发送按钮');
+      return { ok: false };
+    }
+
+    // 等待发送完成：检测推文框清空或 toast 提示出现
+    let posted = false;
+    for (let wait = 0; wait < 30; wait++) {
+      await this.page!.waitForTimeout(500);
+      const done = await this.page!.evaluate(() => {
+        // 检测 1：发帖框内容被清空（推文已发出）
+        const editor = document.querySelector('[data-testid="tweetTextarea_0"], [role="textbox"][data-testid*="tweetTextarea"]');
+        if (editor) {
+          const text = (editor as HTMLElement).innerText || (editor as HTMLInputElement).value || '';
+          if (!text.trim()) return true;
+        }
+        // 检测 2：toast / snackbar 提示
+        const toast = document.querySelector('[data-testid="toast"], [role="alert"], [data-testid="snackbar"]');
+        if (toast) return true;
+        // 检测 3：发帖按钮恢复可用（说明上一条已发送）
+        const btn = document.querySelector('[data-testid="tweetButton"][disabled]');
+        if (!btn) {
+          // 没找到 disabled 的按钮，可能是另一个信号...
+        }
+        return false;
+      });
+      if (done) { posted = true; break; }
+    }
+
+    if (posted) {
+      console.log('[BrowserClient] 发帖成功（检测到确认信号）');
+    } else {
+      console.warn('[BrowserClient] 发送后未检测到确认信号，可能未发出');
     }
 
     // 等待发送完成
