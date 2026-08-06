@@ -1,4 +1,5 @@
 import { XClient } from './x-client.js';
+import { BrowserClient } from './browser-client.js';
 import { UserRepository } from './user-repository.js';
 import type { XUser, SyncResult, AutoFollowResult, ProcessResult } from './types.js';
 
@@ -135,21 +136,29 @@ export class Service {
   }
 
   async computeFollowBackWithDetails(userId: string): Promise<Array<{ userId: string; username: string; name: string }>> {
-    // 先同步数据
+    // 直接用浏览器扫描 followers 页面中有 "Follow" 按钮的用户
+    if (this.xClient instanceof BrowserClient) {
+      const result = await (this.xClient as BrowserClient).scanFollowBack();
+
+      // 同步到 pending_follow 表
+      const ids = result.map(u => u.userId).filter(id => id !== '0');
+      if (ids.length > 0) {
+        await this.repo.upsertPendingFollow(ids);
+      }
+
+      return result;
+    }
+
+    // API 模式 fallback
     await this.syncFollowers(userId);
     await this.syncFollowing(userId);
-
     const followerIds = await this.repo.getRelationshipIds(userId, 'follower');
     const followingIds = new Set(await this.repo.getRelationshipIds(userId, 'following'));
-
     const needFollow: string[] = [];
     for (const fid of followerIds) {
       if (!followingIds.has(fid)) needFollow.push(fid);
     }
-
     await this.repo.upsertPendingFollow(needFollow);
-
-    // 从 DB 获取用户详情
     const result: Array<{ userId: string; username: string; name: string }> = [];
     for (const id of needFollow) {
       const u = await this.repo.getUser(id);

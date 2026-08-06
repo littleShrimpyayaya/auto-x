@@ -369,6 +369,138 @@ export class BrowserClient {
     };
   }
 
+  // ── 扫描待回关用户 ──────────────────────────────────
+
+  /** 扫描 followers 页面，找出所有显示 Follow 按钮（未回关）的用户 */
+  async scanFollowBack(): Promise<Array<{ userId: string; username: string; name: string }>> {
+    this.ensureReady();
+    const username = this.myUsername;
+    if (!username) throw new Error('未登录');
+
+    const url = `https://x.com/${username}/followers`;
+    console.log(`[BrowserClient] 扫描待回关: ${url}`);
+
+    // 网络拦截获取用户 ID（username ↔ id 双向映射）
+    const idMap = new Map<string, string>();
+    const onResponse = async (response: any) => {
+      const reqUrl = response.url();
+      if (!reqUrl.includes('/graphql/')) return;
+      try {
+        const json = await response.json();
+        for (const u of extractGraphQLUsers(json)) {
+          if (u.id && u.username) {
+            idMap.set(u.username, u.id);
+            idMap.set(u.id, u.username);
+          }
+        }
+      } catch { /* ignore */ }
+    };
+    this.page!.on('response', onResponse);
+
+    await this.page!.goto(url, { waitUntil: 'domcontentloaded', timeout: 30000 });
+    await this.page!.waitForTimeout(3000);
+
+    try {
+      await this.page!.waitForSelector('[data-testid="UserCell"]', { timeout: 10000 });
+    } catch {
+      this.page!.off('response', onResponse);
+      return [];
+    }
+
+    const needFollow: Array<{ userId: string; username: string; name: string }> = [];
+    const seen = new Set<string>();
+    let prevCount = 0;
+    let noNewCount = 0;
+    const MAX_SCROLLS = 800;
+    const MAX_NO_NEW = 8;
+
+    for (let i = 0; i < MAX_SCROLLS; i++) {
+      // 扫描当前页面上有 "Follow" 按钮的用户
+      const batch = await this.page!.evaluate(() => {
+        const results: Array<{ username: string; name: string }> = [];
+        const cells = document.querySelectorAll('[data-testid="UserCell"]');
+
+        for (const cell of cells) {
+          // 查找 Follow 按钮（排除 Following/正在关注/Pending）
+          const buttons = cell.querySelectorAll('[role="button"]');
+          let needsFollow = false;
+          for (const btn of buttons) {
+            const text = (btn.textContent || '').trim();
+            const aria = (btn as HTMLElement).getAttribute('aria-label') || '';
+            // 是 "Follow" 而不是 "Following"/"Pending"/"Unfollow"
+            if (
+              (text.length > 0 && text !== 'Following' && text !== '正在关注' && text !== 'Unfollow' && text !== 'Pending' &&
+               !aria.includes('Following') && !aria.includes('Unfollow')) &&
+              (text.toLowerCase().includes('follow') || aria.toLowerCase().includes('follow'))
+            ) {
+              needsFollow = true;
+              break;
+            }
+          }
+          if (!needsFollow) continue;
+
+          // 提取用户名
+          const links = cell.querySelectorAll('a[role="link"]');
+          let username = '';
+          let name = '';
+          for (const link of links) {
+            const href = link.getAttribute('href') || '';
+            const m = href.match(/^\/(\w+)$/);
+            if (m && !['home','explore','notifications','messages','i'].includes(m[1])) {
+              username = m[1];
+              const spans = link.querySelectorAll('span');
+              for (const span of spans) {
+                const t = (span.textContent || '').trim();
+                if (t.startsWith('@')) continue;
+                if (t && t.length < 100 && !name) name = t;
+              }
+              if (username) break;
+            }
+          }
+          if (username) {
+            results.push({ username, name: name || username });
+          }
+        }
+        return results;
+      });
+
+      for (const user of batch) {
+        if (!seen.has(user.username)) {
+          seen.add(user.username);
+          const gqlId = idMap.get(user.username) || '0';
+          needFollow.push({
+            userId: gqlId || '0',
+            username: user.username,
+            name: user.name,
+          });
+        }
+      }
+
+      if (batch.length === 0 || seen.size <= prevCount) {
+        noNewCount++;
+        if (noNewCount >= MAX_NO_NEW) break;
+      } else {
+        noNewCount = 0;
+      }
+      prevCount = seen.size;
+
+      // 滚动加载
+      for (let r = 0; r < 3; r++) {
+        await this.scrollUserList();
+        await this.page!.waitForTimeout(600);
+      }
+      await this.page!.waitForTimeout(2000 + Math.random() * 1000);
+
+      if (i % 10 === 0) {
+        console.log(`[BrowserClient] 扫描进度: ${needFollow.length} 个待回关 (已查看 ${seen.size} 个粉丝)`);
+      }
+    }
+
+    this.page!.off('response', onResponse);
+    console.log(`[BrowserClient] 扫描完成: ${needFollow.length} 个待回关`);
+    return needFollow;
+  }
+
   // ── 分页获取粉丝/关注 ────────────────────────────────
 
   async getFollowers(userId: string, opts?: { maxResults?: number; paginationToken?: string }): Promise<PaginatedUsers> {
