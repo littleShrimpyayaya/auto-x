@@ -447,8 +447,8 @@ export class BrowserClient {
     const seen = new Set<string>();
     let prevCount = 0;
     let noNewCount = 0;
-    const MAX_SCROLLS = 500;
-    const MAX_NO_NEW = 5;
+    const MAX_SCROLLS = 800;
+    const MAX_NO_NEW = 8;
 
     for (let i = 0; i < MAX_SCROLLS; i++) {
       const batch = await this.extractUsersFromPage(type);
@@ -482,8 +482,16 @@ export class BrowserClient {
       }
       prevCount = seen.size;
 
-      await this.scrollUserList();
-      await this.page!.waitForTimeout(1500 + Math.random() * 1000);
+      // 多次滚动 + 更长等待，确保 X 懒加载触发
+      for (let r = 0; r < 3; r++) {
+        await this.scrollUserList();
+        await this.page!.waitForTimeout(600);
+      }
+      await this.page!.waitForTimeout(2500 + Math.random() * 1500);
+
+      if (i % 10 === 0) {
+        console.log(`[BrowserClient] ${type} 进度: ${seen.size} 个用户`);
+      }
     }
 
     this.page!.off('response', onResponse);

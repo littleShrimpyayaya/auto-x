@@ -172,24 +172,6 @@
         </div>
       </div>
 
-      <!-- Unfollow Queue -->
-      <div class="section">
-        <div class="section-header">
-          <h3>🔓 Unfollow Queue</h3>
-          <span style="font-size: 13px; color: #888;" id="unfollow-queue-count"></span>
-        </div>
-        <div class="section-desc">你关注了、但对方没关注你的人</div>
-        <button class="btn-warning" onclick="computeUnfollow()" id="btn-compute-unfollow" style="margin-bottom: 10px;">Compute Unfollow</button>
-        <span id="compute-unfollow-status" style="font-size: 12px; color: #888; margin-left: 8px;"></span>
-        <div id="unfollow-list" style="display: none; max-height: 300px; overflow-y: auto; border: 1px solid #eee; border-radius: 6px;">
-          <div style="padding: 8px 12px; border-bottom: 1px solid #eee; background: #fafafa; display: flex; align-items: center; gap: 8px; position: sticky; top: 0;">
-            <input type="checkbox" id="unfollow-select-all" onchange="toggleSelectAll('unfollow')" style="width: 16px; height: 16px;">
-            <span style="font-size: 13px; color: #666;">Select All</span>
-            <button class="btn-danger" onclick="batchUnfollow()" style="margin-left: auto; font-size: 12px; padding: 6px 14px;">Unfollow Selected</button>
-          </div>
-          <div id="unfollow-list-items"></div>
-        </div>
-      </div>
     </div>
 
     <div class="card" id="auto-config-card">
@@ -240,58 +222,6 @@
 
       <button class="btn-primary" onclick="saveAutoConfig()">Save Settings</button>
       <span id="auto-config-status" style="font-size: 13px; color: #888; margin-left: 12px;"></span>
-    </div>
-
-    <div class="card">
-      <h2>Operations</h2>
-
-      <div class="section" id="sync-section">
-        <div class="section-header">
-          <h3>Sync Data</h3>
-          <span class="badge pending" id="sync-badge" style="display: none;">Running</span>
-        </div>
-        <div class="section-desc">Pull latest followers and following lists from X API. This populates the pending queues.</div>
-        <div class="section-row">
-          <button class="btn-primary" id="btn-sync-followers" onclick="doSync('followers')">Sync Followers</button>
-          <button class="btn-primary" id="btn-sync-following" onclick="doSync('following')">Sync Following</button>
-          <button class="btn-danger" id="btn-stop-task" onclick="doStop()" style="display: none;">Stop</button>
-        </div>
-        <div class="section-status idle" id="sync-status">Idle</div>
-      </div>
-
-      <div class="section" id="follow-section">
-        <div class="section-header">
-          <h3>Auto Follow-back</h3>
-          <span class="badge pending" id="follow-badge" style="display: none;">0 pending</span>
-        </div>
-        <div class="section-desc">Follow users who follow you. Process one at a time to avoid rate limits.</div>
-        <div class="section-row">
-          <button class="btn-success" id="btn-follow-one" onclick="doProcessOne('follow')">Follow One</button>
-          <span style="color: #888;">|</span>
-          <span>Interval:</span>
-          <input type="number" id="follow-interval-input" value="30" min="5" step="5">
-          <span>sec</span>
-          <button class="btn-outline" id="btn-follow-toggle" onclick="toggleFollowSchedule()">Start Auto</button>
-        </div>
-        <div class="section-status idle" id="follow-status">Idle</div>
-      </div>
-
-      <div class="section" id="unfollow-section">
-        <div class="section-header">
-          <h3>Auto Unfollow</h3>
-          <span class="badge pending" id="unfollow-badge" style="display: none;">0 pending</span>
-        </div>
-        <div class="section-desc">Unfollow users who don't follow you back. Process one at a time.</div>
-        <div class="section-row">
-          <button class="btn-warning" id="btn-unfollow-one" onclick="doProcessOne('unfollow')">Unfollow One</button>
-          <span style="color: #888;">|</span>
-          <span>Interval:</span>
-          <input type="number" id="unfollow-interval-input" value="30" min="5" step="5">
-          <span>sec</span>
-          <button class="btn-outline" id="btn-unfollow-toggle" onclick="toggleUnfollowSchedule()">Start Auto</button>
-        </div>
-        <div class="section-status idle" id="unfollow-status">Idle</div>
-      </div>
     </div>
 
     <div class="card" id="post-card">
@@ -411,7 +341,6 @@
     // ── Compute & Batch ────────────────────────────────────
 
     let followListData = [];
-    let unfollowListData = [];
 
     function renderUserList(containerId, users, type) {
       const container = document.getElementById(containerId);
@@ -437,11 +366,10 @@
     }
 
     function getSelectedUserIds(type) {
-      const userIds = [];
-      const list = type === 'follow' ? followListData : unfollowListData;
+      const userIds: string[] = [];
       document.querySelectorAll('.' + type + '-checkbox:checked').forEach(cb => {
-        const idx = parseInt(cb.dataset.idx);
-        if (list[idx]) userIds.push(list[idx].userId);
+        const idx = parseInt((cb as any).dataset.idx);
+        if (followListData[idx]) userIds.push(followListData[idx].userId);
       });
       return userIds;
     }
@@ -469,29 +397,6 @@
       setTimeout(() => { statusEl.textContent = ''; }, 5000);
     }
 
-    async function computeUnfollow() {
-      const btn = document.getElementById('btn-compute-unfollow');
-      const statusEl = document.getElementById('compute-unfollow-status');
-      btn.textContent = 'Computing...';
-      btn.disabled = true;
-
-      try {
-        const res = await fetch('/api/compute-unfollow', { method: 'POST' });
-        const data = await res.json();
-        if (data.ok) {
-          unfollowListData = data.users;
-          renderUserList('unfollow-list-items', unfollowListData, 'unfollow');
-          document.getElementById('unfollow-list').style.display = 'block';
-          statusEl.textContent = 'Found ' + data.count + ' users';
-          statusEl.style.color = '#00ba7c';
-          refreshStatus();
-        }
-      } catch { statusEl.textContent = 'Error'; }
-      btn.textContent = 'Compute Unfollow';
-      btn.disabled = false;
-      setTimeout(() => { statusEl.textContent = ''; }, 5000);
-    }
-
     async function batchFollow() {
       const userIds = getSelectedUserIds('follow');
       if (!userIds.length) { showToast('No users selected', 'error'); return; }
@@ -505,22 +410,6 @@
       if (data.ok) {
         showToast('Done: ' + data.done + ', Failed: ' + data.failed, data.failed ? 'error' : 'success');
         computeFollowBack(); // refresh list
-      }
-    }
-
-    async function batchUnfollow() {
-      const userIds = getSelectedUserIds('unfollow');
-      if (!userIds.length) { showToast('No users selected', 'error'); return; }
-      addLog('Batch unfollowing ' + userIds.length + ' users...');
-      const res = await fetch('/api/batch-unfollow', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ userIds }),
-      });
-      const data = await res.json();
-      if (data.ok) {
-        showToast('Done: ' + data.done + ', Failed: ' + data.failed, data.failed ? 'error' : 'success');
-        computeUnfollow(); // refresh list
       }
     }
 
@@ -637,135 +526,6 @@
       }
     }
 
-    async function doSync(type) {
-      const url = type === 'followers' ? '/api/sync-followers' : '/api/sync-following';
-      addLog('Starting sync ' + type + '...');
-      await api(url, 'POST');
-    }
-
-    async function doStop() {
-      addLog('Stopping current task...');
-      await api('/api/stop', 'POST');
-    }
-
-    async function doProcessOne(type) {
-      const url = type === 'follow' ? '/api/process-follow' : '/api/process-unfollow';
-      const label = type === 'follow' ? 'follow-back' : 'unfollow';
-      addLog('Processing one pending ' + label + '...');
-      const result = await api(url, 'POST');
-      if (result.ok && result.data) {
-        // Check if there was nothing to process
-      }
-    }
-
-    async function toggleFollowSchedule() {
-      if (lastData?.processFollow?.enabled) {
-        await api('/api/process-follow/stop', 'POST');
-      } else {
-        const interval = parseInt(document.getElementById('follow-interval-input').value);
-        if (interval < 5) { showToast('Interval must be at least 5 seconds', 'error'); return; }
-        await api('/api/process-follow/start', 'POST', { interval });
-      }
-    }
-
-    async function toggleUnfollowSchedule() {
-      if (lastData?.processUnfollow?.enabled) {
-        await api('/api/process-unfollow/stop', 'POST');
-      } else {
-        const interval = parseInt(document.getElementById('unfollow-interval-input').value);
-        if (interval < 5) { showToast('Interval must be at least 5 seconds', 'error'); return; }
-        await api('/api/process-unfollow/start', 'POST', { interval });
-      }
-    }
-
-    function updateButtonStates(data) {
-      const isRunning = data.task?.status === 'running';
-      const runningType = data.task?.type;
-
-      // Sync buttons: disabled when any task is running
-      document.getElementById('btn-sync-followers').disabled = isRunning;
-      document.getElementById('btn-sync-following').disabled = isRunning;
-
-      // Stop button: only visible when task is running
-      document.getElementById('btn-stop-task').style.display = isRunning ? 'inline-block' : 'none';
-
-      // Sync status
-      const syncStatus = document.getElementById('sync-status');
-      const syncBadge = document.getElementById('sync-badge');
-      if (isRunning && (runningType === 'sync-followers' || runningType === 'sync-following')) {
-        syncStatus.className = 'section-status running';
-        syncStatus.textContent = data.task.message || 'Syncing...';
-        syncBadge.style.display = 'inline-block';
-        syncBadge.textContent = 'Running';
-      } else {
-        syncStatus.className = 'section-status idle';
-        syncStatus.textContent = 'Idle';
-        syncBadge.style.display = 'none';
-      }
-
-      // Follow-back section
-      const followPending = data.pending?.followPending ?? 0;
-      const followBtn = document.getElementById('btn-follow-one');
-      const followToggle = document.getElementById('btn-follow-toggle');
-      const followBadge = document.getElementById('follow-badge');
-      const followStatus = document.getElementById('follow-status');
-
-      followBtn.disabled = isRunning || followPending === 0;
-      if (followPending === 0 && !isRunning) {
-        followBtn.title = 'No pending users to follow';
-      } else {
-        followBtn.title = '';
-      }
-
-      if (data.processFollow?.enabled) {
-        followToggle.textContent = 'Stop Auto';
-        followToggle.className = 'btn-outline active';
-        followBadge.style.display = 'inline-block';
-        followBadge.textContent = followPending + ' pending';
-        followBadge.className = 'badge running';
-        followStatus.className = 'section-status active';
-        followStatus.textContent = 'Auto running every ' + data.processFollow.intervalSeconds + 's';
-      } else {
-        followToggle.textContent = 'Start Auto';
-        followToggle.className = 'btn-outline';
-        followBadge.style.display = followPending > 0 ? 'inline-block' : 'none';
-        followBadge.textContent = followPending + ' pending';
-        followBadge.className = 'badge pending';
-        followStatus.className = 'section-status idle';
-        followStatus.textContent = followPending > 0 ? followPending + ' users waiting to be followed' : 'No pending users';
-      }
-
-      // Unfollow section
-      const unfollowPending = data.pending?.unfollowPending ?? 0;
-      const unfollowBtn = document.getElementById('btn-unfollow-one');
-      const unfollowToggle = document.getElementById('btn-unfollow-toggle');
-      const unfollowBadge = document.getElementById('unfollow-badge');
-      const unfollowStatus = document.getElementById('unfollow-status');
-
-      unfollowBtn.disabled = isRunning || unfollowPending === 0;
-      if (unfollowPending === 0 && !isRunning) {
-        unfollowBtn.title = 'No pending users to unfollow';
-      } else {
-        unfollowBtn.title = '';
-      }
-
-      if (data.processUnfollow?.enabled) {
-        unfollowToggle.textContent = 'Stop Auto';
-        unfollowToggle.className = 'btn-outline active';
-        unfollowBadge.style.display = 'inline-block';
-        unfollowBadge.textContent = unfollowPending + ' pending';
-        unfollowBadge.className = 'badge running';
-        unfollowStatus.className = 'section-status active';
-        unfollowStatus.textContent = 'Auto running every ' + data.processUnfollow.intervalSeconds + 's';
-      } else {
-        unfollowToggle.textContent = 'Start Auto';
-        unfollowToggle.className = 'btn-outline';
-        unfollowBadge.style.display = unfollowPending > 0 ? 'inline-block' : 'none';
-        unfollowBadge.textContent = unfollowPending + ' pending';
-        unfollowBadge.className = 'badge pending';
-        unfollowStatus.className = 'section-status idle';
-        unfollowStatus.textContent = unfollowPending > 0 ? unfollowPending + ' users waiting to be unfollowed' : 'No pending users';
-      }
     }
 
     async function refreshStatus() {
@@ -828,21 +588,16 @@
           disconnectedDiv.style.display = 'block';
         }
 
-        // Dashboard queue counts
+        // Dashboard queue count
         if (data.pending) {
           document.getElementById('follow-queue-count').textContent =
             `Pending: ${data.pending.followPending} | Done: ${data.pending.followCompleted} | Failed: ${data.pending.followFailed}`;
-          document.getElementById('unfollow-queue-count').textContent =
-            `Pending: ${data.pending.unfollowPending} | Done: ${data.pending.unfollowCompleted} | Failed: ${data.pending.unfollowFailed}`;
         }
 
         // Task status
         const dot = document.getElementById('status-dot');
         dot.className = 'status-dot ' + data.task.status;
         document.getElementById('status-text').textContent = data.task.message || data.task.status;
-
-        // Button states
-        updateButtonStates(data);
 
         // Post schedule
         updatePostScheduleUI(data);
