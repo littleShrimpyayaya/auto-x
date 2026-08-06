@@ -319,6 +319,15 @@ export class TaskManager {
     console.log('[Post] 定时发帖已停止');
   }
 
+  async refreshMe(): Promise<XUser | null> {
+    if (this.service['xClient'] instanceof BrowserClient) {
+      const me = await (this.service['xClient'] as BrowserClient).getMyUser();
+      if (me) this.setMe(me);
+      return me;
+    }
+    return null;
+  }
+
   async getStatus(): Promise<StatusInfo> {
     let followerCount = 0;
     let followingCount = 0;

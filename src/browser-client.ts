@@ -13,6 +13,70 @@ chromium.use(StealthPlugin());
 
 const USER_PROFILE_DIR = 'data/browser-profile';
 
+// 从 GraphQL 响应中提取用户数据（类似旧插件 injector.js 的逻辑）
+function extractGraphQLUsers(json: any): Array<{ id: string; username: string; name: string }> {
+  const users: Array<{ id: string; username: string; name: string }> = [];
+  const seen = new Set<string>();
+
+  function pushUser(result: any) {
+    if (!result || typeof result !== 'object') return;
+    // 解包嵌套
+    if (result.result?.rest_id) result = result.result;
+    if (result.user_results?.result) result = result.user_results.result;
+
+    const restId = result.rest_id || result.id_str || result.id;
+    const legacy = result.legacy || {};
+    const screenName = legacy.screen_name || result.screen_name || result.username;
+
+    if (!restId || !screenName) return;
+    const id = String(restId);
+    if (seen.has(id)) return;
+    seen.add(id);
+
+    users.push({
+      id,
+      username: screenName,
+      name: legacy.name || result.name || screenName,
+    });
+  }
+
+  function walk(obj: any, depth: number) {
+    if (!obj || depth > 15) return;
+    if (Array.isArray(obj)) {
+      for (const item of obj) walk(item, depth + 1);
+      return;
+    }
+    if (typeof obj !== 'object') return;
+
+    if (obj.__typename === 'User' || (obj.rest_id && obj.legacy)) {
+      pushUser(obj);
+    }
+
+    // 遍历 timeline instructions 中的 entries
+    const instructions =
+      obj?.data?.user?.result?.timeline?.timeline?.instructions ||
+      obj?.data?.user?.result?.timeline_v2?.timeline?.instructions ||
+      [];
+
+    for (const instr of instructions) {
+      for (const entry of instr.entries || []) {
+        const r =
+          entry.content?.itemContent?.user_results?.result ||
+          entry.content?.itemContent?.user?.result ||
+          entry.itemContent?.user_results?.result;
+        if (r) pushUser(r);
+      }
+    }
+
+    for (const v of Object.values(obj)) {
+      if (v && typeof v === 'object') walk(v, depth + 1);
+    }
+  }
+
+  walk(json, 0);
+  return users;
+}
+
 export class BrowserClient {
   private browser: Browser | null = null;
   private context: BrowserContext | null = null;
@@ -164,7 +228,7 @@ export class BrowserClient {
         postCount: 0,
       };
 
-      // 找 followers/following 链接中的数字
+      // 找 followers/following/posts 链接中的数字
       const links = document.querySelectorAll('a[href*="/verified_followers"], a[href$="/followers"], a[href$="/following"]');
       links.forEach((a) => {
         const href = a.getAttribute('href') || '';
@@ -177,6 +241,35 @@ export class BrowserClient {
           metrics.followingCount = Math.max(metrics.followingCount, num);
         }
       });
+
+      // Posts 数字：X 主页导航中有 "Posts" 标签带数字
+      const navLinks = document.querySelectorAll('a[role="tab"]');
+      navLinks.forEach((a) => {
+        const href = a.getAttribute('href') || '';
+        const text = a.textContent || '';
+        const numStr = (text.match(/[\d,]+/) || ['0'])[0].replace(/,/g, '');
+        const num = parseInt(numStr, 10) || 0;
+        if ((href.endsWith('/posts') || href.includes('/posts?')) && num > 0) {
+          metrics.postCount = Math.max(metrics.postCount, num);
+        }
+      });
+
+      // 备用：从页面任意包含 "post" 或 "tweet" 计数的元素获取
+      if (metrics.postCount === 0) {
+        const allLinks = document.querySelectorAll('a[href]');
+        for (const a of allLinks) {
+          const href = a.getAttribute('href') || '';
+          if (href.match(/\/(with_replies|posts|media|likes)$/)) {
+            const text = a.textContent || '';
+            const numStr = (text.match(/[\d,]+/) || ['0'])[0].replace(/,/g, '');
+            const num = parseInt(numStr, 10) || 0;
+            if (num > 0) {
+              metrics.postCount = Math.max(metrics.postCount, num);
+              break;
+            }
+          }
+        }
+      }
 
       // 获取名称和描述
       const nameEl = document.querySelector('[data-testid="UserName"]');
@@ -194,18 +287,18 @@ export class BrowserClient {
       return { name, description, profileImageUrl, verified, metrics };
     }, this.myUsername);
 
-    // 尝试从页面获取 user ID
-    const userId = await this.page!.evaluate(() => {
-      // 从 React 内部状态或 data 属性中获取
-      const scripts = document.querySelectorAll('script[type="application/json"]');
+    // 尝试从页面获取 user ID（多种 fallback）
+    let userId = await this.page!.evaluate(() => {
+      // 方式 1：从页面 JSON 数据中提取
+      const scripts = document.querySelectorAll('script[type="application/json"], script[type="application/ld+json"]');
       for (const s of scripts) {
         try {
           const data = JSON.parse(s.textContent || '');
-          // 在 JSON 数据中搜索 user id
           const walk = (obj: any, depth: number): string | null => {
-            if (!obj || depth > 10) return null;
+            if (!obj || depth > 12) return null;
             if (typeof obj !== 'object') return null;
             if (obj.rest_id && obj.legacy?.screen_name) return String(obj.rest_id);
+            if (obj.id_str && obj.screen_name) return String(obj.id_str);
             if (Array.isArray(obj)) {
               for (const item of obj) { const r = walk(item, depth + 1); if (r) return r; }
             } else {
@@ -213,11 +306,46 @@ export class BrowserClient {
             }
             return null;
           };
-          return walk(data, 0);
+          const found = walk(data, 0);
+          if (found) return found;
         } catch { /* continue */ }
       }
       return null;
     });
+
+    // 方式 2：如果上面没找到，通过 API 获取
+    if (!userId) {
+      try {
+        const apiResult = await this.page!.evaluate(async () => {
+          try {
+            const res = await fetch('https://x.com/i/api/1.1/account/verify_credentials.json', {
+              credentials: 'include',
+            });
+            if (res.ok) {
+              const json = await res.json();
+              return json.id_str || String(json.id);
+            }
+          } catch { /* ignore */ }
+          return null;
+        });
+        userId = apiResult;
+      } catch { /* ignore */ }
+    }
+
+    // 方式 3：从 DOM 中的任意 user ID 链接提取
+    if (!userId) {
+      userId = await this.page!.evaluate(() => {
+        const links = document.querySelectorAll('a[href*="/status/"]');
+        for (const link of links) {
+          const href = link.getAttribute('href') || '';
+          // 不太可靠，跳过
+        }
+        // 尝试从 window 全局中获取
+        const win = window as any;
+        if (win.__META_DATA__?.user_id) return String(win.__META_DATA__?.user_id);
+        return null;
+      });
+    }
 
     if (userId) {
       this.myId = userId;
@@ -286,6 +414,24 @@ export class BrowserClient {
     const url = `https://x.com/${username}/${type}`;
     console.log(`[BrowserClient] 开始遍历 ${type}: ${url}`);
 
+    // 网络拦截：捕获 GraphQL 响应获取完整用户数据（含 ID）
+    const graphqlUsers = new Map<string, { id: string; username: string; name: string }>();
+    const onResponse = async (response: any) => {
+      const reqUrl = response.url();
+      if (!reqUrl.includes('/graphql/')) return;
+      try {
+        const json = await response.json();
+        const extracted = extractGraphQLUsers(json);
+        for (const u of extracted) {
+          if (u.id && u.username) {
+            graphqlUsers.set(u.username, u);
+            graphqlUsers.set(u.id, u);
+          }
+        }
+      } catch { /* ignore non-JSON */ }
+    };
+    this.page!.on('response', onResponse);
+
     await this.page!.goto(url, { waitUntil: 'domcontentloaded', timeout: 30000 });
     await this.page!.waitForTimeout(3000);
 
@@ -294,24 +440,29 @@ export class BrowserClient {
       await this.page!.waitForSelector('[data-testid="UserCell"]', { timeout: 10000 });
     } catch {
       console.warn(`[BrowserClient] ${type} 页面未找到用户列表`);
+      this.page!.off('response', onResponse);
       return;
     }
 
     const seen = new Set<string>();
     let prevCount = 0;
     let noNewCount = 0;
-    const MAX_SCROLLS = 500; // 安全上限
-    const MAX_NO_NEW = 5;    // 连续无新数据退出
+    const MAX_SCROLLS = 500;
+    const MAX_NO_NEW = 5;
 
     for (let i = 0; i < MAX_SCROLLS; i++) {
-      // 提取当前页面的所有用户
       const batch = await this.extractUsersFromPage(type);
 
       for (const user of batch) {
+        // 用 GraphQL 数据补充 ID
+        const gql = graphqlUsers.get(user.username) || graphqlUsers.get(user.id);
+        if (gql && user.id === '0') {
+          user.id = gql.id;
+        }
+
         const key = user.id !== '0' ? user.id : user.username;
         if (!seen.has(key)) {
           seen.add(key);
-          // 缓存 ID ↔ username 映射
           if (user.id !== '0' && user.username) {
             this.usernameCache.set(user.id, user.username);
             this.idCache.set(user.username, user.id);
@@ -320,7 +471,6 @@ export class BrowserClient {
         }
       }
 
-      // 检测是否已到底
       if (batch.length === 0 || seen.size <= prevCount) {
         noNewCount++;
         if (noNewCount >= MAX_NO_NEW) {
@@ -332,10 +482,11 @@ export class BrowserClient {
       }
       prevCount = seen.size;
 
-      // 滚动加载更多
       await this.scrollUserList();
       await this.page!.waitForTimeout(1500 + Math.random() * 1000);
     }
+
+    this.page!.off('response', onResponse);
   }
 
   private async extractUsersFromPage(type: 'followers' | 'following'): Promise<XUser[]> {
@@ -421,15 +572,29 @@ export class BrowserClient {
   private async scrollUserList(): Promise<void> {
     if (!this.page) return;
 
+    // 将最后一个 UserCell 滚动到视图中，触发 X 的无限加载
     await this.page.evaluate(() => {
-      // 找到可滚动的用户列表容器
-      const scrollable = document.querySelector('[data-viewportview="true"]') ||
-        document.querySelector('div[style*="overflow"]') ||
+      const cells = document.querySelectorAll('[data-testid="UserCell"]');
+      if (cells.length > 0) {
+        const last = cells[cells.length - 1];
+        last.scrollIntoView({ behavior: 'instant', block: 'center' });
+      }
+    });
+
+    // 额外滚动一点距离确保触发加载
+    await this.page!.mouse.wheel(0, 300);
+    await this.page!.waitForTimeout(500);
+
+    // 再次尝试找滚动容器滚到底
+    await this.page.evaluate(() => {
+      // X.com 的 followers 列表通常在这个区域
+      const container =
+        document.querySelector('[aria-label*="Timeline"]') ||
+        document.querySelector('section[role="region"] div[style*="overflow"]') ||
+        document.querySelector('div[data-testid="primaryColumn"] section') ||
         document.querySelector('[role="region"]');
-      if (scrollable) {
-        scrollable.scrollTop = scrollable.scrollHeight;
-      } else {
-        window.scrollTo(0, document.body.scrollHeight);
+      if (container) {
+        container.scrollTop = container.scrollHeight;
       }
     });
   }
@@ -440,16 +605,8 @@ export class BrowserClient {
     this.ensureReady();
     const username = this.resolveUsername(targetUserId);
 
-    // 检查活跃时段
-    if (!isActiveHours(this.config)) {
-      console.log('[BrowserClient] 当前不在活跃时段，延迟操作');
-      await this.waitUntilActive();
-    }
-
     console.log(`[BrowserClient] 关注 @${username}`);
 
-    // 方案 A：从列表页直接点（更高效）
-    // 方案 B：打开 profile 页面再点（更可靠）
     await this.page!.goto(`https://x.com/${username}`, { waitUntil: 'domcontentloaded', timeout: 30000 });
     await this.page!.waitForTimeout(2000 + Math.random() * 2000);
 
@@ -496,11 +653,6 @@ export class BrowserClient {
   async unfollow(_myUserId: string, targetUserId: string): Promise<UnfollowResult> {
     this.ensureReady();
     const username = this.resolveUsername(targetUserId);
-
-    if (!isActiveHours(this.config)) {
-      console.log('[BrowserClient] 当前不在活跃时段，延迟操作');
-      await this.waitUntilActive();
-    }
 
     console.log(`[BrowserClient] 取关 @${username}`);
 
@@ -650,17 +802,18 @@ export class BrowserClient {
   // ── 辅助方法 ─────────────────────────────────────────
 
   private resolveUsername(userId: string): string {
-    // 优先从缓存查找
+    // 缓存查找
     if (this.usernameCache.has(userId)) {
       return this.usernameCache.get(userId)!;
     }
-    // 如果是自己的 ID
-    if (userId === this.myId && this.myUsername) {
+    // 自己的 ID（可能为 '0'）
+    if ((userId === this.myId || userId === '0') && this.myUsername) {
       return this.myUsername;
     }
-    // 如果 userId 看起来像 ID（纯数字），尝试查缓存
-    if (/^\d+$/.test(userId)) {
-      throw new Error(`无法解析 userId=${userId} 对应的用户名，请先同步数据`);
+    // 如果 userId 看起来像纯数字 ID，但我们有 myUsername，就用它
+    // （Sync 总是用当前登录用户的 ID）
+    if (/^\d+$/.test(userId) && this.myUsername) {
+      return this.myUsername;
     }
     // 可能传入的就是 username
     return userId;

@@ -223,6 +223,21 @@ export function createServer(taskManager: TaskManager): express.Express {
     }
   });
 
+  // ── 同步 Account 数据 ──────────────────────────────
+
+  app.post('/api/account/refresh', async (_req, res) => {
+    try {
+      const me = await taskManager.refreshMe();
+      if (me) {
+        res.json({ ok: true, message: 'Account refreshed', user: { username: me.username, publicMetrics: me.publicMetrics } });
+      } else {
+        res.status(400).json({ ok: false, error: 'Not connected or not in browser mode' });
+      }
+    } catch (err: any) {
+      res.status(500).json({ error: err.message });
+    }
+  });
+
   // ── 发帖 ────────────────────────────────────────────
 
   app.post('/api/post', async (req, res) => {

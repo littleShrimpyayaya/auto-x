@@ -43,10 +43,22 @@ export class UserRepository {
   async upsertRelationships(ownerId: string, users: XUser[], type: 'follower' | 'following'): Promise<void> {
     if (users.length === 0) return;
 
+    // 去重：同一批次中 (ownerId, userId, type) 不能重复
+    const seen = new Set<string>();
+    const unique: XUser[] = [];
+    for (const user of users) {
+      const key = `${ownerId}:${user.id}:${type}`;
+      if (!seen.has(key)) {
+        seen.add(key);
+        unique.push(user);
+      }
+    }
+    if (unique.length === 0) return;
+
     const values: any[] = [];
     const placeholders: string[] = [];
     let i = 1;
-    for (const user of users) {
+    for (const user of unique) {
       placeholders.push(`($${i++}, $${i++}, $${i++}, NOW())`);
       values.push(ownerId, user.id, type);
     }
