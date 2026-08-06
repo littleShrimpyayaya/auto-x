@@ -14,12 +14,19 @@ export class Service {
     const existingIds = new Set(await this.repo.getRelationshipIds(userId, 'follower'));
 
     const users: XUser[] = [];
+    const needFollowBack: string[] = [];
+
     for await (const user of this.xClient.iterateFollowers(userId)) {
       if (signal?.aborted) throw new DOMException('Task cancelled', 'AbortError');
 
       users.push(user);
       total++;
       if (!existingIds.has(user.id)) newCount++;
+
+      const isFollowing = user.connectionStatus?.includes('following');
+      if (!isFollowing) {
+        needFollowBack.push(user.id);
+      }
 
       if (users.length >= 100) {
         await this.repo.upsertUsers(users);
@@ -34,7 +41,7 @@ export class Service {
     }
 
     await this.repo.clearSyncCursor(userId, 'followers');
-    await this.computePendingQueues(userId);
+    await this.computePendingFollow(needFollowBack);
     return { total, newCount };
   }
 
@@ -44,12 +51,19 @@ export class Service {
     const existingIds = new Set(await this.repo.getRelationshipIds(userId, 'following'));
 
     const users: XUser[] = [];
+    const needUnfollow: string[] = [];
+
     for await (const user of this.xClient.iterateFollowing(userId)) {
       if (signal?.aborted) throw new DOMException('Task cancelled', 'AbortError');
 
       users.push(user);
       total++;
       if (!existingIds.has(user.id)) newCount++;
+
+      const isFollowedBy = user.connectionStatus?.includes('followed_by');
+      if (!isFollowedBy) {
+        needUnfollow.push(user.id);
+      }
 
       if (users.length >= 100) {
         await this.repo.upsertUsers(users);
@@ -64,7 +78,7 @@ export class Service {
     }
 
     await this.repo.clearSyncCursor(userId, 'following');
-    await this.computePendingQueues(userId);
+    await this.computePendingUnfollow(needUnfollow);
     return { total, newCount };
   }
 
@@ -96,19 +110,12 @@ export class Service {
     return { followed, alreadyFollowing };
   }
 
-  async computePendingQueues(userId: string): Promise<void> {
-    const [followerIds, followingIds] = await Promise.all([
-      this.repo.getRelationshipIds(userId, 'follower'),
-      this.repo.getRelationshipIds(userId, 'following'),
-    ]);
-    const followingSet = new Set(followingIds);
-    const followerSet = new Set(followerIds);
+  async computePendingFollow(followerIds: string[]): Promise<void> {
+    await this.repo.upsertPendingFollow(followerIds);
+  }
 
-    const toFollow = followerIds.filter(id => !followingSet.has(id));
-    const toUnfollow = followingIds.filter(id => !followerSet.has(id));
-
-    await this.repo.upsertPendingFollow(toFollow);
-    await this.repo.upsertPendingUnfollow(toUnfollow);
+  async computePendingUnfollow(followingIds: string[]): Promise<void> {
+    await this.repo.upsertPendingUnfollow(followingIds);
   }
 
   async processOnePendingFollow(userId: string): Promise<ProcessResult> {
