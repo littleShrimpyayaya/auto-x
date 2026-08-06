@@ -1100,21 +1100,24 @@ export class BrowserClient {
 
     await this.page!.waitForTimeout(800);
 
-    // 先尝试用 fill 填入（适用于 textarea）
-    try {
+    // 根据输入框类型选择填充方式（互斥，避免重复输入）
+    const inputTag = await this.page!.evaluate(() => {
+      const el = document.activeElement;
+      if (!el) return 'none';
+      const tag = el.tagName;
+      if (tag === 'TEXTAREA' || tag === 'INPUT') return 'fillable';
+      if (el.getAttribute('contenteditable') === 'true') return 'editable';
+      return tag;
+    });
+
+    if (inputTag === 'fillable') {
+      // textarea / input — 用 fill 一次性填入
       const textarea = this.page!.locator('[data-testid="tweetTextarea_0"], [role="textbox"]').first();
       if (await textarea.count() > 0) {
         await textarea.fill(text);
-        await this.page!.waitForTimeout(500);
       }
-    } catch { /* fallback to keyboard */ }
-
-    // 再用键盘逐字符输入作为补充（适用于 contenteditable）
-    const activeEl = await this.page!.evaluate(() => {
-      const el = document.activeElement;
-      return el ? (el.getAttribute('role') || el.tagName) : 'none';
-    });
-    if (activeEl === 'textbox' || activeEl === 'DIV') {
+    } else {
+      // contenteditable div — 用键盘逐字符输入以触发 React 事件
       for (let i = 0; i < text.length; i++) {
         await this.page!.keyboard.type(text[i], { delay: 30 + Math.random() * 50 });
       }
