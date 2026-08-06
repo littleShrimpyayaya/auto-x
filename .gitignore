@@ -14,3 +14,4 @@ coverage/
 .env.local
 .env.*.local
 .qoder/
+.claude/settings.local.json.tmp.*
