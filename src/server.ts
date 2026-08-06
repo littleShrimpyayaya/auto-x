@@ -306,6 +306,33 @@ export function createServer(taskManager: TaskManager): express.Express {
     }
   });
 
+  // 统一调度：enabled=true 覆盖旧调度并立即发一条，enabled=false 停止
+  app.post('/api/post/schedule', async (req, res) => {
+    try {
+      const { enabled, text, intervalMinutes } = req.body;
+
+      // 先停止旧调度
+      taskManager.stopPostSchedule();
+
+      if (enabled) {
+        if (!text) { res.status(400).json({ error: 'Post text is required' }); return; }
+        if (!intervalMinutes || intervalMinutes < 5) { res.status(400).json({ error: 'Interval must be at least 5 minutes' }); return; }
+
+        // 立即发一条
+        const result = await taskManager.postNow(text);
+
+        // 启动定时
+        taskManager.startPostSchedule(intervalMinutes, text);
+
+        res.json({ ok: true, message: 'Auto post started', posted: result.ok, intervalMinutes });
+      } else {
+        res.json({ ok: true, message: 'Auto post stopped' });
+      }
+    } catch (err: any) {
+      res.status(500).json({ error: err.message });
+    }
+  });
+
   app.post('/api/post/schedule/start', (req, res) => {
     try {
       const { intervalMinutes, templateText } = req.body;

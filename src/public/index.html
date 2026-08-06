@@ -223,11 +223,12 @@
         <span id="post-status" style="font-size: 13px; color: #888;"></span>
 
         <span style="color: #ddd;">|</span>
-        <span style="font-size: 13px; color: #666;">Auto every</span>
+        <label style="display: flex; align-items: center; gap: 6px; cursor: pointer; font-size: 13px; color: #666;">
+          <input type="checkbox" id="auto-post-checkbox" onchange="toggleAutoPost()" style="width: 16px; height: 16px;">
+          Auto every
+        </label>
         <input type="number" id="post-interval-input" value="60" min="5" step="5" style="width: 65px; padding: 6px; border: 1px solid #ddd; border-radius: 6px; font-size: 13px;">
         <span style="font-size: 13px; color: #666;">min</span>
-        <button class="btn-outline" id="btn-auto-post-toggle" onclick="toggleAutoPost()" style="font-size: 12px;">Start Auto Post</button>
-        <button class="btn-danger" id="btn-post-stop" onclick="stopAutoPost()" style="display: none; font-size: 12px;">Stop</button>
         <span id="post-schedule-status" style="font-size: 12px; color: #888;"></span>
       </div>
     </div>
@@ -658,63 +659,57 @@
     }
 
     async function toggleAutoPost() {
-      const btn = document.getElementById('btn-auto-post-toggle');
-      if (btn.textContent === 'Stop') {
-        await stopAutoPost();
+      const cb = document.getElementById('auto-post-checkbox');
+      const enabled = cb.checked;
+
+      if (!enabled) {
+        // 取消勾选 → 停止
+        const res = await fetch('/api/post/schedule', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ enabled: false }),
+        });
+        if (res.ok) {
+          document.getElementById('post-schedule-status').textContent = '';
+          showToast('Auto post stopped', 'info');
+        }
         return;
       }
 
+      // 勾选 → 启动
       const text = document.getElementById('post-textarea').value.trim();
-      if (!text) { showToast('请先输入内容', 'error'); return; }
+      if (!text) { showToast('请先输入内容', 'error'); cb.checked = false; return; }
 
       const interval = parseInt(document.getElementById('post-interval-input').value);
-      if (!interval || interval < 5) { showToast('间隔至少 5 分钟', 'error'); return; }
+      if (!interval || interval < 5) { showToast('间隔至少 5 分钟', 'error'); cb.checked = false; return; }
 
-      // 先立即发一条
-      const postRes = await fetch('/api/post', {
+      addLog('Starting auto post every ' + interval + ' min...');
+      const res = await fetch('/api/post/schedule', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ text }),
+        body: JSON.stringify({ enabled: true, text, intervalMinutes: interval }),
       });
-      const postData = await postRes.json();
-      if (!postData.ok) { showToast('首次发送失败', 'error'); return; }
-      showToast('已发送！下次: ' + interval + ' 分钟后', 'success');
-
-      // 启动定时
-      const res = await api('/api/post/schedule/start', 'POST', { intervalMinutes: interval, templateText: text });
-      if (res.ok) {
-        btn.textContent = 'Stop';
-        btn.className = 'btn-outline active';
-        document.getElementById('btn-post-stop').style.display = 'inline-block';
-        const statusEl = document.getElementById('post-schedule-status');
-        statusEl.style.color = '#00ba7c';
+      const data = await res.json();
+      if (data.ok) {
+        showToast(data.posted ? '已发送！下次: ' + interval + ' 分钟后' : '已启动（发送失败）', data.posted ? 'success' : 'error');
         updateNextPostTime(interval);
+      } else {
+        cb.checked = false;
+        showToast(data.error || 'Failed', 'error');
       }
     }
 
     function updateNextPostTime(intervalMin) {
       const next = new Date(Date.now() + intervalMin * 60000);
-      document.getElementById('post-schedule-status').textContent =
-        'Next: ' + next.toLocaleTimeString();
-    }
-
-    async function stopAutoPost() {
-      const res = await api('/api/post/schedule/stop', 'POST');
-      if (res.ok) {
-        document.getElementById('btn-auto-post-toggle').textContent = 'Start Auto Post';
-        document.getElementById('btn-auto-post-toggle').className = 'btn-outline';
-        document.getElementById('btn-post-stop').style.display = 'none';
-        document.getElementById('post-schedule-status').textContent = '';
-        document.getElementById('post-schedule-status').style.color = '#888';
-      }
+      const el = document.getElementById('post-schedule-status');
+      el.textContent = 'Next: ' + next.toLocaleTimeString();
+      el.style.color = '#00ba7c';
     }
 
     function updatePostScheduleUI(data) {
       if (!data?.postSchedule?.enabled) return;
       const ps = data.postSchedule;
-      document.getElementById('btn-auto-post-toggle').textContent = 'Stop';
-      document.getElementById('btn-auto-post-toggle').className = 'btn-outline active';
-      document.getElementById('btn-post-stop').style.display = 'inline-block';
+      document.getElementById('auto-post-checkbox').checked = true;
       document.getElementById('post-interval-input').value = ps.intervalSeconds / 60;
       updateNextPostTime(ps.intervalSeconds / 60);
     }
