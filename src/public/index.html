@@ -366,9 +366,9 @@
     }
 
     function getSelectedUserIds(type) {
-      const userIds: string[] = [];
+      const userIds = [];
       document.querySelectorAll('.' + type + '-checkbox:checked').forEach(cb => {
-        const idx = parseInt((cb as any).dataset.idx);
+        const idx = parseInt(cb.dataset.idx);
         if (followListData[idx]) userIds.push(followListData[idx].userId);
       });
       return userIds;
