@@ -25,7 +25,7 @@
     .btn-danger { background: #f4212e; color: #fff; }
     .btn-secondary { background: #536471; color: #fff; }
     .schedule-row { display: flex; align-items: center; gap: 10px; margin-top: 10px; }
-    .schedule-row input { width: 100px; padding: 8px; border: 1px solid #ddd; border-radius: 6px; font-size: 14px; }
+    .schedule-row input[type="number"] { width: 100px; padding: 8px; border: 1px solid #ddd; border-radius: 6px; font-size: 14px; }
     .schedule-row span { font-size: 14px; color: #666; }
     .status-bar { display: flex; align-items: center; gap: 8px; padding: 10px 14px; background: #f8f8f8; border-radius: 6px; font-size: 14px; }
     .status-dot { width: 10px; height: 10px; border-radius: 50%; }
@@ -42,18 +42,52 @@
     .user-info .name { font-weight: 600; font-size: 16px; }
     .user-info .username { color: #666; }
     .auto-follow-status { font-size: 13px; color: #666; margin-top: 8px; }
+    .form-group { margin-bottom: 14px; }
+    .form-group label { display: block; font-size: 14px; font-weight: 500; margin-bottom: 4px; }
+    .form-group .hint { font-size: 12px; color: #888; margin-bottom: 6px; }
+    .form-group input { width: 100%; padding: 10px; border: 1px solid #ddd; border-radius: 6px; font-size: 14px; font-family: monospace; }
+    .form-group input:focus { outline: none; border-color: #1d9bf0; }
+    .config-link { display: inline-block; margin-top: 6px; font-size: 13px; color: #1d9bf0; text-decoration: none; }
+    .config-link:hover { text-decoration: underline; }
+    .config-status { display: inline-flex; align-items: center; gap: 6px; font-size: 13px; padding: 4px 10px; border-radius: 12px; margin-bottom: 12px; }
+    .config-status.connected { background: #e6f7ef; color: #00ba7c; }
+    .config-status.disconnected { background: #fde8e8; color: #f4212e; }
   </style>
 </head>
 <body>
   <div class="container">
     <h1>Auto-X Control Panel</h1>
 
+    <div class="card" id="config-card">
+      <h2>X API Configuration</h2>
+      <div class="config-status disconnected" id="config-status">
+        <span class="status-dot idle"></span>
+        <span>Not configured</span>
+      </div>
+      <p style="font-size: 13px; color: #666; margin-bottom: 14px;">
+        Need API tokens? Go to
+        <a class="config-link" href="https://developer.x.com/en/portal/dashboard" target="_blank">X Developer Portal</a>
+        to create an app and generate your tokens.
+      </p>
+      <div class="form-group">
+        <label>Bearer Token</label>
+        <div class="hint">App-only authentication token. Used for read-only operations like looking up users. Find it in your app's "Keys and Tokens" page.</div>
+        <input type="password" id="bearer-token" placeholder="AAAAAAAAAAAAAAAAAAAAA...">
+      </div>
+      <div class="form-group">
+        <label>Access Token (OAuth 2.0 User Token)</label>
+        <div class="hint">User-context token required for follow/unfollow operations. Generate it in your app's "Keys and Tokens" page with <code>follows.write</code> scope.</div>
+        <input type="password" id="access-token" placeholder="xxxxxxxxxx.xxxxxxxxxx...">
+      </div>
+      <button class="btn-success" onclick="saveConfig()">Save & Connect</button>
+    </div>
+
     <div class="card">
       <h2>Account</h2>
       <div class="user-info" id="user-info">
         <div class="avatar" id="avatar">-</div>
         <div class="details">
-          <div class="name" id="user-name">Loading...</div>
+          <div class="name" id="user-name">Not connected</div>
           <div class="username" id="user-username"></div>
         </div>
       </div>
@@ -139,6 +173,17 @@
       }
     }
 
+    async function saveConfig() {
+      const bearerToken = document.getElementById('bearer-token').value.trim();
+      const accessToken = document.getElementById('access-token').value.trim();
+      if (!bearerToken && !accessToken) {
+        addLog('Please enter at least one token');
+        return;
+      }
+      addLog('Saving configuration and connecting...');
+      await api('/api/config', 'POST', { bearerToken, accessToken });
+    }
+
     async function startSchedule() {
       const interval = parseInt(document.getElementById('interval-input').value);
       if (interval < 10) { addLog('Interval must be at least 10 seconds'); return; }
@@ -154,10 +199,23 @@
         const res = await fetch('/api/status');
         const data = await res.json();
 
+        const statusEl = document.getElementById('config-status');
+        if (data.connected) {
+          statusEl.className = 'config-status connected';
+          statusEl.innerHTML = '<span class="status-dot completed"></span><span>Connected</span>';
+        } else {
+          statusEl.className = 'config-status disconnected';
+          statusEl.innerHTML = '<span class="status-dot error"></span><span>Not configured</span>';
+        }
+
         if (data.me) {
           document.getElementById('user-name').textContent = data.me.name;
           document.getElementById('user-username').textContent = '@' + data.me.username;
           document.getElementById('avatar').textContent = data.me.name.charAt(0).toUpperCase();
+        } else {
+          document.getElementById('user-name').textContent = 'Not connected';
+          document.getElementById('user-username').textContent = '';
+          document.getElementById('avatar').textContent = '-';
         }
 
         document.getElementById('follower-count').textContent = data.followerCount;

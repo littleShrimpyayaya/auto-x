@@ -21,15 +21,18 @@ async function main() {
 
   const repo = new UserRepository(pool);
   const service = new Service(xClient, repo);
-  const taskManager = new TaskManager(service, repo);
+  const taskManager = new TaskManager(xClient, service, repo);
 
-  try {
-    const me = await xClient.getMyUser();
-    taskManager.setMe(me);
-    console.log(`Logged in as: @${me.username} (${me.id})`);
-  } catch (err) {
-    console.warn('X API login failed. Set X_BEARER_TOKEN or X_ACCESS_TOKEN in .env');
-    console.warn('The app will start but API calls will fail until authenticated.');
+  if (config.x.bearerToken || config.x.accessToken) {
+    try {
+      const me = await xClient.getMyUser();
+      taskManager.setMe(me);
+      console.log(`Logged in as: @${me.username} (${me.id})`);
+    } catch (err) {
+      console.warn('X API login failed. You can configure tokens from the web UI.');
+    }
+  } else {
+    console.log('No X API tokens configured. Use the web UI to set them up.');
   }
 
   const app = createServer(taskManager);

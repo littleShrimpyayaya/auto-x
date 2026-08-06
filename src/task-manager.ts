@@ -1,5 +1,6 @@
 import { Service } from './service.js';
 import { UserRepository } from './user-repository.js';
+import { XClient } from './x-client.js';
 import type { XUser } from './types.js';
 
 export type TaskType = 'sync-followers' | 'sync-following' | 'auto-follow';
@@ -24,6 +25,7 @@ export interface StatusInfo {
     lastRunAt: string | null;
     totalFollowed: number;
   };
+  connected: boolean;
 }
 
 export class TaskManager {
@@ -40,18 +42,35 @@ export class TaskManager {
   private autoFollowTotalFollowed = 0;
 
   private me: XUser | null = null;
+  private connected = false;
+
+  private service: Service;
+  private xClient: XClient;
 
   constructor(
-    private service: Service,
+    xClient: XClient,
+    service: Service,
     private repo: UserRepository,
-  ) {}
-
-  async init(): Promise<void> {
-    // me will be set externally after X API login
+  ) {
+    this.xClient = xClient;
+    this.service = service;
   }
 
   setMe(user: XUser): void {
     this.me = user;
+    this.connected = true;
+  }
+
+  async reconnect(newXClient: XClient, newService: Service): Promise<XUser> {
+    this.stopAutoFollowSchedule();
+    this.stopCurrentTask();
+
+    this.xClient = newXClient;
+    this.service = newService;
+
+    const me = await newXClient.getMyUser();
+    this.setMe(me);
+    return me;
   }
 
   private get userId(): string {
@@ -128,7 +147,6 @@ export class TaskManager {
       }
     }, intervalSeconds * 1000);
 
-    // Run immediately on start
     this.autoFollowLastRunAt = new Date().toISOString();
     this.runTask('auto-follow', (signal) =>
       this.service.autoFollowBack(this.userId, signal).then((result) => {
@@ -175,6 +193,7 @@ export class TaskManager {
         lastRunAt: this.autoFollowLastRunAt,
         totalFollowed: this.autoFollowTotalFollowed,
       },
+      connected: this.connected,
     };
   }
 }

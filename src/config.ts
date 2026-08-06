@@ -1,6 +1,10 @@
 import dotenv from 'dotenv';
+import fs from 'fs';
+import path from 'path';
 
 dotenv.config();
+
+const CONFIG_FILE = path.join(process.cwd(), 'data', 'config.json');
 
 export interface AppConfig {
   x: {
@@ -17,10 +21,11 @@ export interface AppConfig {
 }
 
 export function loadConfig(): AppConfig {
+  const fileConfig = loadFileConfig();
   return {
     x: {
-      bearerToken: process.env.X_BEARER_TOKEN,
-      accessToken: process.env.X_ACCESS_TOKEN,
+      bearerToken: fileConfig?.x?.bearerToken || process.env.X_BEARER_TOKEN,
+      accessToken: fileConfig?.x?.accessToken || process.env.X_ACCESS_TOKEN,
     },
     db: {
       host: process.env.DB_HOST ?? 'localhost',
@@ -29,5 +34,41 @@ export function loadConfig(): AppConfig {
       user: process.env.DB_USER ?? 'postgres',
       password: process.env.DB_PASSWORD ?? '',
     },
+  };
+}
+
+interface FileConfig {
+  x?: { bearerToken?: string; accessToken?: string };
+}
+
+function loadFileConfig(): FileConfig | null {
+  try {
+    if (fs.existsSync(CONFIG_FILE)) {
+      return JSON.parse(fs.readFileSync(CONFIG_FILE, 'utf-8'));
+    }
+  } catch { /* ignore */ }
+  return null;
+}
+
+export function saveXConfig(bearerToken?: string, accessToken?: string): void {
+  const dir = path.dirname(CONFIG_FILE);
+  if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+
+  const existing = loadFileConfig() ?? {};
+  const config: FileConfig = {
+    ...existing,
+    x: {
+      bearerToken: bearerToken ?? existing.x?.bearerToken,
+      accessToken: accessToken ?? existing.x?.accessToken,
+    },
+  };
+  fs.writeFileSync(CONFIG_FILE, JSON.stringify(config, null, 2));
+}
+
+export function getXConfigStatus(): { hasBearerToken: boolean; hasAccessToken: boolean } {
+  const config = loadConfig();
+  return {
+    hasBearerToken: !!config.x.bearerToken,
+    hasAccessToken: !!config.x.accessToken,
   };
 }

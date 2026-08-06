@@ -2,6 +2,9 @@ import express from 'express';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import { TaskManager } from './task-manager.js';
+import { XClient } from './x-client.js';
+import { Service } from './service.js';
+import { saveXConfig, getXConfigStatus, loadConfig } from './config.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -16,6 +19,35 @@ export function createServer(taskManager: TaskManager): express.Express {
       res.json(status);
     } catch (err: any) {
       res.status(500).json({ error: err.message });
+    }
+  });
+
+  app.get('/api/config', (_req, res) => {
+    const status = getXConfigStatus();
+    res.json(status);
+  });
+
+  app.post('/api/config', async (req, res) => {
+    const { bearerToken, accessToken } = req.body;
+    if (!bearerToken && !accessToken) {
+      res.status(400).json({ error: 'Provide at least one token' });
+      return;
+    }
+
+    try {
+      saveXConfig(bearerToken, accessToken);
+
+      const config = loadConfig();
+      const newXClient = new XClient({
+        bearerToken: config.x.bearerToken,
+        accessToken: config.x.accessToken,
+      });
+      const newService = new Service(newXClient, (taskManager as any).repo);
+      const me = await taskManager.reconnect(newXClient, newService);
+
+      res.json({ ok: true, message: `Connected as @${me.username}`, username: me.username });
+    } catch (err: any) {
+      res.status(500).json({ error: `Connection failed: ${err.message}` });
     }
   });
 
