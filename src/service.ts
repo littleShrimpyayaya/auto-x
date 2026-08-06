@@ -1,6 +1,6 @@
 import { XClient } from './x-client.js';
 import { UserRepository } from './user-repository.js';
-import type { SyncResult, AutoFollowResult } from './types.js';
+import type { XUser, SyncResult, AutoFollowResult } from './types.js';
 
 export class Service {
   constructor(
@@ -8,13 +8,15 @@ export class Service {
     private repo: UserRepository,
   ) {}
 
-  async syncFollowers(userId: string): Promise<SyncResult> {
+  async syncFollowers(userId: string, signal?: AbortSignal): Promise<SyncResult> {
     let total = 0;
     let newCount = 0;
     const existingIds = new Set(await this.repo.getRelationshipIds(userId, 'follower'));
 
-    const users: import('./types.js').XUser[] = [];
+    const users: XUser[] = [];
     for await (const user of this.xClient.iterateFollowers(userId)) {
+      if (signal?.aborted) throw new DOMException('Task cancelled', 'AbortError');
+
       users.push(user);
       total++;
       if (!existingIds.has(user.id)) newCount++;
@@ -35,13 +37,15 @@ export class Service {
     return { total, newCount };
   }
 
-  async syncFollowing(userId: string): Promise<SyncResult> {
+  async syncFollowing(userId: string, signal?: AbortSignal): Promise<SyncResult> {
     let total = 0;
     let newCount = 0;
     const existingIds = new Set(await this.repo.getRelationshipIds(userId, 'following'));
 
-    const users: import('./types.js').XUser[] = [];
+    const users: XUser[] = [];
     for await (const user of this.xClient.iterateFollowing(userId)) {
+      if (signal?.aborted) throw new DOMException('Task cancelled', 'AbortError');
+
       users.push(user);
       total++;
       if (!existingIds.has(user.id)) newCount++;
@@ -62,7 +66,7 @@ export class Service {
     return { total, newCount };
   }
 
-  async autoFollowBack(userId: string): Promise<AutoFollowResult> {
+  async autoFollowBack(userId: string, signal?: AbortSignal): Promise<AutoFollowResult> {
     const followerIds = await this.repo.getRelationshipIds(userId, 'follower');
     const followingIds = new Set(await this.repo.getRelationshipIds(userId, 'following'));
 
@@ -70,6 +74,8 @@ export class Service {
     let alreadyFollowing = 0;
 
     for (const followerId of followerIds) {
+      if (signal?.aborted) throw new DOMException('Task cancelled', 'AbortError');
+
       if (followingIds.has(followerId)) {
         alreadyFollowing++;
         continue;
@@ -78,9 +84,9 @@ export class Service {
       try {
         await this.xClient.follow(userId, followerId);
         followed.push(followerId);
-
         await this.repo.upsertRelationships(userId, [{ id: followerId, name: '', username: '' }], 'following');
-      } catch (err) {
+      } catch (err: any) {
+        if (err?.name === 'AbortError') throw err;
         console.error(`Failed to follow user ${followerId}:`, err);
       }
     }

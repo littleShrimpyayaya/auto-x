@@ -1,0 +1,186 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Auto-X Control Panel</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; background: #f5f5f5; color: #333; padding: 20px; }
+    .container { max-width: 800px; margin: 0 auto; }
+    h1 { font-size: 24px; margin-bottom: 20px; }
+    .card { background: #fff; border-radius: 8px; padding: 20px; margin-bottom: 16px; box-shadow: 0 1px 3px rgba(0,0,0,0.1); }
+    .card h2 { font-size: 16px; color: #666; margin-bottom: 12px; }
+    .stats { display: flex; gap: 16px; }
+    .stat { flex: 1; text-align: center; padding: 12px; background: #f8f8f8; border-radius: 6px; }
+    .stat .value { font-size: 28px; font-weight: bold; color: #1d9bf0; }
+    .stat .label { font-size: 12px; color: #888; margin-top: 4px; }
+    .actions { display: flex; flex-wrap: wrap; gap: 10px; }
+    button { padding: 10px 20px; border: none; border-radius: 6px; cursor: pointer; font-size: 14px; font-weight: 500; transition: opacity 0.2s; }
+    button:hover { opacity: 0.85; }
+    button:disabled { opacity: 0.5; cursor: not-allowed; }
+    .btn-primary { background: #1d9bf0; color: #fff; }
+    .btn-success { background: #00ba7c; color: #fff; }
+    .btn-warning { background: #ffad1f; color: #fff; }
+    .btn-danger { background: #f4212e; color: #fff; }
+    .btn-secondary { background: #536471; color: #fff; }
+    .schedule-row { display: flex; align-items: center; gap: 10px; margin-top: 10px; }
+    .schedule-row input { width: 100px; padding: 8px; border: 1px solid #ddd; border-radius: 6px; font-size: 14px; }
+    .schedule-row span { font-size: 14px; color: #666; }
+    .status-bar { display: flex; align-items: center; gap: 8px; padding: 10px 14px; background: #f8f8f8; border-radius: 6px; font-size: 14px; }
+    .status-dot { width: 10px; height: 10px; border-radius: 50%; }
+    .status-dot.idle { background: #888; }
+    .status-dot.running { background: #1d9bf0; animation: pulse 1s infinite; }
+    .status-dot.completed { background: #00ba7c; }
+    .status-dot.error { background: #f4212e; }
+    .status-dot.cancelled { background: #ffad1f; }
+    @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.4; } }
+    .log { font-family: monospace; font-size: 13px; background: #1a1a2e; color: #e0e0e0; padding: 14px; border-radius: 6px; max-height: 200px; overflow-y: auto; white-space: pre-wrap; }
+    .user-info { display: flex; align-items: center; gap: 12px; }
+    .user-info .avatar { width: 48px; height: 48px; border-radius: 50%; background: #1d9bf0; display: flex; align-items: center; justify-content: center; color: #fff; font-size: 20px; font-weight: bold; }
+    .user-info .details { font-size: 14px; }
+    .user-info .name { font-weight: 600; font-size: 16px; }
+    .user-info .username { color: #666; }
+    .auto-follow-status { font-size: 13px; color: #666; margin-top: 8px; }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <h1>Auto-X Control Panel</h1>
+
+    <div class="card">
+      <h2>Account</h2>
+      <div class="user-info" id="user-info">
+        <div class="avatar" id="avatar">-</div>
+        <div class="details">
+          <div class="name" id="user-name">Loading...</div>
+          <div class="username" id="user-username"></div>
+        </div>
+      </div>
+    </div>
+
+    <div class="card">
+      <h2>Statistics</h2>
+      <div class="stats">
+        <div class="stat">
+          <div class="value" id="follower-count">0</div>
+          <div class="label">Followers</div>
+        </div>
+        <div class="stat">
+          <div class="value" id="following-count">0</div>
+          <div class="label">Following</div>
+        </div>
+        <div class="stat">
+          <div class="value" id="auto-follow-total">0</div>
+          <div class="label">Auto Followed</div>
+        </div>
+      </div>
+    </div>
+
+    <div class="card">
+      <h2>Actions</h2>
+      <div class="actions">
+        <button class="btn-primary" onclick="api('/api/sync-followers', 'POST')">Sync Followers</button>
+        <button class="btn-primary" onclick="api('/api/sync-following', 'POST')">Sync Following</button>
+        <button class="btn-success" onclick="api('/api/auto-follow', 'POST')">Auto Follow (Once)</button>
+        <button class="btn-danger" onclick="api('/api/stop', 'POST')">Stop Task</button>
+      </div>
+      <div class="schedule-row">
+        <span>Auto Follow Interval:</span>
+        <input type="number" id="interval-input" value="300" min="10" step="10">
+        <span>seconds</span>
+        <button class="btn-warning" onclick="startSchedule()">Start Schedule</button>
+        <button class="btn-secondary" onclick="stopSchedule()">Stop Schedule</button>
+      </div>
+      <div class="auto-follow-status" id="auto-follow-status"></div>
+    </div>
+
+    <div class="card">
+      <h2>Task Status</h2>
+      <div class="status-bar">
+        <div class="status-dot idle" id="status-dot"></div>
+        <span id="status-text">Idle</span>
+      </div>
+    </div>
+
+    <div class="card">
+      <h2>Log</h2>
+      <div class="log" id="log">Waiting for actions...</div>
+    </div>
+  </div>
+
+  <script>
+    const logEl = document.getElementById('log');
+    const logs = [];
+
+    function addLog(msg) {
+      const time = new Date().toLocaleTimeString();
+      logs.unshift(`[${time}] ${msg}`);
+      if (logs.length > 50) logs.pop();
+      logEl.textContent = logs.join('\n');
+    }
+
+    async function api(url, method, body) {
+      try {
+        const res = await fetch(url, {
+          method,
+          headers: { 'Content-Type': 'application/json' },
+          body: body ? JSON.stringify(body) : undefined,
+        });
+        const data = await res.json();
+        if (!res.ok) {
+          addLog(`Error: ${data.error}`);
+        } else {
+          addLog(data.message || 'OK');
+        }
+        refreshStatus();
+      } catch (err) {
+        addLog(`Request failed: ${err.message}`);
+      }
+    }
+
+    async function startSchedule() {
+      const interval = parseInt(document.getElementById('interval-input').value);
+      if (interval < 10) { addLog('Interval must be at least 10 seconds'); return; }
+      await api('/api/auto-follow/start', 'POST', { interval });
+    }
+
+    async function stopSchedule() {
+      await api('/api/auto-follow/stop', 'POST');
+    }
+
+    async function refreshStatus() {
+      try {
+        const res = await fetch('/api/status');
+        const data = await res.json();
+
+        if (data.me) {
+          document.getElementById('user-name').textContent = data.me.name;
+          document.getElementById('user-username').textContent = '@' + data.me.username;
+          document.getElementById('avatar').textContent = data.me.name.charAt(0).toUpperCase();
+        }
+
+        document.getElementById('follower-count').textContent = data.followerCount;
+        document.getElementById('following-count').textContent = data.followingCount;
+        document.getElementById('auto-follow-total').textContent = data.autoFollow.totalFollowed;
+
+        const dot = document.getElementById('status-dot');
+        dot.className = 'status-dot ' + data.task.status;
+        document.getElementById('status-text').textContent = data.task.message || data.task.status;
+
+        const afStatus = document.getElementById('auto-follow-status');
+        if (data.autoFollow.enabled) {
+          afStatus.textContent = `Schedule active: every ${data.autoFollow.intervalSeconds}s | Last run: ${data.autoFollow.lastRunAt ? new Date(data.autoFollow.lastRunAt).toLocaleTimeString() : '-'}`;
+        } else {
+          afStatus.textContent = 'Schedule inactive';
+        }
+      } catch (err) {
+        // Server not ready yet
+      }
+    }
+
+    refreshStatus();
+    setInterval(refreshStatus, 3000);
+  </script>
+</body>
+</html>
