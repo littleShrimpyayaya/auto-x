@@ -52,9 +52,15 @@
     .config-status { display: inline-flex; align-items: center; gap: 6px; font-size: 13px; padding: 4px 10px; border-radius: 12px; margin-bottom: 12px; }
     .config-status.connected { background: #e6f7ef; color: #00ba7c; }
     .config-status.disconnected { background: #fde8e8; color: #f4212e; }
+    .toast { position: fixed; top: 20px; right: 20px; padding: 14px 20px; border-radius: 8px; color: #fff; font-size: 14px; font-weight: 500; z-index: 1000; opacity: 0; transform: translateY(-10px); transition: all 0.3s ease; pointer-events: none; max-width: 360px; }
+    .toast.show { opacity: 1; transform: translateY(0); }
+    .toast.success { background: #00ba7c; }
+    .toast.error { background: #f4212e; }
+    button.loading { opacity: 0.7; pointer-events: none; }
   </style>
 </head>
 <body>
+  <div class="toast" id="toast"></div>
   <div class="container">
     <h1>Auto-X Control Panel</h1>
 
@@ -76,7 +82,7 @@
       </div>
       <div class="form-group">
         <label>Access Token (OAuth 2.0 User Token)</label>
-        <div class="hint">User-context token required for follow/unfollow operations. Generate it in your app's "Keys and Tokens" page with <code>follows.write</code> scope.</div>
+        <div class="hint">User-context token required for follow/unfollow operations. Generate it in your app's "Keys and Tokens" page with <code>follows.write</code> scope. Refresh token is not needed.</div>
         <input type="password" id="access-token" placeholder="xxxxxxxxxx.xxxxxxxxxx...">
       </div>
       <button class="btn-success" onclick="saveConfig()">Save & Connect</button>
@@ -207,6 +213,13 @@
       logEl.textContent = logs.join('\n');
     }
 
+    function showToast(msg, type) {
+      const toast = document.getElementById('toast');
+      toast.textContent = msg;
+      toast.className = 'toast ' + type + ' show';
+      setTimeout(() => { toast.className = 'toast'; }, 4000);
+    }
+
     async function api(url, method, body) {
       try {
         const res = await fetch(url, {
@@ -217,12 +230,16 @@
         const data = await res.json();
         if (!res.ok) {
           addLog(`Error: ${data.error}`);
+          showToast(data.error || 'Request failed', 'error');
         } else {
           addLog(data.message || 'OK');
         }
         refreshStatus();
+        return { ok: res.ok, data };
       } catch (err) {
         addLog(`Request failed: ${err.message}`);
+        showToast('Network error: ' + err.message, 'error');
+        return { ok: false, data: null };
       }
     }
 
@@ -230,11 +247,19 @@
       const bearerToken = document.getElementById('bearer-token').value.trim();
       const accessToken = document.getElementById('access-token').value.trim();
       if (!bearerToken && !accessToken) {
-        addLog('Please enter at least one token');
+        showToast('Please enter at least one token', 'error');
         return;
       }
+      const btn = document.querySelector('#config-card button');
+      btn.textContent = 'Connecting...';
+      btn.classList.add('loading');
       addLog('Saving configuration and connecting...');
-      await api('/api/config', 'POST', { bearerToken, accessToken });
+      const result = await api('/api/config', 'POST', { bearerToken, accessToken });
+      btn.textContent = 'Save & Connect';
+      btn.classList.remove('loading');
+      if (result.ok) {
+        showToast(result.data.message || 'Connected successfully', 'success');
+      }
     }
 
     async function startSchedule() {

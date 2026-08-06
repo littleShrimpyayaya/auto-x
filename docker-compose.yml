@@ -28,6 +28,9 @@ services:
       DB_USER: postgres
       DB_PASSWORD: postgres
       PORT: 3000
+    volumes:
+      - appdata:/app/data
 
 volumes:
   pgdata:
+  appdata:
