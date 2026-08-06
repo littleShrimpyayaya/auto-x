@@ -421,21 +421,22 @@ export class BrowserClient {
         const cells = document.querySelectorAll('[data-testid="UserCell"]');
 
         for (const cell of cells) {
-          // 查找 Follow 按钮（排除 Following/正在关注/Pending）
-          const buttons = cell.querySelectorAll('[role="button"]');
+          // 查找 Follow 按钮：遍历所有 button 和 [role="button"]
+          const allBtns = cell.querySelectorAll('button, [role="button"], [data-testid*="follow"]');
           let needsFollow = false;
-          for (const btn of buttons) {
-            const text = (btn.textContent || '').trim();
-            const aria = (btn as HTMLElement).getAttribute('aria-label') || '';
-            // 是 "Follow" 而不是 "Following"/"Pending"/"Unfollow"
-            if (
-              (text.length > 0 && text !== 'Following' && text !== '正在关注' && text !== 'Unfollow' && text !== 'Pending' &&
-               !aria.includes('Following') && !aria.includes('Unfollow')) &&
-              (text.toLowerCase().includes('follow') || aria.toLowerCase().includes('follow'))
-            ) {
-              needsFollow = true;
-              break;
-            }
+          for (const btn of allBtns) {
+            const text = ((btn.textContent || '').trim()).toLowerCase();
+            const aria = ((btn as HTMLElement).getAttribute('aria-label') || '').toLowerCase();
+            const testId = ((btn as HTMLElement).getAttribute('data-testid') || '').toLowerCase();
+
+            // 按钮文案是 Follow（排除 Following / Unfollow / Pending）
+            if (text === 'follow') { needsFollow = true; break; }
+
+            // data-testid 包含 follow 但不包含 unfollow
+            if (testId.includes('follow') && !testId.includes('unfollow')) { needsFollow = true; break; }
+
+            // aria-label 包含 "Follow @" 模式（X 常用）
+            if (aria.startsWith('follow @')) { needsFollow = true; break; }
           }
           if (!needsFollow) continue;
 
@@ -490,6 +491,25 @@ export class BrowserClient {
         await this.page!.waitForTimeout(600);
       }
       await this.page!.waitForTimeout(2000 + Math.random() * 1000);
+
+      if (i === 0) {
+        // 首次：输出页面中前几个按钮的信息用于调试
+        const debugBtns = await this.page!.evaluate(() => {
+          const cells = document.querySelectorAll('[data-testid="UserCell"]');
+          const info: string[] = [];
+          let count = 0;
+          for (const cell of cells) {
+            if (count >= 5) break;
+            const btns = cell.querySelectorAll('button, [role="button"]');
+            for (const btn of btns) {
+              info.push(`text="${(btn.textContent||'').trim()}" aria="${btn.getAttribute('aria-label')||''}" testid="${btn.getAttribute('data-testid')||''}"`);
+            }
+            count++;
+          }
+          return info.join(' | ');
+        });
+        console.log(`[BrowserClient] 前几个用户按钮: ${debugBtns}`);
+      }
 
       if (i % 10 === 0) {
         console.log(`[BrowserClient] 扫描进度: ${needFollow.length} 个待回关 (已查看 ${seen.size} 个粉丝)`);
