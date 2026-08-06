@@ -1,0 +1,22 @@
+services:
+  nginx:
+    image: "docker.m.daocloud.io/library/nginx:1.27-alpine"
+    container_name: nginx
+    restart: unless-stopped
+    ports:
+      - "80:8080"
+      - "443:8443"
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    volumes:
+      - ./nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+      - ./nginx/certs:/etc/nginx/certs:ro
+      - ./logs:/var/log/nginx
+      - ./web:/var/www/web:ro
+    command: ["nginx", "-g", "daemon off;"]
+    networks:
+      - nginx_net
+
+networks:
+  nginx_net:
+    driver: bridge
