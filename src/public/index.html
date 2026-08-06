@@ -170,113 +170,65 @@
           </div>
           <div id="follow-list-items"></div>
         </div>
-      </div>
 
-    </div>
-
-    <div class="card" id="auto-config-card">
-      <h2>Automation Settings</h2>
-
-      <div class="section">
-        <div class="section-header"><h3>🎯 Batch Control</h3></div>
-        <div class="section-desc">每批操作的数量范围和批次间等待时间</div>
-        <div class="section-row" style="margin-bottom: 12px;">
-          <span style="min-width: 90px;">Batch Size:</span>
-          <input type="number" id="auto-batch-min" min="1" max="50" value="10" style="width: 70px;">
-          <span>~</span>
-          <input type="number" id="auto-batch-max" min="1" max="50" value="18" style="width: 70px;">
-          <span>users</span>
+        <!-- 自动化配置（折叠） -->
+        <div style="margin-top: 10px;">
+          <button class="btn-outline" onclick="toggleAutoSettings()" style="font-size: 12px; padding: 4px 12px;">⚙ Automation Settings</button>
+          <span id="auto-config-status" style="font-size: 12px; color: #888; margin-left: 8px;"></span>
         </div>
-        <div class="section-row" style="margin-bottom: 12px;">
-          <span style="min-width: 90px;">Interval:</span>
-          <input type="number" id="auto-interval-min" min="1" max="60" value="5" style="width: 70px;">
-          <span>~</span>
-          <input type="number" id="auto-interval-max" min="1" max="60" value="15" style="width: 70px;">
-          <span>min</span>
-        </div>
-        <div class="section-row">
-          <span style="min-width: 90px;">Per Action:</span>
-          <input type="number" id="auto-action-min" min="1" max="60" value="8" style="width: 70px;">
-          <span>~</span>
-          <input type="number" id="auto-action-max" min="1" max="60" value="25" style="width: 70px;">
-          <span>sec</span>
-        </div>
-      </div>
-
-      <div class="section">
-        <div class="section-header"><h3>📊 Limits</h3></div>
-        <div class="section-desc">每日操作上限和活跃时间窗口（仅影响自动定时任务，手动操作不受限制）</div>
-        <div class="section-row" style="margin-bottom: 12px;">
-          <span style="min-width: 90px;">Daily Limit:</span>
-          <input type="number" id="auto-daily-limit" min="10" max="2000" value="400" style="width: 80px;">
-          <span>per day</span>
-        </div>
-        <div class="section-row">
-          <span style="min-width: 90px;">Active Hours:</span>
-          <input type="number" id="auto-hour-start" min="0" max="23" value="9" style="width: 70px;">
-          <span>~</span>
-          <input type="number" id="auto-hour-end" min="0" max="23" value="23" style="width: 70px;">
-          <span>o'clock</span>
+        <div id="auto-settings-panel" style="display: none; margin-top: 10px; padding: 12px; background: #fafafa; border-radius: 8px;">
+          <div class="section-row" style="margin-bottom: 8px;">
+            <span style="font-size: 12px; min-width: 75px;">Batch Size:</span>
+            <input type="number" id="auto-batch-min" min="1" max="50" value="10" style="width: 55px; font-size: 12px; padding: 4px;">
+            <span style="font-size: 12px;">~</span>
+            <input type="number" id="auto-batch-max" min="1" max="50" value="18" style="width: 55px; font-size: 12px; padding: 4px;">
+            <span style="font-size: 12px;">users</span>
+          </div>
+          <div class="section-row" style="margin-bottom: 8px;">
+            <span style="font-size: 12px; min-width: 75px;">Interval:</span>
+            <input type="number" id="auto-interval-min" min="1" max="60" value="5" style="width: 55px; font-size: 12px; padding: 4px;">
+            <span style="font-size: 12px;">~</span>
+            <input type="number" id="auto-interval-max" min="1" max="60" value="15" style="width: 55px; font-size: 12px; padding: 4px;">
+            <span style="font-size: 12px;">min</span>
+          </div>
+          <div class="section-row">
+            <span style="font-size: 12px; min-width: 75px;">Per Action:</span>
+            <input type="number" id="auto-action-min" min="1" max="60" value="8" style="width: 55px; font-size: 12px; padding: 4px;">
+            <span style="font-size: 12px;">~</span>
+            <input type="number" id="auto-action-max" min="1" max="60" value="25" style="width: 55px; font-size: 12px; padding: 4px;">
+            <span style="font-size: 12px;">sec</span>
+          </div>
+          <button class="btn-primary" onclick="saveAutoConfig()" style="margin-top: 8px; font-size: 12px; padding: 4px 12px;">Save</button>
         </div>
       </div>
 
-      <button class="btn-primary" onclick="saveAutoConfig()">Save Settings</button>
-      <span id="auto-config-status" style="font-size: 13px; color: #888; margin-left: 12px;"></span>
     </div>
 
     <div class="card" id="post-card">
       <h2>Post Composer</h2>
 
-      <div class="section">
-        <div class="section-header"><h3>✏️ Compose</h3></div>
-        <div style="position: relative;">
-          <textarea id="post-textarea"
-            placeholder="What's happening?"
-            maxlength="280"
-            rows="4"
-            style="width: 100%; padding: 14px; border: 1px solid #ddd; border-radius: 8px; font-size: 16px; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; resize: vertical; line-height: 1.5; outline: none; box-sizing: border-box;"
-            oninput="updateCharCount()"
-          ></textarea>
-          <div id="char-count" style="text-align: right; font-size: 12px; color: #888; margin-top: 4px;">0 / 280</div>
-        </div>
-        <div class="section-row" style="margin-top: 8px;">
-          <span style="font-size: 13px; color: #666;">Template:</span>
-          <select id="post-template-select" onchange="applyTemplate()" style="flex: 1; padding: 8px; border: 1px solid #ddd; border-radius: 6px; font-size: 14px;">
-            <option value="">-- 选择模板 --</option>
-          </select>
-        </div>
-        <button class="btn-primary" id="btn-post-now" onclick="doPost()" style="margin-top: 10px;">Post Now</button>
-        <span id="post-status" style="font-size: 13px; color: #888; margin-left: 10px;"></span>
+      <div style="position: relative;">
+        <textarea id="post-textarea"
+          placeholder="What's happening?"
+          maxlength="280"
+          rows="4"
+          style="width: 100%; padding: 14px; border: 1px solid #ddd; border-radius: 8px; font-size: 16px; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; resize: vertical; line-height: 1.5; outline: none; box-sizing: border-box;"
+          oninput="updateCharCount()"
+        ></textarea>
+        <div id="char-count" style="text-align: right; font-size: 12px; color: #888; margin-top: 4px;">0 / 280</div>
       </div>
 
-      <div class="section">
-        <div class="section-header"><h3>⏱️ Auto Post</h3></div>
-        <div class="section-desc">定时自动发送模板消息</div>
-        <div class="section-row" style="margin-bottom: 10px;">
-          <span>Interval:</span>
-          <input type="number" id="post-interval-input" value="60" min="5" step="5" style="width: 80px;">
-          <span>min</span>
-        </div>
-        <div class="section-row" style="margin-bottom: 10px;">
-          <span>Template:</span>
-          <select id="auto-post-template-select" style="flex: 1; padding: 8px; border: 1px solid #ddd; border-radius: 6px; font-size: 14px;">
-          </select>
-        </div>
-        <div class="section-row" style="gap: 8px;">
-          <button class="btn-outline" id="btn-auto-post-toggle" onclick="toggleAutoPost()">Start Auto Post</button>
-          <button class="btn-danger" id="btn-post-stop" onclick="stopAutoPost()" style="display: none;">Stop</button>
-        </div>
-        <div class="section-status idle" id="post-schedule-status" style="margin-top: 8px;">Idle</div>
-      </div>
+      <div style="display: flex; align-items: center; gap: 12px; margin-top: 10px; flex-wrap: wrap;">
+        <button class="btn-primary" id="btn-post-now" onclick="doPost()">Post Now</button>
+        <span id="post-status" style="font-size: 13px; color: #888;"></span>
 
-      <div class="section">
-        <div class="section-header"><h3>📝 Templates</h3></div>
-        <div class="section-desc">管理你的消息模板</div>
-        <div class="section-row" style="margin-bottom: 8px;">
-          <input type="text" id="new-template-input" placeholder="输入新模板..." style="flex: 1; padding: 8px; border: 1px solid #ddd; border-radius: 6px; font-size: 14px;" maxlength="280">
-          <button class="btn-primary" onclick="addTemplate()" style="white-space: nowrap;">+ Add</button>
-        </div>
-        <div id="template-list" style="max-height: 200px; overflow-y: auto;"></div>
+        <span style="color: #ddd;">|</span>
+        <span style="font-size: 13px; color: #666;">Auto every</span>
+        <input type="number" id="post-interval-input" value="60" min="5" step="5" style="width: 65px; padding: 6px; border: 1px solid #ddd; border-radius: 6px; font-size: 13px;">
+        <span style="font-size: 13px; color: #666;">min</span>
+        <button class="btn-outline" id="btn-auto-post-toggle" onclick="toggleAutoPost()" style="font-size: 12px;">Start Auto Post</button>
+        <button class="btn-danger" id="btn-post-stop" onclick="stopAutoPost()" style="display: none; font-size: 12px;">Stop</button>
+        <span id="post-schedule-status" style="font-size: 12px; color: #888;"></span>
       </div>
     </div>
 
@@ -606,6 +558,11 @@
 
     // ── Automation Config ───────────────────────────────────
 
+    function toggleAutoSettings() {
+      const panel = document.getElementById('auto-settings-panel');
+      panel.style.display = panel.style.display === 'none' ? 'block' : 'none';
+    }
+
     async function loadAutoConfig() {
       try {
         const res = await fetch('/api/auto-config');
@@ -616,17 +573,12 @@
         document.getElementById('auto-interval-max').value = cfg.batchIntervalMaxMinutes;
         document.getElementById('auto-action-min').value = cfg.actionIntervalMinSeconds;
         document.getElementById('auto-action-max').value = cfg.actionIntervalMaxSeconds;
-        document.getElementById('auto-daily-limit').value = cfg.dailyLimit;
-        document.getElementById('auto-hour-start').value = cfg.activeHoursStart;
-        document.getElementById('auto-hour-end').value = cfg.activeHoursEnd;
       } catch { /* server not ready */ }
     }
 
     async function saveAutoConfig() {
-      const btn = document.querySelector('#auto-config-card button');
       const statusEl = document.getElementById('auto-config-status');
-      btn.textContent = 'Saving...';
-      btn.classList.add('loading');
+      statusEl.textContent = 'Saving...';
 
       try {
         const res = await fetch('/api/auto-config', {
@@ -639,29 +591,21 @@
             batchIntervalMaxMinutes: parseInt(document.getElementById('auto-interval-max').value),
             actionIntervalMinSeconds: parseInt(document.getElementById('auto-action-min').value),
             actionIntervalMaxSeconds: parseInt(document.getElementById('auto-action-max').value),
-            dailyLimit: parseInt(document.getElementById('auto-daily-limit').value),
-            activeHoursStart: parseInt(document.getElementById('auto-hour-start').value),
-            activeHoursEnd: parseInt(document.getElementById('auto-hour-end').value),
           }),
         });
         const data = await res.json();
         if (res.ok) {
-          statusEl.textContent = '✓ ' + data.message;
+          statusEl.textContent = '✓ Saved';
           statusEl.style.color = '#00ba7c';
-          showToast('Automation settings saved. Restart to apply changes.', 'success');
         } else {
           statusEl.textContent = '✗ ' + (data.error || 'Failed');
           statusEl.style.color = '#f4212e';
-          showToast(data.error || 'Save failed', 'error');
         }
-      } catch (err) {
-        statusEl.textContent = '✗ Network error';
+      } catch {
+        statusEl.textContent = '✗ Error';
         statusEl.style.color = '#f4212e';
-      } finally {
-        btn.textContent = 'Save Settings';
-        btn.classList.remove('loading');
-        setTimeout(() => { statusEl.textContent = ''; }, 5000);
       }
+      setTimeout(() => { statusEl.textContent = ''; }, 3000);
     }
 
     // ── Post Composer ──────────────────────────────────────
@@ -674,93 +618,10 @@
       counter.style.color = len > 260 ? '#f4212e' : len > 240 ? '#ffad1f' : '#888';
     }
 
-    function applyTemplate() {
-      const sel = document.getElementById('post-template-select');
-      if (sel.value) {
-        document.getElementById('post-textarea').value = sel.value;
-        updateCharCount();
-      }
-    }
-
-    async function loadPostConfig() {
-      try {
-        const res = await fetch('/api/post/config');
-        const cfg = await res.json();
-        // 填充模板下拉框
-        const templateSelect = document.getElementById('post-template-select');
-        const autoTemplateSelect = document.getElementById('auto-post-template-select');
-        // 保留第一个 option
-        templateSelect.innerHTML = '<option value="">-- 选择模板 --</option>';
-        autoTemplateSelect.innerHTML = '';
-        (cfg.templates || []).forEach((t, i) => {
-          const opt = document.createElement('option');
-          opt.value = t;
-          opt.textContent = t.length > 60 ? t.substring(0, 60) + '...' : t;
-          templateSelect.appendChild(opt.cloneNode(true));
-          autoTemplateSelect.appendChild(opt);
-        });
-        // 选中默认模板
-        if (cfg.templates && cfg.templates[cfg.autoPostTemplateIndex]) {
-          autoTemplateSelect.value = cfg.templates[cfg.autoPostTemplateIndex];
-        }
-        // 填充间隔
+    function loadPostConfig() {
+      fetch('/api/post/config').then(r => r.json()).then(cfg => {
         document.getElementById('post-interval-input').value = cfg.autoPostIntervalMinutes || 60;
-        // 刷新模板列表
-        renderTemplateList(cfg.templates || []);
-        // 保存模板引用
-        window._postTemplates = cfg.templates || [];
-      } catch { /* server not ready */ }
-    }
-
-    function renderTemplateList(templates) {
-      const container = document.getElementById('template-list');
-      if (!templates.length) {
-        container.innerHTML = '<div style="font-size: 13px; color: #888; padding: 8px;">暂无模板</div>';
-        return;
-      }
-      container.innerHTML = templates.map((t, i) =>
-        `<div style="display: flex; justify-content: space-between; align-items: center; padding: 8px; border-bottom: 1px solid #eee; font-size: 13px;">
-          <span style="flex: 1; margin-right: 8px; word-break: break-word;">${escHtml(t)}</span>
-          <button class="btn-secondary" style="padding: 4px 10px; font-size: 12px; flex-shrink: 0;" onclick="deleteTemplate(${i})">✕</button>
-        </div>`
-      ).join('');
-    }
-
-    function escHtml(s) {
-      return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
-    }
-
-    async function addTemplate() {
-      const input = document.getElementById('new-template-input');
-      const text = input.value.trim();
-      if (!text) { showToast('请输入模板内容', 'error'); return; }
-      if (text.length > 280) { showToast('模板超过 280 字符限制', 'error'); return; }
-
-      const templates = [...(window._postTemplates || []), text];
-      const res = await fetch('/api/post/config', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ templates }),
-      });
-      if (res.ok) {
-        input.value = '';
-        showToast('模板已添加', 'success');
-        loadPostConfig();
-      }
-    }
-
-    async function deleteTemplate(index) {
-      const templates = [...(window._postTemplates || [])];
-      templates.splice(index, 1);
-      const res = await fetch('/api/post/config', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ templates }),
-      });
-      if (res.ok) {
-        showToast('模板已删除', 'success');
-        loadPostConfig();
-      }
+      }).catch(() => {});
     }
 
     async function doPost() {
@@ -798,26 +659,43 @@
 
     async function toggleAutoPost() {
       const btn = document.getElementById('btn-auto-post-toggle');
-      if (btn.textContent === 'Stop Auto') {
+      if (btn.textContent === 'Stop') {
         await stopAutoPost();
         return;
       }
 
+      const text = document.getElementById('post-textarea').value.trim();
+      if (!text) { showToast('请先输入内容', 'error'); return; }
+
       const interval = parseInt(document.getElementById('post-interval-input').value);
       if (!interval || interval < 5) { showToast('间隔至少 5 分钟', 'error'); return; }
 
-      const templateSelect = document.getElementById('auto-post-template-select');
-      const templateText = templateSelect.value;
-      if (!templateText) { showToast('请选择发帖模板', 'error'); return; }
+      // 先立即发一条
+      const postRes = await fetch('/api/post', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ text }),
+      });
+      const postData = await postRes.json();
+      if (!postData.ok) { showToast('首次发送失败', 'error'); return; }
+      showToast('已发送！下次: ' + interval + ' 分钟后', 'success');
 
-      const res = await api('/api/post/schedule/start', 'POST', { intervalMinutes: interval, templateText });
+      // 启动定时
+      const res = await api('/api/post/schedule/start', 'POST', { intervalMinutes: interval, templateText: text });
       if (res.ok) {
-        btn.textContent = 'Stop Auto';
+        btn.textContent = 'Stop';
         btn.className = 'btn-outline active';
         document.getElementById('btn-post-stop').style.display = 'inline-block';
-        document.getElementById('post-schedule-status').className = 'section-status active';
-        document.getElementById('post-schedule-status').textContent = `Auto posting every ${interval} min`;
+        const statusEl = document.getElementById('post-schedule-status');
+        statusEl.style.color = '#00ba7c';
+        updateNextPostTime(interval);
       }
+    }
+
+    function updateNextPostTime(intervalMin) {
+      const next = new Date(Date.now() + intervalMin * 60000);
+      document.getElementById('post-schedule-status').textContent =
+        'Next: ' + next.toLocaleTimeString();
     }
 
     async function stopAutoPost() {
@@ -826,31 +704,19 @@
         document.getElementById('btn-auto-post-toggle').textContent = 'Start Auto Post';
         document.getElementById('btn-auto-post-toggle').className = 'btn-outline';
         document.getElementById('btn-post-stop').style.display = 'none';
-        document.getElementById('post-schedule-status').className = 'section-status idle';
-        document.getElementById('post-schedule-status').textContent = 'Idle';
+        document.getElementById('post-schedule-status').textContent = '';
+        document.getElementById('post-schedule-status').style.color = '#888';
       }
     }
 
     function updatePostScheduleUI(data) {
-      if (!data || !data.postSchedule) return;
+      if (!data?.postSchedule?.enabled) return;
       const ps = data.postSchedule;
-      const btn = document.getElementById('btn-auto-post-toggle');
-      const stopBtn = document.getElementById('btn-post-stop');
-      const statusEl = document.getElementById('post-schedule-status');
-
-      if (ps.enabled) {
-        btn.textContent = 'Stop Auto';
-        btn.className = 'btn-outline active';
-        stopBtn.style.display = 'inline-block';
-        statusEl.className = 'section-status active';
-        statusEl.textContent = `Auto posting every ${ps.intervalSeconds / 60} min`;
-      } else {
-        btn.textContent = 'Start Auto Post';
-        btn.className = 'btn-outline';
-        stopBtn.style.display = 'none';
-        statusEl.className = 'section-status idle';
-        statusEl.textContent = 'Idle';
-      }
+      document.getElementById('btn-auto-post-toggle').textContent = 'Stop';
+      document.getElementById('btn-auto-post-toggle').className = 'btn-outline active';
+      document.getElementById('btn-post-stop').style.display = 'inline-block';
+      document.getElementById('post-interval-input').value = ps.intervalSeconds / 60;
+      updateNextPostTime(ps.intervalSeconds / 60);
     }
 
     loadPostConfig();
