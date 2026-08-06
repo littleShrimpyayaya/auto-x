@@ -878,28 +878,41 @@ export class BrowserClient {
 
     // 点击发帖框
     const clicked = await this.page!.evaluate(() => {
-      // X 的发帖框有多种可能的 selector
-      const selectors = [
+      // 方式 1：data-testid
+      for (const sel of [
         '[data-testid="tweetTextarea_0"]',
         '[data-testid="tweetTextarea_0_label"]',
+        '[data-testid="tweetTextarea"]',
+        '[data-testid*="tweetTextarea"]',
         '[role="textbox"][data-testid*="tweet"]',
         '.public-DraftEditor-content',
-        '[aria-label="Post text"]',
         '[data-testid="tweetButtonInline"]',
-      ];
-      for (const sel of selectors) {
+      ]) {
         const el = document.querySelector(sel);
         if (el) { (el as HTMLElement).click(); return true; }
       }
-      // 备用：找 "What's happening?" 区域
-      const allDivs = document.querySelectorAll('[role="textbox"]');
-      for (const div of allDivs) {
-        const label = div.getAttribute('aria-label') || '';
-        if (label.includes('Post') || label.includes('Tweet') || label.includes('What')) {
-          (div as HTMLElement).click();
+      // 方式 2：所有 contenteditable 元素
+      const editables = document.querySelectorAll('[contenteditable="true"]');
+      for (const el of editables) {
+        const aria = el.getAttribute('aria-label') || '';
+        const role = el.getAttribute('role') || '';
+        if (aria || role === 'textbox') {
+          (el as HTMLElement).click();
           return true;
         }
       }
+      // 方式 3：所有 role="textbox"
+      const textboxes = document.querySelectorAll('[role="textbox"]');
+      for (const el of textboxes) {
+        const label = (el.getAttribute('aria-label') || '').toLowerCase();
+        if (!label || label.includes('post') || label.includes('tweet') || label.includes('what') || label.includes('text')) {
+          (el as HTMLElement).click();
+          return true;
+        }
+      }
+      // 方式 4：点击 "What is happening?!" 占位区域
+      const placeholder = document.querySelector('[data-testid="tweetTextarea_0_label"] span');
+      if (placeholder) { (placeholder as HTMLElement).click(); return true; }
       return false;
     });
 
@@ -910,33 +923,53 @@ export class BrowserClient {
 
     await this.page!.waitForTimeout(800);
 
-    // 模拟人类逐字符输入
-    for (let i = 0; i < text.length; i++) {
-      await this.page!.keyboard.type(text[i], { delay: 30 + Math.random() * 50 });
+    // 先尝试用 fill 填入（适用于 textarea）
+    try {
+      const textarea = this.page!.locator('[data-testid="tweetTextarea_0"], [role="textbox"]').first();
+      if (await textarea.count() > 0) {
+        await textarea.fill(text);
+        await this.page!.waitForTimeout(500);
+      }
+    } catch { /* fallback to keyboard */ }
+
+    // 再用键盘逐字符输入作为补充（适用于 contenteditable）
+    const activeEl = await this.page!.evaluate(() => {
+      const el = document.activeElement;
+      return el ? (el.getAttribute('role') || el.tagName) : 'none';
+    });
+    if (activeEl === 'textbox' || activeEl === 'DIV') {
+      for (let i = 0; i < text.length; i++) {
+        await this.page!.keyboard.type(text[i], { delay: 30 + Math.random() * 50 });
+      }
     }
 
     await this.page!.waitForTimeout(500 + Math.random() * 500);
 
     // 点击发送按钮
     const posted = await this.page!.evaluate(() => {
-      const selectors = [
+      // 方式 1：按 data-testid
+      for (const sel of [
         '[data-testid="tweetButton"]',
         '[data-testid="tweetButtonInline"]',
-        'button[aria-label*="Post"]',
-        'button[aria-label*="Tweet"]',
-      ];
-      for (const sel of selectors) {
+        'button[data-testid*="tweetButton"]',
+      ]) {
         const el = document.querySelector(sel);
         if (el && !(el as HTMLButtonElement).disabled) {
           (el as HTMLButtonElement).click();
           return true;
         }
       }
-      // 备用：找包含 "Post" 文字的按钮
-      const buttons = document.querySelectorAll('[role="button"]');
-      for (const btn of buttons) {
-        const label = btn.getAttribute('aria-label') || btn.textContent || '';
-        if ((label.includes('Post') || label.includes('发帖') || label.includes('Tweet')) && !btn.hasAttribute('disabled')) {
+      // 方式 2：按 aria-label
+      for (const btn of document.querySelectorAll('button, [role="button"]')) {
+        const aria = ((btn as HTMLElement).getAttribute('aria-label') || '').toLowerCase();
+        const text = (btn.textContent || '').trim().toLowerCase();
+        const testId = ((btn as HTMLElement).getAttribute('data-testid') || '').toLowerCase();
+        if (
+          !(btn as HTMLButtonElement).disabled &&
+          (aria.includes('post') || aria.includes('tweet') || aria.includes('send') ||
+           testId.includes('tweet') || testId.includes('post') ||
+           text === 'post' || text === '发帖')
+        ) {
           (btn as HTMLButtonElement).click();
           return true;
         }
