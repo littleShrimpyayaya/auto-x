@@ -56,3 +56,28 @@ export interface AutoFollowResult {
   followed: string[];
   alreadyFollowing: number;
 }
+
+export interface PendingItem {
+  userId: string;
+  username: string;
+  name: string;
+  status: string;
+  errorMessage: string | null;
+  createdAt: Date;
+  completedAt: Date | null;
+}
+
+export interface ProcessResult {
+  processed: boolean;
+  userId?: string;
+  status?: string;
+}
+
+export interface PendingStats {
+  followPending: number;
+  followCompleted: number;
+  followFailed: number;
+  unfollowPending: number;
+  unfollowCompleted: number;
+  unfollowFailed: number;
+}

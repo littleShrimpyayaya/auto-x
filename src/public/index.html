@@ -112,6 +112,59 @@
     </div>
 
     <div class="card">
+      <h2>Pending Queue</h2>
+      <div class="stats">
+        <div class="stat">
+          <div class="value" id="pending-follow-count">0</div>
+          <div class="label">To Follow Back</div>
+        </div>
+        <div class="stat">
+          <div class="value" id="pending-follow-done">0</div>
+          <div class="label">Followed</div>
+        </div>
+        <div class="stat">
+          <div class="value" id="pending-follow-failed">0</div>
+          <div class="label">Failed</div>
+        </div>
+      </div>
+      <div class="stats" style="margin-top: 10px;">
+        <div class="stat">
+          <div class="value" id="pending-unfollow-count">0</div>
+          <div class="label">To Unfollow</div>
+        </div>
+        <div class="stat">
+          <div class="value" id="pending-unfollow-done">0</div>
+          <div class="label">Unfollowed</div>
+        </div>
+        <div class="stat">
+          <div class="value" id="pending-unfollow-failed">0</div>
+          <div class="label">Failed</div>
+        </div>
+      </div>
+      <div style="margin-top: 14px;">
+        <div class="actions">
+          <button class="btn-success" onclick="api('/api/process-follow', 'POST')">Follow One</button>
+          <button class="btn-warning" onclick="api('/api/process-unfollow', 'POST')">Unfollow One</button>
+        </div>
+        <div class="schedule-row" style="margin-top: 10px;">
+          <span>Auto Follow-back Interval:</span>
+          <input type="number" id="follow-interval-input" value="30" min="5" step="5">
+          <span>seconds</span>
+          <button class="btn-success" onclick="startProcessFollow()">Start</button>
+          <button class="btn-secondary" onclick="api('/api/process-follow/stop', 'POST')">Stop</button>
+        </div>
+        <div class="schedule-row" style="margin-top: 6px;">
+          <span>Auto Unfollow Interval:</span>
+          <input type="number" id="unfollow-interval-input" value="30" min="5" step="5">
+          <span>seconds</span>
+          <button class="btn-warning" onclick="startProcessUnfollow()">Start</button>
+          <button class="btn-secondary" onclick="api('/api/process-unfollow/stop', 'POST')">Stop</button>
+        </div>
+        <div class="auto-follow-status" id="process-status"></div>
+      </div>
+    </div>
+
+    <div class="card">
       <h2>Actions</h2>
       <div class="actions">
         <button class="btn-primary" onclick="api('/api/sync-followers', 'POST')">Sync Followers</button>
@@ -194,6 +247,18 @@
       await api('/api/auto-follow/stop', 'POST');
     }
 
+    async function startProcessFollow() {
+      const interval = parseInt(document.getElementById('follow-interval-input').value);
+      if (interval < 5) { addLog('Interval must be at least 5 seconds'); return; }
+      await api('/api/process-follow/start', 'POST', { interval });
+    }
+
+    async function startProcessUnfollow() {
+      const interval = parseInt(document.getElementById('unfollow-interval-input').value);
+      if (interval < 5) { addLog('Interval must be at least 5 seconds'); return; }
+      await api('/api/process-unfollow/start', 'POST', { interval });
+    }
+
     async function refreshStatus() {
       try {
         const res = await fetch('/api/status');
@@ -221,6 +286,21 @@
         document.getElementById('follower-count').textContent = data.followerCount;
         document.getElementById('following-count').textContent = data.followingCount;
         document.getElementById('auto-follow-total').textContent = data.autoFollow.totalFollowed;
+
+        if (data.pending) {
+          document.getElementById('pending-follow-count').textContent = data.pending.followPending;
+          document.getElementById('pending-follow-done').textContent = data.pending.followCompleted;
+          document.getElementById('pending-follow-failed').textContent = data.pending.followFailed;
+          document.getElementById('pending-unfollow-count').textContent = data.pending.unfollowPending;
+          document.getElementById('pending-unfollow-done').textContent = data.pending.unfollowCompleted;
+          document.getElementById('pending-unfollow-failed').textContent = data.pending.unfollowFailed;
+        }
+
+        const processStatus = document.getElementById('process-status');
+        const parts = [];
+        if (data.processFollow?.enabled) parts.push(`Auto follow-back: every ${data.processFollow.intervalSeconds}s`);
+        if (data.processUnfollow?.enabled) parts.push(`Auto unfollow: every ${data.processUnfollow.intervalSeconds}s`);
+        processStatus.textContent = parts.length > 0 ? parts.join(' | ') : 'No auto-processing active';
 
         const dot = document.getElementById('status-dot');
         dot.className = 'status-dot ' + data.task.status;

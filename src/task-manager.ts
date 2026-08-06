@@ -1,9 +1,9 @@
 import { Service } from './service.js';
 import { UserRepository } from './user-repository.js';
 import { XClient } from './x-client.js';
-import type { XUser } from './types.js';
+import type { XUser, PendingStats } from './types.js';
 
-export type TaskType = 'sync-followers' | 'sync-following' | 'auto-follow';
+export type TaskType = 'sync-followers' | 'sync-following' | 'auto-follow' | 'process-follow' | 'process-unfollow';
 export type TaskStatusType = 'idle' | 'running' | 'completed' | 'error' | 'cancelled';
 
 export interface TaskState {
@@ -25,6 +25,15 @@ export interface StatusInfo {
     lastRunAt: string | null;
     totalFollowed: number;
   };
+  pending: PendingStats | null;
+  processFollow: {
+    enabled: boolean;
+    intervalSeconds: number;
+  };
+  processUnfollow: {
+    enabled: boolean;
+    intervalSeconds: number;
+  };
   connected: boolean;
 }
 
@@ -40,6 +49,13 @@ export class TaskManager {
   private autoFollowInterval = 0;
   private autoFollowLastRunAt: string | null = null;
   private autoFollowTotalFollowed = 0;
+
+  private processFollowTimer: ReturnType<typeof setInterval> | null = null;
+  private processFollowInterval = 0;
+  private processUnfollowTimer: ReturnType<typeof setInterval> | null = null;
+  private processUnfollowInterval = 0;
+  private totalProcessedFollow = 0;
+  private totalProcessedUnfollow = 0;
 
   private me: XUser | null = null;
   private connected = false;
@@ -63,6 +79,8 @@ export class TaskManager {
 
   async reconnect(newXClient: XClient, newService: Service): Promise<XUser> {
     this.stopAutoFollowSchedule();
+    this.stopProcessFollowSchedule();
+    this.stopProcessUnfollowSchedule();
     this.stopCurrentTask();
 
     this.xClient = newXClient;
@@ -163,17 +181,86 @@ export class TaskManager {
     this.autoFollowInterval = 0;
   }
 
+  startProcessFollowOnce(): void {
+    this.runTask('process-follow', async (_signal) => {
+      const result = await this.service.processOnePendingFollow(this.userId);
+      if (result.processed && result.status === 'completed') {
+        this.totalProcessedFollow++;
+      }
+    });
+  }
+
+  startProcessUnfollowOnce(): void {
+    this.runTask('process-unfollow', async (_signal) => {
+      const result = await this.service.processOnePendingUnfollow(this.userId);
+      if (result.processed && result.status === 'completed') {
+        this.totalProcessedUnfollow++;
+      }
+    });
+  }
+
+  startProcessFollowSchedule(intervalSeconds: number): void {
+    this.stopProcessFollowSchedule();
+    this.processFollowInterval = intervalSeconds;
+
+    this.processFollowTimer = setInterval(() => {
+      if (!this.currentController) {
+        this.runTask('process-follow', async (signal) => {
+          const result = await this.service.processOnePendingFollow(this.userId);
+          if (result.processed && result.status === 'completed') {
+            this.totalProcessedFollow++;
+          }
+        });
+      }
+    }, intervalSeconds * 1000);
+  }
+
+  stopProcessFollowSchedule(): void {
+    if (this.processFollowTimer) {
+      clearInterval(this.processFollowTimer);
+      this.processFollowTimer = null;
+    }
+    this.processFollowInterval = 0;
+  }
+
+  startProcessUnfollowSchedule(intervalSeconds: number): void {
+    this.stopProcessUnfollowSchedule();
+    this.processUnfollowInterval = intervalSeconds;
+
+    this.processUnfollowTimer = setInterval(() => {
+      if (!this.currentController) {
+        this.runTask('process-unfollow', async (signal) => {
+          const result = await this.service.processOnePendingUnfollow(this.userId);
+          if (result.processed && result.status === 'completed') {
+            this.totalProcessedUnfollow++;
+          }
+        });
+      }
+    }, intervalSeconds * 1000);
+  }
+
+  stopProcessUnfollowSchedule(): void {
+    if (this.processUnfollowTimer) {
+      clearInterval(this.processUnfollowTimer);
+      this.processUnfollowTimer = null;
+    }
+    this.processUnfollowInterval = 0;
+  }
+
   async getStatus(): Promise<StatusInfo> {
     let followerCount = 0;
     let followingCount = 0;
+    let pending: PendingStats | null = null;
 
     if (this.me) {
-      const [f1, f2] = await Promise.all([
+      const [f1, f2, stats] = await Promise.all([
         this.repo.getRelationshipIds(this.me.id, 'follower'),
         this.repo.getRelationshipIds(this.me.id, 'following'),
+        this.repo.getPendingStats(),
       ]);
       followerCount = f1.length;
       followingCount = f2.length;
+      pending = stats;
     }
 
     return {
@@ -192,6 +279,15 @@ export class TaskManager {
         intervalSeconds: this.autoFollowInterval,
         lastRunAt: this.autoFollowLastRunAt,
         totalFollowed: this.autoFollowTotalFollowed,
+      },
+      pending,
+      processFollow: {
+        enabled: this.processFollowTimer !== null,
+        intervalSeconds: this.processFollowInterval,
+      },
+      processUnfollow: {
+        enabled: this.processUnfollowTimer !== null,
+        intervalSeconds: this.processUnfollowInterval,
       },
       connected: this.connected,
     };

@@ -1,5 +1,5 @@
 import type pg from 'pg';
-import type { XUser, DBUser, SyncState } from './types.js';
+import type { XUser, DBUser, SyncState, PendingItem, PendingStats } from './types.js';
 
 export class UserRepository {
   constructor(private pool: pg.Pool) {}
@@ -96,4 +96,113 @@ export class UserRepository {
       [userId],
     );
   }
+
+  async upsertPendingFollow(userIds: string[]): Promise<void> {
+    if (userIds.length === 0) return;
+    const res = await this.pool.query(
+      `SELECT u.id, u.username, u.name FROM users u WHERE u.id = ANY($1)`,
+      [userIds],
+    );
+    const userMap = new Map(res.rows.map((r: any) => [String(r.id), { username: r.username, name: r.name }]));
+
+    for (const userId of userIds) {
+      const info = userMap.get(userId) ?? { username: '', name: '' };
+      await this.pool.query(
+        `INSERT INTO pending_follow (user_id, username, name)
+         VALUES ($1, $2, $3)
+         ON CONFLICT (user_id) DO NOTHING`,
+        [userId, info.username, info.name],
+      );
+    }
+  }
+
+  async upsertPendingUnfollow(userIds: string[]): Promise<void> {
+    if (userIds.length === 0) return;
+    const res = await this.pool.query(
+      `SELECT u.id, u.username, u.name FROM users u WHERE u.id = ANY($1)`,
+      [userIds],
+    );
+    const userMap = new Map(res.rows.map((r: any) => [String(r.id), { username: r.username, name: r.name }]));
+
+    for (const userId of userIds) {
+      const info = userMap.get(userId) ?? { username: '', name: '' };
+      await this.pool.query(
+        `INSERT INTO pending_unfollow (user_id, username, name)
+         VALUES ($1, $2, $3)
+         ON CONFLICT (user_id) DO NOTHING`,
+        [userId, info.username, info.name],
+      );
+    }
+  }
+
+  async getNextPendingFollow(): Promise<PendingItem | null> {
+    const res = await this.pool.query(
+      `SELECT * FROM pending_follow WHERE status = 'pending' ORDER BY created_at ASC LIMIT 1`,
+    );
+    if (res.rows.length === 0) return null;
+    return mapPendingRow(res.rows[0]);
+  }
+
+  async getNextPendingUnfollow(): Promise<PendingItem | null> {
+    const res = await this.pool.query(
+      `SELECT * FROM pending_unfollow WHERE status = 'pending' ORDER BY created_at ASC LIMIT 1`,
+    );
+    if (res.rows.length === 0) return null;
+    return mapPendingRow(res.rows[0]);
+  }
+
+  async markPendingFollowStatus(userId: string, status: string, errorMessage?: string): Promise<void> {
+    await this.pool.query(
+      `UPDATE pending_follow SET status = $2, error_message = $3, completed_at = NOW() WHERE user_id = $1`,
+      [userId, status, errorMessage ?? null],
+    );
+  }
+
+  async markPendingUnfollowStatus(userId: string, status: string, errorMessage?: string): Promise<void> {
+    await this.pool.query(
+      `UPDATE pending_unfollow SET status = $2, error_message = $3, completed_at = NOW() WHERE user_id = $1`,
+      [userId, status, errorMessage ?? null],
+    );
+  }
+
+  async getPendingStats(): Promise<PendingStats> {
+    const [followRes, unfollowRes] = await Promise.all([
+      this.pool.query(`SELECT status, COUNT(*)::int AS count FROM pending_follow GROUP BY status`),
+      this.pool.query(`SELECT status, COUNT(*)::int AS count FROM pending_unfollow GROUP BY status`),
+    ]);
+
+    const countByStatus = (rows: any[], status: string) =>
+      rows.find((r: any) => r.status === status)?.count ?? 0;
+
+    return {
+      followPending: countByStatus(followRes.rows, 'pending'),
+      followCompleted: countByStatus(followRes.rows, 'completed'),
+      followFailed: countByStatus(followRes.rows, 'failed'),
+      unfollowPending: countByStatus(unfollowRes.rows, 'pending'),
+      unfollowCompleted: countByStatus(unfollowRes.rows, 'completed'),
+      unfollowFailed: countByStatus(unfollowRes.rows, 'failed'),
+    };
+  }
+
+  async removePendingFollowByUserIds(userIds: string[]): Promise<void> {
+    if (userIds.length === 0) return;
+    await this.pool.query(`DELETE FROM pending_follow WHERE user_id = ANY($1)`, [userIds]);
+  }
+
+  async removePendingUnfollowByUserIds(userIds: string[]): Promise<void> {
+    if (userIds.length === 0) return;
+    await this.pool.query(`DELETE FROM pending_unfollow WHERE user_id = ANY($1)`, [userIds]);
+  }
+}
+
+function mapPendingRow(row: any): PendingItem {
+  return {
+    userId: String(row.user_id),
+    username: row.username ?? '',
+    name: row.name ?? '',
+    status: row.status,
+    errorMessage: row.error_message ?? null,
+    createdAt: row.created_at,
+    completedAt: row.completed_at ?? null,
+  };
 }

@@ -33,6 +33,33 @@ CREATE TABLE IF NOT EXISTS sync_state (
   last_synced_at   TIMESTAMPTZ DEFAULT NOW()
 );
 
+CREATE TABLE IF NOT EXISTS pending_follow (
+  id            BIGSERIAL PRIMARY KEY,
+  user_id       BIGINT NOT NULL,
+  username      VARCHAR(15) NOT NULL DEFAULT '',
+  name          VARCHAR(50) NOT NULL DEFAULT '',
+  status        VARCHAR(10) NOT NULL DEFAULT 'pending',
+  error_message TEXT,
+  created_at    TIMESTAMPTZ DEFAULT NOW(),
+  completed_at  TIMESTAMPTZ,
+  UNIQUE(user_id)
+);
+
+CREATE TABLE IF NOT EXISTS pending_unfollow (
+  id            BIGSERIAL PRIMARY KEY,
+  user_id       BIGINT NOT NULL,
+  username      VARCHAR(15) NOT NULL DEFAULT '',
+  name          VARCHAR(50) NOT NULL DEFAULT '',
+  status        VARCHAR(10) NOT NULL DEFAULT 'pending',
+  error_message TEXT,
+  created_at    TIMESTAMPTZ DEFAULT NOW(),
+  completed_at  TIMESTAMPTZ,
+  UNIQUE(user_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_pending_follow_status ON pending_follow(status);
+CREATE INDEX IF NOT EXISTS idx_pending_unfollow_status ON pending_unfollow(status);
+
 CREATE INDEX IF NOT EXISTS idx_relationships_source ON relationships (source_user_id, type);
 CREATE INDEX IF NOT EXISTS idx_relationships_target ON relationships (target_user_id, type);
 `;

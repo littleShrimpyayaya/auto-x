@@ -98,5 +98,62 @@ export function createServer(taskManager: TaskManager): express.Express {
     res.json({ ok: true, message: 'Stop signal sent' });
   });
 
+  app.get('/api/pending/stats', async (_req, res) => {
+    try {
+      const status = await taskManager.getStatus();
+      res.json(status.pending);
+    } catch (err: any) {
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  app.post('/api/process-follow', (_req, res) => {
+    try {
+      taskManager.startProcessFollowOnce();
+      res.json({ ok: true, message: 'Processing one pending follow' });
+    } catch (err: any) {
+      res.status(409).json({ error: err.message });
+    }
+  });
+
+  app.post('/api/process-follow/start', (req, res) => {
+    const { interval } = req.body;
+    if (!interval || interval < 5) {
+      res.status(400).json({ error: 'Interval must be at least 5 seconds' });
+      return;
+    }
+    taskManager.startProcessFollowSchedule(interval);
+    res.json({ ok: true, message: `Auto process-follow scheduled every ${interval}s` });
+  });
+
+  app.post('/api/process-follow/stop', (_req, res) => {
+    taskManager.stopProcessFollowSchedule();
+    res.json({ ok: true, message: 'Auto process-follow stopped' });
+  });
+
+  app.post('/api/process-unfollow', (_req, res) => {
+    try {
+      taskManager.startProcessUnfollowOnce();
+      res.json({ ok: true, message: 'Processing one pending unfollow' });
+    } catch (err: any) {
+      res.status(409).json({ error: err.message });
+    }
+  });
+
+  app.post('/api/process-unfollow/start', (req, res) => {
+    const { interval } = req.body;
+    if (!interval || interval < 5) {
+      res.status(400).json({ error: 'Interval must be at least 5 seconds' });
+      return;
+    }
+    taskManager.startProcessUnfollowSchedule(interval);
+    res.json({ ok: true, message: `Auto process-unfollow scheduled every ${interval}s` });
+  });
+
+  app.post('/api/process-unfollow/stop', (_req, res) => {
+    taskManager.stopProcessUnfollowSchedule();
+    res.json({ ok: true, message: 'Auto process-unfollow stopped' });
+  });
+
   return app;
 }

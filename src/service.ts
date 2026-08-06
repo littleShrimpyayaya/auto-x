@@ -1,6 +1,6 @@
 import { XClient } from './x-client.js';
 import { UserRepository } from './user-repository.js';
-import type { XUser, SyncResult, AutoFollowResult } from './types.js';
+import type { XUser, SyncResult, AutoFollowResult, ProcessResult } from './types.js';
 
 export class Service {
   constructor(
@@ -34,6 +34,7 @@ export class Service {
     }
 
     await this.repo.clearSyncCursor(userId, 'followers');
+    await this.computePendingQueues(userId);
     return { total, newCount };
   }
 
@@ -63,6 +64,7 @@ export class Service {
     }
 
     await this.repo.clearSyncCursor(userId, 'following');
+    await this.computePendingQueues(userId);
     return { total, newCount };
   }
 
@@ -92,5 +94,52 @@ export class Service {
     }
 
     return { followed, alreadyFollowing };
+  }
+
+  async computePendingQueues(userId: string): Promise<void> {
+    const [followerIds, followingIds] = await Promise.all([
+      this.repo.getRelationshipIds(userId, 'follower'),
+      this.repo.getRelationshipIds(userId, 'following'),
+    ]);
+    const followingSet = new Set(followingIds);
+    const followerSet = new Set(followerIds);
+
+    const toFollow = followerIds.filter(id => !followingSet.has(id));
+    const toUnfollow = followingIds.filter(id => !followerSet.has(id));
+
+    await this.repo.upsertPendingFollow(toFollow);
+    await this.repo.upsertPendingUnfollow(toUnfollow);
+  }
+
+  async processOnePendingFollow(userId: string): Promise<ProcessResult> {
+    const item = await this.repo.getNextPendingFollow();
+    if (!item) return { processed: false };
+
+    try {
+      await this.xClient.follow(userId, item.userId);
+      await this.repo.markPendingFollowStatus(item.userId, 'completed');
+      await this.repo.upsertRelationships(userId, [{ id: item.userId, name: item.name, username: item.username }], 'following');
+      return { processed: true, userId: item.userId, status: 'completed' };
+    } catch (err: any) {
+      if (err?.name === 'AbortError') throw err;
+      await this.repo.markPendingFollowStatus(item.userId, 'failed', err.message);
+      return { processed: true, userId: item.userId, status: 'failed' };
+    }
+  }
+
+  async processOnePendingUnfollow(userId: string): Promise<ProcessResult> {
+    const item = await this.repo.getNextPendingUnfollow();
+    if (!item) return { processed: false };
+
+    try {
+      await this.xClient.unfollow(userId, item.userId);
+      await this.repo.markPendingUnfollowStatus(item.userId, 'completed');
+      await this.repo.removePendingFollowByUserIds([item.userId]);
+      return { processed: true, userId: item.userId, status: 'completed' };
+    } catch (err: any) {
+      if (err?.name === 'AbortError') throw err;
+      await this.repo.markPendingUnfollowStatus(item.userId, 'failed', err.message);
+      return { processed: true, userId: item.userId, status: 'failed' };
+    }
   }
 }
