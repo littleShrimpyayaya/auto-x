@@ -1209,30 +1209,63 @@ export class BrowserClient {
       return { ok: false };
     }
 
-    // 等待发送完成：检测推文框清空或 toast 提示出现
+    // 等待发送完成：检测推文框清空或错误提示
     let posted = false;
+    let errorReason = '';
     for (let wait = 0; wait < 30; wait++) {
       await this.page!.waitForTimeout(500);
-      const done = await this.page!.evaluate(() => {
-        // 检测 1：发帖框内容被清空（推文已发出）
+      const result = await this.page!.evaluate(() => {
+        // 检测错误：重复推文 / 限流 / 其他错误 toast
+        // 注意：X.com 成功后会提示「你的帖子已发送」，别当成错误
+        const errorSelectors = [
+          '[data-testid="toast"]', '[role="alert"]',
+          'div[aria-live="assertive"]', 'div[aria-live="polite"]',
+          '[data-testid="snackbar"]',
+        ];
+        for (const sel of errorSelectors) {
+          const el = document.querySelector(sel);
+          if (!el) continue;
+          const text = (el.textContent || '').toLowerCase();
+          // 先排除成功提示
+          if (text.includes('已发送') || text.includes('已发布') ||
+              text.includes('sent') || text.includes('posted') ||
+              text.includes('view') || text.includes('查看')) {
+            return { done: true, error: '' };  // 这是成功发送的确认
+          }
+          // 再检测真正的错误
+          if (text.includes('already') || text.includes('duplicate') ||
+              text.includes('重复') ||
+              text.includes('limit') || text.includes('限制') ||
+              text.includes('try again') || text.includes('再试') ||
+              text.includes('something went wrong') || text.includes('出错了')) {
+            return { done: false, error: text.substring(0, 100) };
+          }
+        }
+
+        // 检测：发帖框内容被清空（推文已发出）
         const editor = document.querySelector('[data-testid="tweetTextarea_0"], [role="textbox"][data-testid*="tweetTextarea"]');
         if (editor) {
           const text = (editor as HTMLElement).innerText || (editor as HTMLInputElement).value || '';
-          if (!text.trim()) return true;
+          if (!text.trim()) return { done: true, error: '' };
         }
-        // 检测 2：toast / snackbar 提示
-        const toast = document.querySelector('[data-testid="toast"], [role="alert"], [data-testid="snackbar"]');
-        if (toast) return true;
-        // 检测 3：发帖按钮恢复可用（说明上一条已发送）
-        const btn = document.querySelector('[data-testid="tweetButton"][disabled]');
-        if (!btn) {
-          // 没找到 disabled 的按钮，可能是另一个信号...
-        }
-        return false;
+        return { done: false, error: '' };
       });
-      if (done) { posted = true; break; }
+
+      if (result.error) {
+        errorReason = result.error;
+        posted = false;
+        break;
+      }
+      if (result.done) {
+        posted = true;
+        break;
+      }
     }
 
+    if (errorReason) {
+      console.warn(`[BrowserClient] 发帖被拒绝: ${errorReason}`);
+      return { ok: false };
+    }
     if (posted) {
       console.log('[BrowserClient] 发帖成功（检测到确认信号）');
     } else {

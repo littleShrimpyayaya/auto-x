@@ -338,6 +338,7 @@
     }
 
     let followBackPollTimer = null;
+    let lastFollowBackScanStatus = 'idle';  // 避免重复弹 toast
 
     async function computeFollowBack() {
       const btn = document.getElementById('btn-compute-follow');
@@ -346,6 +347,7 @@
       btn.disabled = true;
       statusEl.textContent = '后台扫描中，请等待…';
       statusEl.style.color = '#1d9bf0';
+      lastFollowBackScanStatus = 'scanning';  // 新扫描，允许弹 toast
 
       try {
         const res = await fetch('/api/compute-follow-back', { method: 'POST' });
@@ -386,20 +388,26 @@
         statusEl.textContent = '找到 ' + scan.count + ' 个待回关粉丝';
         statusEl.style.color = '#00ba7c';
         document.getElementById('follow-queue-count').textContent = '待回关: ' + scan.count;
-        showToast('待回关: ' + scan.count + ' 人', 'success');
+        // 只在状态变化时弹一次 toast（避免轮询时反复弹）
+        if (lastFollowBackScanStatus === 'scanning') {
+          showToast('待回关: ' + scan.count + ' 人', 'success');
+        }
         btn.textContent = '计算待回关';
         btn.disabled = false;
       } else if (scan.status === 'error') {
         if (followBackPollTimer) { clearInterval(followBackPollTimer); followBackPollTimer = null; }
         statusEl.textContent = scan.error || '扫描失败';
         statusEl.style.color = '#f4212e';
-        showToast(scan.error || '扫描失败', 'error');
+        if (lastFollowBackScanStatus === 'scanning') {
+          showToast(scan.error || '扫描失败', 'error');
+        }
         btn.textContent = '计算待回关';
         btn.disabled = false;
       } else if (scan.status === 'scanning') {
         statusEl.textContent = '后台扫描中… 已收集 ' + (scan.count || 0) + ' 个';
         statusEl.style.color = '#1d9bf0';
       }
+      lastFollowBackScanStatus = scan.status;
     }
 
     async function batchFollow() {

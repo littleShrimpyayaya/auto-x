@@ -10,6 +10,7 @@ export interface PostConfig {
   autoPostIntervalMinutes: number;
   autoPostTemplateIndex: number;
   lastPostAt: string | null;
+  postAutoIndex: number;
 }
 
 export const DEFAULT_POST: PostConfig = {
@@ -21,6 +22,7 @@ export const DEFAULT_POST: PostConfig = {
   autoPostIntervalMinutes: 60,
   autoPostTemplateIndex: 0,
   lastPostAt: null,
+  postAutoIndex: 0,
 };
 
 export interface AutomationConfig {

@@ -86,6 +86,7 @@ export class TaskManager {
   private postInterval = 0;
   private postTemplateText = '';
   private postNextRunAt: string | null = null;
+  private postAutoIndex = 0;  // 自动发帖序号，防 X.com 重复内容静默拒绝
 
   private me: XUser | null = null;
   private connected = false;
@@ -324,13 +325,22 @@ export class TaskManager {
 
     const doPost = async () => {
       if (this.service['xClient'] instanceof BrowserClient) {
-        console.log('[Post] 定时发帖...');
+        this.postAutoIndex++;
+        // 自动发帖末尾加时间戳，防 X.com 重复检测（完全相同的推文会被静默拒绝）
+        const now = new Date();
+        const ts = now.toLocaleString('zh-CN', { month:'numeric', day:'numeric', hour:'2-digit', minute:'2-digit', hour12: false });
+        const postText = templateText + `\n\n${ts} ⏳`;
+        console.log(`[Post] 定时发帖 #${this.postAutoIndex} @ ${ts}...`);
         try {
-          await (this.service['xClient'] as BrowserClient).postTweet(templateText);
-          // 记录最近一次发帖时间
-          const cfg = loadPostConfig();
-          cfg.lastPostAt = new Date().toISOString();
-          savePostConfig(cfg);
+          const result = await (this.service['xClient'] as BrowserClient).postTweet(postText);
+          if (result.ok) {
+            const cfg = loadPostConfig();
+            cfg.lastPostAt = new Date().toISOString();
+            cfg.postAutoIndex = this.postAutoIndex;
+            savePostConfig(cfg);
+          } else {
+            console.warn(`[Post] 定时发帖 #${this.postAutoIndex} 发送失败，将重试`);
+          }
         } catch (err) {
           console.error('[Post] 定时发帖失败:', err);
         }
@@ -376,6 +386,9 @@ export class TaskManager {
       console.warn('[Post] 配置开启了自动发推，但没有模板文案，跳过恢复');
       return;
     }
+
+    // 恢复序号
+    this.postAutoIndex = cfg.postAutoIndex || 0;
 
     const intervalMs = interval * 60 * 1000;
     let firstDelay = intervalMs;

@@ -454,6 +454,7 @@ export function createServer(taskManager: TaskManager): express.Express {
         autoPostIntervalMinutes: body.autoPostIntervalMinutes ?? existing.autoPostIntervalMinutes,
         autoPostTemplateIndex: body.autoPostTemplateIndex ?? existing.autoPostTemplateIndex,
         lastPostAt: body.lastPostAt ?? existing.lastPostAt,
+        postAutoIndex: body.postAutoIndex ?? existing.postAutoIndex,
       };
 
       savePostConfig(config);
