@@ -6,6 +6,7 @@ export interface XUser {
   createdAt?: string;
   profileImageUrl?: string;
   verified?: boolean;
+  verifiedType?: string;
   connectionStatus?: string[];
   publicMetrics?: {
     followersCount: number;

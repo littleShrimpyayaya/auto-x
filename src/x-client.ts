@@ -3,7 +3,8 @@ import type { XUser, PaginatedUsers, FollowResult, UnfollowResult } from './type
 
 const DEFAULT_USER_FIELDS = [
   'id', 'name', 'username', 'description', 'created_at',
-  'public_metrics', 'profile_image_url', 'verified', 'connection_status',
+  'public_metrics', 'profile_image_url', 'verified', 'verified_type',
+  'connection_status',
 ] as const;
 
 export class XClient {
@@ -117,6 +118,7 @@ function mapUser(u: Record<string, any>): XUser {
     createdAt: u.created_at ?? u.createdAt,
     profileImageUrl: u.profile_image_url ?? u.profileImageUrl,
     verified: u.verified,
+    verifiedType: u.verified_type ?? u.verifiedType,
     connectionStatus: u.connection_status ?? u.connectionStatus,
     publicMetrics: u.public_metrics ?? u.publicMetrics
       ? {
