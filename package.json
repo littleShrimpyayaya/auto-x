@@ -1,0 +1,28 @@
+{
+  "name": "auto-x",
+  "version": "1.0.0",
+  "description": "X platform automation - follower management and auto follow-back",
+  "type": "module",
+  "main": "dist/index.js",
+  "scripts": {
+    "build": "tsc",
+    "start": "tsx src/index.ts",
+    "dev": "tsx watch src/index.ts",
+    "typecheck": "tsc --noEmit"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "packageManager": "pnpm@10.33.3",
+  "dependencies": {
+    "@xdevplatform/xdk": "^0.6.6",
+    "dotenv": "^17.4.2",
+    "pg": "^8.22.0"
+  },
+  "devDependencies": {
+    "@types/node": "^26.1.2",
+    "@types/pg": "^8.20.4",
+    "tsx": "^4.23.8",
+    "typescript": "^7.0.2"
+  }
+}
