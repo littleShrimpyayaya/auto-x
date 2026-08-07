@@ -512,10 +512,20 @@ export class BrowserClient {
     const needFollow: FollowBackCandidate[] = [];
     const needFollowKeys = new Set<string>(); // username lowercased
     const seenAllUsers = new Set<string>();   // 页面上见过的所有粉丝（含已关注）
+    const skippedLogged = new Set<string>();  // 跳过原因只打一次，避免滚动刷屏
     let prevSeenAll = 0;
     let noNewCount = 0;
     const MAX_SCROLLS = 800;
     const MAX_NO_NEW = 6;
+
+    const logSkipOnce = (username: string, reason: string) => {
+      const k = username.toLowerCase() + '|' + reason;
+      if (skippedLogged.has(k)) return;
+      skippedLogged.add(k);
+      // 推荐区噪声大且无诊断价值，默认不打日志
+      if (reason === 'suggested') return;
+      console.log(`[BrowserClient] ⏭ 跳过 @${username} — ${reason}`);
+    };
 
     for (let i = 0; i < MAX_SCROLLS; i++) {
       // 扫描当前视口：只收「需要回关」的 UserCell，同时统计所有出现过的粉丝
@@ -779,32 +789,30 @@ export class BrowserClient {
         const gql = gqlByUsername.get(key);
         // GraphQL 若明确说已经 following，以 GraphQL 为准跳过（避免误检）
         if (gql?.following === true) {
-          console.log(`[BrowserClient] ⏭ 跳过 @${user.username} — GraphQL 显示已关注 (following=true)`);
+          logSkipOnce(user.username, 'GraphQL 显示已关注 (following=true)');
           continue;
         }
 
-        // 推荐区直接跳过
+        // 推荐区直接跳过（不打日志，侧栏常驻会每轮滚动刷屏）
         if (user.suggested) {
-          console.log(`[BrowserClient] ⏭ 跳过 @${user.username} — 位于推荐/Suggested 区域`);
+          logSkipOnce(user.username, 'suggested');
           continue;
         }
 
         // 按钮策略：
         // - 「回关 / Follow back」：收入（对方已关注你）
         // - 「关注 / Follow」：仅当 GraphQL 确认 followedBy===true 才收入
-        //   （否则多半是混入的推荐用户，日志里 @SamsungSG 等即此类）
         if (user.buttonKind === 'follow') {
           if (gql?.followedBy !== true) {
-            console.log(
-              `[BrowserClient] ⏭ 跳过 @${user.username} — 按钮是「关注/Follow」且无 followedBy 证据` +
-              ` (gql.followedBy=${gql?.followedBy ?? 'n/a'})，疑似推荐`,
+            logSkipOnce(
+              user.username,
+              `按钮是「关注/Follow」且无 followedBy 证据 (gql=${gql?.followedBy ?? 'n/a'})`,
             );
             continue;
           }
         } else if (user.buttonKind === 'follow_back') {
-          // 回关若 GraphQL 明确非粉丝则跳过（极少见）
           if (gql?.followedBy === false) {
-            console.log(`[BrowserClient] ⏭ 跳过 @${user.username} — 回关按钮但 GraphQL followedBy=false`);
+            logSkipOnce(user.username, '回关按钮但 GraphQL followedBy=false');
             continue;
           }
         } else {
