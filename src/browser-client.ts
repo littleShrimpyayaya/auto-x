@@ -1172,12 +1172,39 @@ export class BrowserClient {
     });
   }
 
+  /** 粉丝列表滚回顶部（扫描结束后页面在底部，不回顶就永远找不到靠前的待回关用户） */
+  private async scrollFollowersListToTop(): Promise<void> {
+    if (!this.page) return;
+    await this.page.evaluate(() => {
+      window.scrollTo(0, 0);
+      const candidates = [
+        document.querySelector('[data-testid="primaryColumn"]'),
+        document.querySelector('[aria-label*="Timeline"]'),
+        document.querySelector('section[role="region"]'),
+        ...Array.from(document.querySelectorAll('div')).filter((el) => {
+          const s = getComputedStyle(el);
+          return (s.overflowY === 'auto' || s.overflowY === 'scroll') && el.scrollHeight > el.clientHeight + 100;
+        }),
+      ].filter(Boolean) as HTMLElement[];
+      for (const el of candidates) {
+        try {
+          el.scrollTop = 0;
+        } catch { /* ignore */ }
+      }
+      // 第一个 UserCell 滚进视口
+      const first = document.querySelector('[data-testid="UserCell"]');
+      if (first) (first as HTMLElement).scrollIntoView({ block: 'start', behavior: 'instant' });
+    });
+    await this.page.mouse.wheel(0, -2000);
+    await this.page.waitForTimeout(400);
+  }
+
   // ── 关注 / 取关 ─────────────────────────────────────
 
   /**
    * 批量回关（推荐路径）：
-   * 停留在「我的关注者」列表，对每个目标 UserCell 精准点「回关」按钮，
-   * 等待按钮变成「正在关注」即成功。不会全量重扫，也不会逐个开主页。
+   * 在「我的关注者」列表对每个目标 UserCell 精准点「回关」按钮。
+   * 注意：扫描结束后页面在列表底部，必须先回顶再找人，否则永远找不到靠前的用户。
    */
   async batchFollowFromFollowersList(
     targets: Array<{ userId: string; username?: string }>,
@@ -1189,22 +1216,18 @@ export class BrowserClient {
     const results: Array<{ userId: string; username?: string; ok: boolean }> = [];
     if (targets.length === 0) return results;
 
-    // 进入粉丝列表（若已在则不重复 goto）
+    // 每次批量回关都重新打开粉丝列表（保证从顶部开始，DOM 是首屏）
     const followersUrl = `https://x.com/${me}/followers`;
-    const onList = this.page!.url().includes(`/${me}/followers`);
-    if (!onList) {
-      console.log(`[BrowserClient] 打开粉丝列表做精准回关: ${followersUrl}`);
-      await this.page!.goto(followersUrl, { waitUntil: 'domcontentloaded', timeout: 30000 });
-      await this.page!.waitForTimeout(1500);
-      try {
-        await this.page!.waitForSelector('[data-testid="UserCell"]', { timeout: 8000 });
-      } catch {
-        console.warn('[BrowserClient] 粉丝列表未加载，回关中止');
-        return targets.map((t) => ({ userId: t.userId, username: t.username, ok: false }));
-      }
-    } else {
-      console.log('[BrowserClient] 已在粉丝列表，直接精准回关');
+    console.log(`[BrowserClient] 打开粉丝列表做精准回关: ${followersUrl}`);
+    await this.page!.goto(followersUrl, { waitUntil: 'domcontentloaded', timeout: 30000 });
+    await this.page!.waitForTimeout(1500);
+    try {
+      await this.page!.waitForSelector('[data-testid="UserCell"]', { timeout: 8000 });
+    } catch {
+      console.warn('[BrowserClient] 粉丝列表未加载，回关中止');
+      return targets.map((t) => ({ userId: t.userId, username: t.username, ok: false }));
     }
+    await this.scrollFollowersListToTop();
 
     for (const t of targets) {
       const username =
@@ -1246,8 +1269,12 @@ export class BrowserClient {
     const uname = username.replace(/^@/, '');
     console.log(`[BrowserClient] 列表定位并回关 @${uname}`);
 
-    // 最多滚动若干次寻找该 cell（通常扫描后用户还在视口附近；靠前的粉丝优先）
-    const MAX_FIND_SCROLLS = 50;
+    // 每次查找先回顶：扫描后页面在底部，只往下滚找不到顶部的「回关」用户
+    await this.scrollFollowersListToTop();
+    await this.page!.waitForTimeout(300);
+
+    // 最多滚动若干次寻找该 cell
+    const MAX_FIND_SCROLLS = 80;
 
     for (let attempt = 0; attempt < MAX_FIND_SCROLLS; attempt++) {
       const action = await this.page!.evaluate((u) => {
@@ -1255,12 +1282,12 @@ export class BrowserClient {
         const cells = document.querySelectorAll('[data-testid="UserCell"]');
 
         for (const cell of cells) {
-          // 匹配 /username 链接
+          // 匹配 /username 链接（兼容末尾斜杠、大小写）
           let match = false;
           const links = cell.querySelectorAll('a[href]');
           for (const link of links) {
-            const href = (link.getAttribute('href') || '').split('?')[0];
-            if (href.toLowerCase() === `/${target}`) {
+            const href = (link.getAttribute('href') || '').split('?')[0].replace(/\/$/, '').toLowerCase();
+            if (href === `/${target}` || href.endsWith(`/${target}`)) {
               match = true;
               break;
             }
@@ -1453,18 +1480,16 @@ export class BrowserClient {
       this.idCache.set(username, targetUserId);
     }
 
-    // 优先：粉丝列表上精准点按钮
+    // 优先：粉丝列表上精准点按钮（始终重新打开列表回顶，避免扫描后停在底部找不到人）
     try {
       const me = this.myUsername;
       if (me) {
-        const onList = this.page!.url().includes(`/${me}/followers`);
-        if (!onList) {
-          await this.page!.goto(`https://x.com/${me}/followers`, {
-            waitUntil: 'domcontentloaded',
-            timeout: 30000,
-          });
-          await this.page!.waitForTimeout(1200);
-        }
+        await this.page!.goto(`https://x.com/${me}/followers`, {
+          waitUntil: 'domcontentloaded',
+          timeout: 30000,
+        });
+        await this.page!.waitForTimeout(1200);
+        await this.scrollFollowersListToTop();
         const ok = await this.clickFollowBackInList(username);
         if (ok) {
           const delay = actionInterval(this.config);

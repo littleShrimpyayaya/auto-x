@@ -165,12 +165,20 @@
         <button class="btn-primary" onclick="computeFollowBack()" id="btn-compute-follow" style="margin-bottom: 10px;">计算待回关</button>
         <span id="compute-follow-status" style="font-size: 12px; color: #888; margin-left: 8px;"></span>
         <div id="follow-list" style="display: none; max-height: 300px; overflow-y: auto; border: 1px solid #eee; border-radius: 6px;">
-          <div style="padding: 8px 12px; border-bottom: 1px solid #eee; background: #fafafa; display: flex; align-items: center; gap: 8px; position: sticky; top: 0;">
+          <div style="padding: 8px 12px; border-bottom: 1px solid #eee; background: #fafafa; display: flex; align-items: center; gap: 8px; position: sticky; top: 0; z-index: 1;">
             <input type="checkbox" id="follow-select-all" onchange="toggleSelectAll('follow')" style="width: 16px; height: 16px;">
             <span style="font-size: 13px; color: #666;">Select All</span>
-            <button class="btn-success" onclick="batchFollow()" style="margin-left: auto; font-size: 12px; padding: 6px 14px;">Follow Selected</button>
+            <button class="btn-success" id="btn-batch-follow" onclick="batchFollow()" style="margin-left: auto; font-size: 12px; padding: 6px 14px;">Follow Selected</button>
           </div>
+          <div id="follow-batch-progress" style="display: none; padding: 8px 12px; background: #e8f5fd; color: #1d9bf0; font-size: 12px; border-bottom: 1px solid #d0ebf8;"></div>
           <div id="follow-list-items"></div>
+        </div>
+        <!-- 本会话已成功回关（只读） -->
+        <div id="follow-done-section" style="display: none; margin-top: 10px;">
+          <div style="font-size: 13px; font-weight: 600; color: #00ba7c; margin-bottom: 6px;">
+            ✓ 本会话已回关 <span id="follow-done-count">0</span>
+          </div>
+          <div id="follow-done-list" style="max-height: 180px; overflow-y: auto; border: 1px solid #e6f7ef; border-radius: 6px; background: #f6fffa;"></div>
         </div>
 
         <!-- 自动化配置（折叠） -->
@@ -199,13 +207,6 @@
             <span style="font-size: 12px;">~</span>
             <input type="number" id="auto-action-max" min="1" max="60" value="25" style="width: 55px; font-size: 12px; padding: 4px;">
             <span style="font-size: 12px;">sec</span>
-          </div>
-          <div class="section-row" style="margin-top: 8px;">
-            <span style="font-size: 12px; min-width: 75px;">Active:</span>
-            <input type="number" id="auto-active-start" min="0" max="23" value="9" style="width: 55px; font-size: 12px; padding: 4px;">
-            <span style="font-size: 12px;">~</span>
-            <input type="number" id="auto-active-end" min="0" max="24" value="23" style="width: 55px; font-size: 12px; padding: 4px;">
-            <span style="font-size: 12px;">o'clock</span>
           </div>
           <button class="btn-primary" onclick="saveAutoConfig()" style="margin-top: 8px; font-size: 12px; padding: 4px 12px;">Save</button>
         </div>
@@ -336,9 +337,11 @@
     // ── Compute & Batch ────────────────────────────────────
 
     let followListData = [];
+    /** 本会话已成功回关（只读展示） */
+    let followDoneList = [];
     /** 用 userId 记住勾选，避免 status 轮询重绘时勾选被冲掉 */
     let selectedFollowIds = new Set();
-    /** 批量回关进行中时，禁止轮询重绘列表 */
+    /** 批量回关进行中时，禁止轮询重绘列表 / 禁止再勾选 */
     let batchFollowInProgress = false;
     let lastFollowListSig = '';
 
@@ -359,19 +362,109 @@
     function restoreFollowSelection() {
       document.querySelectorAll('.follow-checkbox').forEach(cb => {
         cb.checked = selectedFollowIds.has(String(cb.dataset.userId || ''));
+        cb.disabled = batchFollowInProgress;
       });
       const all = document.querySelectorAll('.follow-checkbox');
       const allCb = document.getElementById('follow-select-all');
-      if (allCb && all.length) {
-        allCb.checked = Array.from(all).every(cb => cb.checked);
+      if (allCb) {
+        allCb.disabled = batchFollowInProgress;
+        if (all.length) allCb.checked = Array.from(all).every(cb => cb.checked);
       }
     }
 
     function onFollowCheckboxChange(el) {
+      if (batchFollowInProgress) {
+        el.checked = selectedFollowIds.has(String(el.dataset.userId || ''));
+        return;
+      }
       const id = String(el.dataset.userId || '');
       if (!id) return;
       if (el.checked) selectedFollowIds.add(id);
       else selectedFollowIds.delete(id);
+    }
+
+    function setFollowListLocked(locked) {
+      batchFollowInProgress = locked;
+      const allCb = document.getElementById('follow-select-all');
+      if (allCb) allCb.disabled = locked;
+      document.querySelectorAll('.follow-checkbox').forEach(cb => {
+        cb.disabled = locked;
+      });
+      const scanBtn = document.getElementById('btn-compute-follow');
+      if (scanBtn) scanBtn.disabled = locked;
+    }
+
+    function updateBatchProgressUI(text, show) {
+      const el = document.getElementById('follow-batch-progress');
+      const btn = document.getElementById('btn-batch-follow');
+      if (el) {
+        el.style.display = show ? 'block' : 'none';
+        el.textContent = text || '';
+      }
+      if (btn) {
+        if (show) {
+          btn.disabled = true;
+          btn.textContent = text || '回关中…';
+        } else {
+          btn.disabled = false;
+          btn.textContent = 'Follow Selected';
+        }
+      }
+    }
+
+    function renderDoneList() {
+      const section = document.getElementById('follow-done-section');
+      const list = document.getElementById('follow-done-list');
+      const countEl = document.getElementById('follow-done-count');
+      if (!section || !list) return;
+      if (!followDoneList.length) {
+        section.style.display = 'none';
+        list.innerHTML = '';
+        if (countEl) countEl.textContent = '0';
+        return;
+      }
+      section.style.display = 'block';
+      if (countEl) countEl.textContent = String(followDoneList.length);
+      // 新成功的在最上面
+      list.innerHTML = followDoneList.map(u => {
+        const name = escHtml(u.name || u.username);
+        const handle = escHtml(u.username);
+        const t = u.at ? escHtml(u.at) : '';
+        return `<div style="display:flex;align-items:center;gap:8px;padding:8px 12px;border-bottom:1px solid #e6f7ef;font-size:13px;">
+          <span style="color:#00ba7c;font-weight:700;flex-shrink:0;">✓</span>
+          <div style="flex:1;min-width:0;">
+            <div style="font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">${name}</div>
+            <div style="color:#888;font-size:12px;">@${handle}</div>
+          </div>
+          <span style="font-size:11px;color:#aaa;flex-shrink:0;">${t}</span>
+        </div>`;
+      }).join('');
+    }
+
+    function addToDoneList(u) {
+      const id = String(u.userId || '');
+      if (id && followDoneList.some(x => String(x.userId) === id)) return;
+      followDoneList.unshift({
+        userId: u.userId,
+        username: u.username,
+        name: u.name || u.username,
+        at: new Date().toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false }),
+      });
+      renderDoneList();
+    }
+
+    function removeFromPendingList(userId) {
+      const id = String(userId);
+      selectedFollowIds.delete(id);
+      followListData = followListData.filter(u => String(u.userId) !== id);
+      lastFollowListSig = followListSignature(followListData);
+      renderUserList('follow-list-items', followListData, 'follow', { preserveSelection: true });
+      document.getElementById('follow-queue-count').textContent = '待回关: ' + followListData.length;
+      if (lastData && lastData.computedFollowBack) {
+        lastData.computedFollowBack.users = followListData;
+        lastData.computedFollowBack.count = followListData.length;
+        lastData.computedFollowBack.status = 'done';
+      }
     }
 
     function renderUserList(containerId, users, type, opts) {
@@ -385,10 +478,11 @@
           selectedFollowIds.clear();
           lastFollowListSig = '';
           const allCb = document.getElementById('follow-select-all');
-          if (allCb) allCb.checked = false;
+          if (allCb) { allCb.checked = false; allCb.disabled = batchFollowInProgress; }
         }
         return;
       }
+      const lockAttr = batchFollowInProgress ? ' disabled' : '';
       container.innerHTML = users.map((u, i) => {
         const displayName = escHtml(u.name || u.username);
         const handle = escHtml(u.username);
@@ -398,10 +492,11 @@
           ? `<img src="${escHtml(proxyAvatarUrl(u.profileImageUrl))}" alt="" referrerpolicy="no-referrer" style="width: 36px; height: 36px; border-radius: 50%; object-fit: cover; flex-shrink: 0; background: #eee;" onerror="this.style.display='none';this.nextElementSibling.style.display='flex';">
              <div style="display:none;width:36px;height:36px;border-radius:50%;background:#1d9bf0;color:#fff;align-items:center;justify-content:center;font-weight:bold;font-size:14px;flex-shrink:0;">${escHtml(initial)}</div>`
           : `<div style="width:36px;height:36px;border-radius:50%;background:#1d9bf0;color:#fff;display:flex;align-items:center;justify-content:center;font-weight:bold;font-size:14px;flex-shrink:0;">${escHtml(initial)}</div>`;
+        const rowOpacity = batchFollowInProgress ? 'opacity:0.65;' : '';
         return `
-        <div style="display: flex; align-items: center; gap: 10px; padding: 10px 12px; border-bottom: 1px solid #f0f0f0; font-size: 13px;">
+        <div style="display: flex; align-items: center; gap: 10px; padding: 10px 12px; border-bottom: 1px solid #f0f0f0; font-size: 13px;${rowOpacity}">
           <input type="checkbox" class="${type}-checkbox" data-idx="${i}" data-user-id="${uid}"
-            onchange="onFollowCheckboxChange(this)"
+            onchange="onFollowCheckboxChange(this)"${lockAttr}
             style="width: 15px; height: 15px; flex-shrink: 0;">
           ${avatar}
           <div style="flex: 1; min-width: 0;">
@@ -415,10 +510,12 @@
       if (type === 'follow') {
         lastFollowListSig = followListSignature(users);
         if (preserveSelection) restoreFollowSelection();
+        else restoreFollowSelection(); // 仍应用 disabled 状态
       }
     }
 
     function toggleSelectAll(type) {
+      if (batchFollowInProgress) return;
       const checked = document.getElementById(type + '-select-all').checked;
       document.querySelectorAll('.' + type + '-checkbox').forEach(cb => {
         cb.checked = checked;
@@ -445,13 +542,13 @@
       if (type === 'follow' && selectedFollowIds.size) {
         return followListData
           .filter(u => selectedFollowIds.has(String(u.userId)))
-          .map(u => ({ userId: u.userId, username: u.username, name: u.name }));
+          .map(u => ({ userId: u.userId, username: u.username, name: u.name, profileImageUrl: u.profileImageUrl }));
       }
       const users = [];
       document.querySelectorAll('.' + type + '-checkbox:checked').forEach(cb => {
         const idx = parseInt(cb.dataset.idx, 10);
         const u = followListData[idx];
-        if (u) users.push({ userId: u.userId, username: u.username, name: u.name });
+        if (u) users.push({ userId: u.userId, username: u.username, name: u.name, profileImageUrl: u.profileImageUrl });
       });
       return users;
     }
@@ -589,52 +686,59 @@
     }
 
     async function batchFollow() {
+      if (batchFollowInProgress) return;
       captureFollowSelection();
       const users = getSelectedUsers('follow');
       if (!users.length) { showToast('请先勾选用户', 'error'); return; }
-      const btn = document.querySelector('#follow-list button.btn-success');
-      if (btn) { btn.disabled = true; btn.textContent = '回关中…'; }
-      batchFollowInProgress = true;
-      addLog('批量回关 ' + users.length + ' 人…');
-      showToast('回关中，请稍候…', 'info');
-      try {
-        const res = await fetch('/api/batch-follow', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ users }),
-        });
-        const data = await res.json();
-        if (data.ok) {
-          const doneIds = new Set(
-            (data.results || []).filter(r => r.ok).map(r => String(r.userId))
-          );
-          // 本地立刻从列表移除成功的；失败的保留勾选
-          doneIds.forEach(id => selectedFollowIds.delete(id));
-          if (doneIds.size > 0) {
-            followListData = followListData.filter(u => !doneIds.has(String(u.userId)));
-            renderUserList('follow-list-items', followListData, 'follow', { preserveSelection: true });
-            document.getElementById('follow-list').style.display = 'block';
-            document.getElementById('follow-queue-count').textContent = '待回关: ' + followListData.length;
-            if (lastData && lastData.computedFollowBack) {
-              lastData.computedFollowBack.users = followListData;
-              lastData.computedFollowBack.count = followListData.length;
-              lastData.computedFollowBack.status = 'done';
-            }
+
+      const total = users.length;
+      let done = 0;
+      let failed = 0;
+
+      // 锁定：按钮进度 + 勾选置灰 + 禁止扫描
+      setFollowListLocked(true);
+      // 重绘一次以应用 disabled 样式
+      renderUserList('follow-list-items', followListData, 'follow', { preserveSelection: true });
+      updateBatchProgressUI('回关中 0/' + total + '…', true);
+      addLog('批量回关开始: ' + total + ' 人（逐个执行，实时更新列表）');
+
+      // 逐个请求，避免整批超时；每成功一人立刻从待回关列表移除并记入只读区
+      for (let i = 0; i < users.length; i++) {
+        const u = users[i];
+        const label = u.username ? '@' + u.username : u.userId;
+        updateBatchProgressUI('回关中 ' + (i + 1) + '/' + total + ' ' + label, true);
+
+        try {
+          const res = await fetch('/api/batch-follow', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ users: [{ userId: u.userId, username: u.username }] }),
+          });
+          const data = await res.json();
+          const ok = data.ok && ((data.done > 0) || (data.results && data.results.some(r => r.ok)));
+          if (ok) {
+            done++;
+            removeFromPendingList(u.userId);
+            addToDoneList(u);
+            addLog('✓ 回关成功 ' + label + ' (' + done + '/' + total + ')');
+          } else {
+            failed++;
+            addLog('✗ 回关失败 ' + label + ': ' + (data.error || 'unknown'));
           }
-          const msg = '成功 ' + (data.done || 0) + '，失败 ' + (data.failed || 0) + '，剩余 ' + followListData.length;
-          addLog(msg);
-          showToast(msg, data.failed ? 'error' : 'success');
-        } else {
-          showToast(data.error || '回关失败', 'error');
-          addLog('回关失败: ' + (data.error || ''));
+        } catch (e) {
+          failed++;
+          addLog('✗ 回关请求失败 ' + label + ': ' + e.message);
         }
-      } catch (e) {
-        showToast('网络错误', 'error');
-        addLog('回关请求失败: ' + e.message);
-      } finally {
-        batchFollowInProgress = false;
-        if (btn) { btn.disabled = false; btn.textContent = 'Follow Selected'; }
       }
+
+      setFollowListLocked(false);
+      renderUserList('follow-list-items', followListData, 'follow', { preserveSelection: true });
+      updateBatchProgressUI('', false);
+
+      const msg = '完成：成功 ' + done + '，失败 ' + failed + '，剩余待回关 ' + followListData.length;
+      addLog(msg);
+      showToast(msg, failed ? 'error' : 'success');
+      document.getElementById('follow-list').style.display = 'block';
     }
 
     // ── Account Refresh ────────────────────────────────────
@@ -876,9 +980,7 @@
         document.getElementById('auto-interval-max').value = cfg.batchIntervalMaxMinutes;
         document.getElementById('auto-action-min').value = cfg.actionIntervalMinSeconds;
         document.getElementById('auto-action-max').value = cfg.actionIntervalMaxSeconds;
-        document.getElementById('auto-active-start').value = cfg.activeHoursStart ?? 9;
-        document.getElementById('auto-active-end').value = cfg.activeHoursEnd ?? 23;
-        // 同步到 Post Composer 的活跃时段输入
+        // 活跃时段仅在 Post Composer 配置
         document.getElementById('post-active-start').value = cfg.activeHoursStart ?? 9;
         document.getElementById('post-active-end').value = cfg.activeHoursEnd ?? 23;
       } catch { /* server not ready */ }
@@ -908,11 +1010,6 @@
         if (res.ok) {
           statusEl.textContent = '✓ ' + start + ':00-' + end + ':00 北京时间';
           statusEl.style.color = '#00ba7c';
-          // 同步到折叠面板
-          const a = document.getElementById('auto-active-start');
-          const b = document.getElementById('auto-active-end');
-          if (a) a.value = start;
-          if (b) b.value = end;
           showToast('活跃时段已保存: ' + start + ':00-' + end + ':00', 'success');
         } else {
           statusEl.textContent = '✗ ' + (data.error || 'Failed');
@@ -944,8 +1041,6 @@
             batchIntervalMaxMinutes: parseInt(document.getElementById('auto-interval-max').value),
             actionIntervalMinSeconds: parseInt(document.getElementById('auto-action-min').value),
             actionIntervalMaxSeconds: parseInt(document.getElementById('auto-action-max').value),
-            activeHoursStart: parseInt(document.getElementById('auto-active-start').value),
-            activeHoursEnd: parseInt(document.getElementById('auto-active-end').value),
           }),
         });
         const data = await res.json();
