@@ -326,9 +326,42 @@ export class BrowserClient {
       const descEl = document.querySelector('[data-testid="UserDescription"]');
       const description = descEl?.textContent?.trim() || undefined;
 
-      // 头像
-      const avatarImg = document.querySelector('img[src*="profile_images"]');
-      const profileImageUrl = avatarImg?.getAttribute('src') || undefined;
+      // 头像（多级 fallback 适配 X.com 可能变化的 DOM）
+      let profileImageUrl: string | undefined;
+      const avatarSelectors = [
+        'img[src*="profile_images"]',
+        'a[href*="photo"] img[src*="twimg"]',
+        'img[src*="twimg.com"][src*="profile"]',
+        'div[data-testid="primaryColumn"] img[src*="twimg"]',
+        'a[href*="/photo"] img',
+        'img[alt*="profile" i]',
+        'img[src*="twimg.com"][alt=""]',
+      ];
+      for (const sel of avatarSelectors) {
+        const el = document.querySelector(sel);
+        if (el) {
+          const src = el.getAttribute('src') || '';
+          if (src && !src.includes('default_profile') && !src.includes('tweet_video_thumb')) {
+            profileImageUrl = src;
+            break;
+          }
+        }
+      }
+      // 如果还没找到，遍历所有图片找最可能是头像的（最大的那张）
+      if (!profileImageUrl) {
+        const imgs = document.querySelectorAll('img[src*="twimg"]');
+        let bestSrc = '';
+        let bestSize = 0;
+        for (const img of imgs) {
+          const src = img.getAttribute('src') || '';
+          const w = (img as HTMLImageElement).naturalWidth || img.clientWidth || 0;
+          // 头像通常是圆形的小图片（48-200px），不是 banner
+          if (src.includes('twimg') && w >= 48 && w <= 400 && !src.includes('default')) {
+            if (w > bestSize) { bestSize = w; bestSrc = src; }
+          }
+        }
+        if (bestSrc) profileImageUrl = bestSrc;
+      }
 
       // 验证
       const verified = !!document.querySelector('[data-testid="icon-verified"]');
