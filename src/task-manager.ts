@@ -338,6 +338,9 @@ export class TaskManager {
             cfg.lastPostAt = new Date().toISOString();
             cfg.postAutoIndex = this.postAutoIndex;
             savePostConfig(cfg);
+          } else if (result.skipped) {
+            // 非活跃时段跳过，不算失败（等下一个周期到了自然会重试）
+            console.log(`[Post] 定时发帖 #${this.postAutoIndex} 非活跃时段跳过，等待下个周期`);
           } else {
             console.warn(`[Post] 定时发帖 #${this.postAutoIndex} 发送失败，将重试`);
           }

@@ -1159,12 +1159,16 @@ export class BrowserClient {
 
   // ── 发帖 ─────────────────────────────────────────────
 
-  async postTweet(text: string): Promise<{ ok: boolean }> {
+  async postTweet(text: string): Promise<{ ok: boolean; skipped?: boolean }> {
     this.ensureReady();
 
     if (!isActiveHours(this.config)) {
-      console.log('[BrowserClient] 当前不在活跃时段，跳过发帖');
-      return { ok: false };
+      const now = new Date();
+      const nextStart = new Date(now);
+      nextStart.setHours(this.config.activeHoursStart, 0, 0, 0);
+      if (nextStart <= now) nextStart.setDate(nextStart.getDate() + 1);
+      console.log(`[BrowserClient] 当前不在活跃时段（${this.config.activeHoursStart}:00-${this.config.activeHoursEnd}:00），跳过发帖，下次活跃时段 ${nextStart.toLocaleString()}`);
+      return { ok: false, skipped: true };
     }
 
     console.log(`[BrowserClient] 发帖: "${text.substring(0, 50)}${text.length > 50 ? '...' : ''}"`);
