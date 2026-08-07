@@ -728,10 +728,16 @@ export class TaskManager {
       contentMode?: 'static' | 'ai';
     },
   ): Promise<PostTaskConfig> {
+    const before = this.getPostTask(taskId);
+    if (!before) throw new Error('任务不存在');
+    const wasEnabled = !!before.enabled;
+    const prevInterval = before.intervalMinutes;
+
     const cfgAfter = await updatePostConfig((cfg) => {
       const t = cfg.tasks.find((x) => x.id === taskId);
       if (!t) throw new Error('任务不存在');
       if (patch.name !== undefined) t.name = String(patch.name).slice(0, 64) || t.name;
+      // 文案可随时更新；定时发推每次执行前都会重新 load 配置，立即生效于下一次发送
       if (patch.content !== undefined) t.content = String(patch.content);
       if (patch.intervalMinutes !== undefined) {
         t.intervalMinutes = Math.max(
@@ -752,8 +758,26 @@ export class TaskManager {
     });
     const updated = cfgAfter.tasks.find((x) => x.id === taskId);
     if (!updated) throw new Error('任务不存在');
-    if (updated.enabled) this.armPostTask(taskId);
-    else this.stopPostTaskSchedule(taskId);
+
+    if (!updated.enabled) {
+      this.stopPostTaskSchedule(taskId);
+    } else {
+      // 仅改文案/名称：保留已有倒计时（下次发送会用新文案）
+      // 开关或周期变化 / 之前未在跑：重新调度
+      const scheduleChanged =
+        !wasEnabled ||
+        patch.enabled === true ||
+        (patch.intervalMinutes !== undefined &&
+          Number(patch.intervalMinutes) !== prevInterval) ||
+        !this.postTaskTimers.has(taskId);
+      if (scheduleChanged) {
+        this.armPostTask(taskId);
+      } else {
+        console.log(
+          `[Post] 任务 ${taskId} 配置已更新（文案等），下次发送将使用新内容`,
+        );
+      }
+    }
     return { ...updated };
   }
 

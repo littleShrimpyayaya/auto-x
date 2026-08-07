@@ -228,7 +228,7 @@
         <button class="btn-primary" id="btn-add-post-task" onclick="createPostTask()" style="margin-left:auto;font-size:13px;padding:8px 16px;">+ 添加任务</button>
       </div>
       <div style="font-size:13px;color:#666;margin-bottom:10px;line-height:1.5;">
-        添加独立自动发推任务（不同文案 / 周期，最多 10 个）。展开后可编辑、启用、立即发送。无活跃时段限制，到点即发。
+        添加独立自动发推任务（不同文案 / 周期，最多 10 个）。展开后修改文案点<strong>保存</strong>会立即写入，下次定时发送会用最新内容。无活跃时段限制，到点即发。
       </div>
       <div id="post-tasks-list"></div>
     </div>
@@ -1720,11 +1720,30 @@
           showToast(data.error || '保存失败', 'error');
           return;
         }
-        if (st) { st.textContent = '✓ 已保存'; st.style.color = '#00ba7c'; }
-        showToast('任务已保存', 'success');
-        addLog('发推任务已保存: ' + (data.task.name || id));
+        const preview = (data.task.content || content || '').trim().slice(0, 40);
+        if (st) {
+          st.textContent = '✓ 已保存' + (preview ? ' · 下次将发: ' + preview + (preview.length >= 40 ? '…' : '') : '');
+          st.style.color = '#00ba7c';
+        }
+        showToast(
+          data.task.enabled
+            ? '已保存，下次定时将使用最新文案'
+            : '已保存（未启用定时，可点「立即发送一次」试发）',
+          'success',
+        );
+        addLog(
+          '发推任务已保存: ' + (data.task.name || id) +
+          ' · 文案 ' + (data.task.content || '').length + ' 字' +
+          (data.task.enabled ? ' · 已启用' : ' · 未启用'),
+        );
+        // 更新本地缓存中的文案，避免折叠后再展开看到旧内容
+        const idx = postTasksCache.findIndex(t => t.id === id);
+        if (idx >= 0 && data.task) {
+          postTasksCache[idx] = { ...postTasksCache[idx], ...data.task };
+        }
         await loadPostTasksList();
         postTaskExpanded.add(id);
+        postTaskEditingId = id;
         renderPostTasksList();
         refreshStatus();
       } catch (e) {
