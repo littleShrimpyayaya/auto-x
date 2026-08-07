@@ -134,8 +134,59 @@ export class BrowserClient {
   private config: AutomationConfig;
   private ready = false;
 
+  /** Browser-wide page mutex: outermost public entries only (non-reentrant). */
+  private pageOpActive = false;
+  private pageOpLabel: string | null = null;
+  private pageOpChain: Promise<void> = Promise.resolve();
+  private pageOpDepth = 0;
+
   constructor(config?: AutomationConfig) {
     this.config = config ?? loadAutomationConfig();
+  }
+
+  getPageQueueStatus(): { depth: number; currentLabel: string | null } {
+    return { depth: this.pageOpDepth, currentLabel: this.pageOpLabel };
+  }
+
+  /**
+   * Serialize all Playwright page mutations.
+   * Outermost public API only — nested pageOp throws (helpers must use bare page).
+   * @param priority if true, still waits for in-flight op but is preferred for labeling; true force posts use this.
+   */
+  async pageOp<T>(label: string, fn: () => Promise<T>, _opts?: { priority?: boolean }): Promise<T> {
+    if (this.pageOpActive) {
+      const msg = `pageOp re-entrancy: tried "${label}" while "${this.pageOpLabel}" active`;
+      console.error(`[BrowserClient] ${msg}`);
+      throw new Error(msg);
+    }
+
+    // Simple FIFO queue (priority: jump label only — true preemption of in-flight is forbidden)
+    const run = async () => {
+      this.pageOpActive = true;
+      this.pageOpLabel = label;
+      this.pageOpDepth = 1;
+      try {
+        return await fn();
+      } finally {
+        this.pageOpActive = false;
+        this.pageOpLabel = null;
+        this.pageOpDepth = 0;
+      }
+    };
+
+    // Chain promises; optional priority inserts... for v1 keep FIFO to avoid starvation complexity
+    let release!: () => void;
+    const prev = this.pageOpChain;
+    this.pageOpChain = new Promise<void>((r) => {
+      release = r;
+    });
+    this.pageOpDepth = Math.max(this.pageOpDepth, 1);
+    await prev;
+    try {
+      return await run();
+    } finally {
+      release();
+    }
   }
 
   /** 从磁盘重新加载自动化配置（活跃时段等），前端保存后立即生效 */
@@ -473,6 +524,10 @@ export class BrowserClient {
    * 已关注（Following / 正在关注）的粉丝不计入待回关。
    */
   async scanFollowBack(): Promise<FollowBackCandidate[]> {
+    return this.pageOp('scan-follow-back', () => this.scanFollowBackImpl());
+  }
+
+  private async scanFollowBackImpl(): Promise<FollowBackCandidate[]> {
     this.ensureReady();
     const username = this.myUsername;
     if (!username) throw new Error('未登录');
@@ -1209,6 +1264,12 @@ export class BrowserClient {
   async batchFollowFromFollowersList(
     targets: Array<{ userId: string; username?: string }>,
   ): Promise<Array<{ userId: string; username?: string; ok: boolean }>> {
+    return this.pageOp('batch-follow-list', () => this.batchFollowFromFollowersListImpl(targets));
+  }
+
+  private async batchFollowFromFollowersListImpl(
+    targets: Array<{ userId: string; username?: string }>,
+  ): Promise<Array<{ userId: string; username?: string; ok: boolean }>> {
     this.ensureReady();
     const me = this.myUsername;
     if (!me) throw new Error('未登录');
@@ -1636,8 +1697,12 @@ export class BrowserClient {
   /**
    * 发帖。
    * @param options.force  true = 手动发帖，忽略活跃时段；定时发帖不传 force
+   * @param options.priority  手动 Post Now：排队时标记优先（不抢占 in-flight）
    */
-  async postTweet(text: string, options?: { force?: boolean }): Promise<{ ok: boolean; skipped?: boolean }> {
+  async postTweet(
+    text: string,
+    options?: { force?: boolean; priority?: boolean },
+  ): Promise<{ ok: boolean; skipped?: boolean }> {
     this.ensureReady();
 
     // 每次发帖前刷新活跃时段，确保前端刚保存的配置立即生效
@@ -1656,6 +1721,12 @@ export class BrowserClient {
       return { ok: false, skipped: true };
     }
 
+    const label = options?.force ? 'post:force' : 'post:scheduled';
+    return this.pageOp(label, () => this.postTweetUnlocked(text), { priority: options?.priority });
+  }
+
+  /** Inner post implementation — must only be called under pageOp */
+  private async postTweetUnlocked(text: string): Promise<{ ok: boolean; skipped?: boolean }> {
     console.log(`[BrowserClient] 发帖: "${text.substring(0, 50)}${text.length > 50 ? '...' : ''}"`);
 
     await this.page!.goto('https://x.com/home', { waitUntil: 'domcontentloaded', timeout: 30000 });

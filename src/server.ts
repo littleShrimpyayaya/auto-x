@@ -9,7 +9,10 @@ import {
   loadAutomationConfig,
   saveAutomationConfig,
   loadPostConfig,
-  savePostConfig,
+  updatePostConfig,
+  ensureComposerTask,
+  COMPOSER_TASK_ID,
+  getComposerTask,
   MIN_FOLLOW_BACK_AUTO_INTERVAL,
   type AutomationConfig,
   type PostConfig,
@@ -484,37 +487,41 @@ export function createServer(taskManager: TaskManager): express.Express {
         interval = interval && interval >= 5 ? interval : (loadPostConfig().autoPostIntervalMinutes || 60);
       }
 
-      // 持久化：开关 + 周期 + 当前文案作为模板
-      const existing = loadPostConfig();
-      const templates = [...(existing.templates || [])];
-      if (templates.length === 0) templates.push(postText);
-      else templates[0] = postText;
+      // 持久化：composer 任务 + legacy dual-write（composer-first，无 lift）
+      await updatePostConfig((cfg) =>
+        ensureComposerTask(cfg, {
+          content: postText,
+          enabled: wantAuto,
+          intervalMinutes: interval,
+        }),
+      );
 
-      const config: PostConfig = {
-        ...existing,
-        templates,
-        autoPostEnabled: wantAuto,
-        autoPostIntervalMinutes: interval,
-        autoPostTemplateIndex: 0,
-      };
-      savePostConfig(config);
+      // 仅停/启 composer 定时，不影响其他任务
+      if (!wantAuto) {
+        taskManager.stopPostTaskSchedule(COMPOSER_TASK_ID);
+      }
 
-      // 先停旧定时，避免叠加
-      taskManager.stopPostSchedule();
-
-      // 立即发当前这条
+      // 立即发当前这条（force，不受活跃时段限制）
       const result = await taskManager.postNow(postText);
 
-      // 记录发帖时间到配置上，用于下次重启时计算剩余时间
+      // 记录发帖时间到 composer（两边 dual-write）
       if (result.ok) {
-        const updated = loadPostConfig();
-        updated.lastPostAt = new Date().toISOString();
-        savePostConfig(updated);
+        const now = new Date().toISOString();
+        await updatePostConfig((cfg) => {
+          const t = getComposerTask(cfg);
+          if (t) {
+            t.lastPostAt = now;
+            t.postCount = (t.postCount || 0) + 1;
+            t.lastResult = 'ok';
+            t.lastError = null;
+            t.updatedAt = now;
+          }
+        });
       }
 
       // 若开启自动，启动周期（从现在起 interval 后再发）
       if (wantAuto) {
-        taskManager.startPostSchedule(interval, postText);
+        await taskManager.startPostSchedule(interval, postText);
       }
 
       res.json({
@@ -538,8 +545,7 @@ export function createServer(taskManager: TaskManager): express.Express {
     try {
       const { enabled, text, intervalMinutes } = req.body;
 
-      taskManager.stopPostSchedule();
-
+      // 仅操作 composer，绝不 stop-all
       if (enabled) {
         if (!text) { res.status(400).json({ error: 'Post text is required' }); return; }
         if (!intervalMinutes || intervalMinutes < 5) {
@@ -547,23 +553,18 @@ export function createServer(taskManager: TaskManager): express.Express {
           return;
         }
 
-        const existing = loadPostConfig();
-        const templates = [...(existing.templates || [])];
-        if (templates.length === 0) templates.push(text);
-        else templates[0] = text;
-        savePostConfig({
-          ...existing,
-          templates,
-          autoPostEnabled: true,
-          autoPostIntervalMinutes: intervalMinutes,
-          autoPostTemplateIndex: 0,
-        });
+        await updatePostConfig((cfg) =>
+          ensureComposerTask(cfg, {
+            content: text,
+            enabled: true,
+            intervalMinutes,
+          }),
+        );
 
-        taskManager.startPostSchedule(intervalMinutes, text);
+        await taskManager.startPostSchedule(intervalMinutes, text);
         res.json({ ok: true, message: 'Auto post started', intervalMinutes });
       } else {
-        const existing = loadPostConfig();
-        savePostConfig({ ...existing, autoPostEnabled: false });
+        await taskManager.stopPostSchedule();
         res.json({ ok: true, message: 'Auto post stopped' });
       }
     } catch (err: any) {
@@ -571,7 +572,7 @@ export function createServer(taskManager: TaskManager): express.Express {
     }
   });
 
-  app.post('/api/post/schedule/start', (req, res) => {
+  app.post('/api/post/schedule/start', async (req, res) => {
     try {
       const { intervalMinutes, templateText } = req.body;
       if (!intervalMinutes || intervalMinutes < 5) {
@@ -582,15 +583,15 @@ export function createServer(taskManager: TaskManager): express.Express {
         res.status(400).json({ error: 'Template text is required' });
         return;
       }
-      taskManager.startPostSchedule(intervalMinutes, templateText);
+      await taskManager.startPostSchedule(intervalMinutes, templateText);
       res.json({ ok: true, message: `Auto post started every ${intervalMinutes} min` });
     } catch (err: any) {
       res.status(500).json({ error: err.message });
     }
   });
 
-  app.post('/api/post/schedule/stop', (_req, res) => {
-    taskManager.stopPostSchedule();
+  app.post('/api/post/schedule/stop', async (_req, res) => {
+    await taskManager.stopPostSchedule();
     res.json({ ok: true, message: 'Auto post stopped' });
   });
 
@@ -603,21 +604,31 @@ export function createServer(taskManager: TaskManager): express.Express {
     }
   });
 
-  app.post('/api/post/config', (req, res) => {
+  app.post('/api/post/config', async (req, res) => {
     try {
-      const body = req.body as Partial<PostConfig>;
-      const existing = loadPostConfig();
-
-      const config: PostConfig = {
-        templates: body.templates ?? existing.templates,
-        autoPostEnabled: body.autoPostEnabled ?? existing.autoPostEnabled,
-        autoPostIntervalMinutes: body.autoPostIntervalMinutes ?? existing.autoPostIntervalMinutes,
-        autoPostTemplateIndex: body.autoPostTemplateIndex ?? existing.autoPostTemplateIndex,
-        lastPostAt: body.lastPostAt ?? existing.lastPostAt,
-        postAutoIndex: body.postAutoIndex ?? existing.postAutoIndex,
-      };
-
-      savePostConfig(config);
+      const body = req.body as Partial<PostConfig> & Record<string, any>;
+      // Composer-first: update composer task fields; mirror legacy. No bare wipe of tasks.
+      await updatePostConfig((cfg) => {
+        const content =
+          body.templates?.[body.autoPostTemplateIndex ?? 0] ??
+          body.templates?.[0] ??
+          getComposerTask(cfg)?.content ??
+          cfg.templates?.[0] ??
+          '';
+        const enabled =
+          body.autoPostEnabled !== undefined
+            ? !!body.autoPostEnabled
+            : !!getComposerTask(cfg)?.enabled;
+        const interval =
+          body.autoPostIntervalMinutes !== undefined
+            ? Number(body.autoPostIntervalMinutes)
+            : getComposerTask(cfg)?.intervalMinutes || cfg.autoPostIntervalMinutes;
+        return ensureComposerTask(cfg, {
+          content: String(content),
+          enabled,
+          intervalMinutes: interval,
+        });
+      });
       res.json({ ok: true, message: 'Post config saved' });
     } catch (err: any) {
       res.status(500).json({ error: err.message });

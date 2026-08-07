@@ -5,13 +5,19 @@ import { BrowserClient } from './browser-client.js';
 import type { XUser, PendingStats } from './types.js';
 import {
   loadPostConfig,
-  savePostConfig,
+  updatePostConfig,
+  ensureComposerTask,
+  getComposerTask,
+  antiDupeSuffix,
+  clampTweetBody,
   saveAutomationConfig,
   loadAutomationConfig,
   formatInTimezone,
   DEFAULT_TIMEZONE,
   MIN_FOLLOW_BACK_AUTO_INTERVAL,
-  type PostConfig,
+  COMPOSER_TASK_ID,
+  MIN_POST_INTERVAL_MINUTES,
+  type PostTaskPhase,
 } from './auto-config.js';
 
 export type TaskType = 'sync-followers' | 'sync-following' | 'auto-follow' | 'process-follow' | 'process-unfollow';
@@ -45,11 +51,31 @@ export interface StatusInfo {
     enabled: boolean;
     intervalSeconds: number;
   };
+  /** Always derived from composer-linked task only (legacy UI) */
   postSchedule: {
     enabled: boolean;
     intervalSeconds: number;
     templatePreview: string;
     nextRunAt: string | null;
+  };
+  /** Multi-task post status */
+  postTasks: Array<{
+    id: string;
+    name: string;
+    enabled: boolean;
+    intervalMinutes: number;
+    contentMode: string;
+    contentPreview: string;
+    phase: PostTaskPhase;
+    nextRunAt: string | null;
+    lastPostAt: string | null;
+    lastResult: string | null;
+    lastError: string | null;
+    postCount: number;
+  }>;
+  pageQueue: {
+    depth: number;
+    currentLabel: string | null;
   };
   /** 自动扫描回关（服务端定时，持久化） */
   followBackAuto: {
@@ -120,12 +146,12 @@ export class TaskManager {
   private totalProcessedFollow = 0;
   private totalProcessedUnfollow = 0;
 
-  // 发帖定时器
-  private postTimer: ReturnType<typeof setInterval> | null = null;
-  private postInterval = 0;
-  private postTemplateText = '';
-  private postNextRunAt: string | null = null;
-  private postAutoIndex = 0;  // 自动发帖序号，防 X.com 重复内容静默拒绝
+  // 发帖：每任务独立 timer（composer = COMPOSER_TASK_ID）
+  private postTaskTimers = new Map<string, ReturnType<typeof setTimeout>>();
+  private postTaskRuntime = new Map<
+    string,
+    { phase: PostTaskPhase; nextRunAt: string | null; consecutiveErrors: number }
+  >();
 
   // 自动扫描回关（服务端定时，关 UI 也继续）
   private followBackAutoTimer: ReturnType<typeof setTimeout> | null = null;
@@ -356,14 +382,25 @@ export class TaskManager {
     this.processUnfollowInterval = 0;
   }
 
-  // ── 发帖 ─────────────────────────────────────────────
+  // ── 发帖（multi-task; composer = COMPOSER_TASK_ID）────────
 
-  /** 手动发帖：不受活跃时段限制 */
+  private getPostRuntime(taskId: string) {
+    let r = this.postTaskRuntime.get(taskId);
+    if (!r) {
+      r = { phase: 'idle', nextRunAt: null, consecutiveErrors: 0 };
+      this.postTaskRuntime.set(taskId, r);
+    }
+    return r;
+  }
+
+  /** 手动发帖：不受活跃时段限制；force 优先于排队中的定时发帖 */
   async postNow(text: string): Promise<{ ok: boolean; skipped?: boolean }> {
     if (this.service['xClient'] instanceof BrowserClient) {
-      return (this.service['xClient'] as BrowserClient).postTweet(text, { force: true });
+      return (this.service['xClient'] as BrowserClient).postTweet(text, {
+        force: true,
+        priority: true,
+      });
     }
-    // X API 模式暂不支持发帖
     return { ok: false };
   }
 
@@ -374,114 +411,250 @@ export class TaskManager {
     }
   }
 
-  startPostSchedule(intervalMinutes: number, templateText: string, firstDelayMs?: number): void {
-    this.stopPostSchedule();
-    this.postInterval = intervalMinutes;
-    this.postTemplateText = templateText;
+  /**
+   * 启动/刷新 **composer** 任务定时（兼容旧 API）。
+   * 不会 stop-all；仅动 COMPOSER_TASK_ID。
+   */
+  async startPostSchedule(
+    intervalMinutes: number,
+    templateText: string,
+    firstDelayMs?: number,
+  ): Promise<void> {
+    const interval = Math.max(MIN_POST_INTERVAL_MINUTES, Math.floor(intervalMinutes || 60));
+    await updatePostConfig((cfg) =>
+      ensureComposerTask(cfg, {
+        content: templateText,
+        enabled: true,
+        intervalMinutes: interval,
+      }),
+    );
+    this.armPostTask(COMPOSER_TASK_ID, firstDelayMs);
+  }
 
-    const intervalMs = intervalMinutes * 60 * 1000;
-    // firstDelayMs: 首次触发的延迟（用于恢复定时时对齐周期）；未指定则用完整周期
-    const firstDelay = typeof firstDelayMs === 'number' ? Math.max(0, firstDelayMs) : intervalMs;
+  /** 停止 **composer** 定时 only（兼容旧 API；绝不 stop-all） */
+  async stopPostSchedule(): Promise<void> {
+    this.stopPostTaskSchedule(COMPOSER_TASK_ID);
+    await updatePostConfig((cfg) => {
+      const t = getComposerTask(cfg);
+      if (t) {
+        t.enabled = false;
+        t.updatedAt = new Date().toISOString();
+      }
+    });
+    console.log('[Post] composer 定时发帖已停止');
+  }
 
-    let isFirst = true;
+  stopPostTaskSchedule(taskId: string): void {
+    const timer = this.postTaskTimers.get(taskId);
+    if (timer) {
+      clearTimeout(timer);
+      this.postTaskTimers.delete(taskId);
+    }
+    const rt = this.getPostRuntime(taskId);
+    rt.phase = 'idle';
+    rt.nextRunAt = null;
+  }
 
-    const doPost = async () => {
-      if (this.service['xClient'] instanceof BrowserClient) {
-        this.postAutoIndex++;
-        // 自动发帖末尾加时间戳，防 X.com 重复检测（完全相同的推文会被静默拒绝）
-        // 时间戳用北京时间，与活跃时段一致
-        const ts = formatInTimezone(new Date(), DEFAULT_TIMEZONE, { compact: true });
-        const postText = templateText + `\n\n${ts} ⏳`;
-        console.log(`[Post] 定时发帖 #${this.postAutoIndex} @ ${ts} (北京时间)...`);
-        try {
-          const result = await (this.service['xClient'] as BrowserClient).postTweet(postText);
-          if (result.ok) {
-            const cfg = loadPostConfig();
-            cfg.lastPostAt = new Date().toISOString();
-            cfg.postAutoIndex = this.postAutoIndex;
-            savePostConfig(cfg);
-          } else if (result.skipped) {
-            // 非活跃时段跳过，不算失败（等下一个周期到了自然会重试）
-            console.log(`[Post] 定时发帖 #${this.postAutoIndex} 非活跃时段跳过，等待下个周期`);
-          } else {
-            console.warn(`[Post] 定时发帖 #${this.postAutoIndex} 发送失败，将重试`);
-          }
-        } catch (err) {
-          console.error('[Post] 定时发帖失败:', err);
+  stopAllPostTaskSchedules(): void {
+    for (const id of [...this.postTaskTimers.keys()]) {
+      this.stopPostTaskSchedule(id);
+    }
+  }
+
+  /** Arm one task timer from current config (does not rewrite enabled). */
+  armPostTask(taskId: string, firstDelayMs?: number): void {
+    const cfg = loadPostConfig();
+    const task = cfg.tasks.find((t) => t.id === taskId);
+    if (!task || !task.enabled || !String(task.content || '').trim()) {
+      this.stopPostTaskSchedule(taskId);
+      return;
+    }
+    // AI mode not implemented yet — skip with lastError, keep waiting next cycle after interval
+    const intervalMs = Math.max(MIN_POST_INTERVAL_MINUTES, task.intervalMinutes) * 60_000;
+    let delay: number;
+    if (typeof firstDelayMs === 'number') {
+      delay = Math.max(0, firstDelayMs);
+    } else if (task.lastPostAt) {
+      const elapsed = Date.now() - new Date(task.lastPostAt).getTime();
+      delay = elapsed >= intervalMs ? 1000 : intervalMs - elapsed;
+    } else {
+      delay = intervalMs;
+      // 无历史：写入 lastPostAt 避免每次重启都立刻发
+      void updatePostConfig((c) => {
+        const t = c.tasks.find((x) => x.id === taskId);
+        if (t && !t.lastPostAt) {
+          t.lastPostAt = new Date().toISOString();
+          t.updatedAt = new Date().toISOString();
         }
-      }
-      if (isFirst) {
-        // 首次 setTimeout 之后，切换到 setInterval
-        isFirst = false;
-        if (this.postTimer) clearTimeout(this.postTimer);
-        this.postNextRunAt = new Date(Date.now() + intervalMs).toISOString();
-        this.postTimer = setInterval(doPost, intervalMs);
-      } else {
-        this.postNextRunAt = new Date(Date.now() + intervalMs).toISOString();
-      }
-    };
+      });
+    }
 
-    this.postNextRunAt = new Date(Date.now() + firstDelay).toISOString();
+    this.stopPostTaskSchedule(taskId);
+    const rt = this.getPostRuntime(taskId);
+    rt.phase = 'waiting';
+    rt.nextRunAt = new Date(Date.now() + delay).toISOString();
 
-    // 用 setTimeout 处理首次触发，支持非完整周期间隔
-    this.postTimer = setTimeout(doPost, firstDelay);
+    const timer = setTimeout(() => {
+      void this.runPostTaskCycle(taskId).finally(() => {
+        // re-arm if still enabled
+        const latest = loadPostConfig().tasks.find((t) => t.id === taskId);
+        if (latest?.enabled) this.armPostTask(taskId);
+        else {
+          const r = this.getPostRuntime(taskId);
+          r.phase = 'idle';
+          r.nextRunAt = null;
+        }
+      });
+    }, delay);
+    this.postTaskTimers.set(taskId, timer);
 
-    const firstLocal = formatInTimezone(this.postNextRunAt, DEFAULT_TIMEZONE);
+    const label = taskId === COMPOSER_TASK_ID ? 'composer' : taskId;
     console.log(
-      `[Post] 定时发帖已启动，间隔 ${intervalMinutes} 分钟，首次 ${firstLocal} (北京时间)`,
+      `[Post] 任务 ${label} 已调度，间隔 ${task.intervalMinutes} 分钟，下次 ` +
+        `${formatInTimezone(rt.nextRunAt, DEFAULT_TIMEZONE)} (北京时间)`,
     );
   }
 
-  stopPostSchedule(): void {
-    if (this.postTimer) {
-      clearInterval(this.postTimer);
-      this.postTimer = null;
-    }
-    this.postInterval = 0;
-    this.postTemplateText = '';
-    this.postNextRunAt = null;
-    console.log('[Post] 定时发帖已停止');
-  }
-
-  /** 进程启动时按已保存配置恢复定时（根据上次发推时间计算剩余等待） */
-  restorePostScheduleFromConfig(): void {
+  private async runPostTaskCycle(taskId: string): Promise<void> {
+    const rt = this.getPostRuntime(taskId);
     const cfg = loadPostConfig();
-    if (!cfg.autoPostEnabled) return;
-    const interval = cfg.autoPostIntervalMinutes || 60;
-    if (interval < 5) return;
-    const text = cfg.templates?.[cfg.autoPostTemplateIndex ?? 0] || cfg.templates?.[0];
-    if (!text) {
-      console.warn('[Post] 配置开启了自动发推，但没有模板文案，跳过恢复');
+    const task = cfg.tasks.find((t) => t.id === taskId);
+    if (!task || !task.enabled) {
+      rt.phase = 'idle';
       return;
     }
 
-    // 恢复序号
-    this.postAutoIndex = cfg.postAutoIndex || 0;
-
-    const intervalMs = interval * 60 * 1000;
-    let firstDelay = intervalMs;
-
-    if (cfg.lastPostAt) {
-      const lastTime = new Date(cfg.lastPostAt).getTime();
-      const elapsed = Date.now() - lastTime;
-      if (elapsed >= intervalMs) {
-        // 已经过了下一个发推时间 → 立即发
-        console.log('[Post] 上次发推已超过周期，立即补发');
-        firstDelay = 1000; // 1 秒后立刻发
-      } else {
-        // 还没到 → 等剩余时间
-        firstDelay = intervalMs - elapsed;
-        console.log(`[Post] 距下次发推还有 ${Math.round(firstDelay / 60000)} 分钟`);
-      }
-    } else {
-      // 无历史记录：以当前时间为基准写入，避免每次重启都重置倒计时
-      console.log('[Post] 无历史发帖记录，以当前时间为基准，等一个完整周期');
-      cfg.lastPostAt = new Date().toISOString();
-      savePostConfig(cfg);
+    // 用户确认：回关占用浏览器时跳过本轮定时发推
+    if (this.followBackAutoRunning || this.followBackScanStatus === 'scanning') {
+      console.log(`[Post] 任务 ${taskId} 跳过：自动回关/扫描进行中`);
+      await updatePostConfig((c) => {
+        const t = c.tasks.find((x) => x.id === taskId);
+        if (t) {
+          t.lastResult = 'skipped: follow-back busy';
+          t.updatedAt = new Date().toISOString();
+        }
+      });
+      rt.phase = 'waiting';
+      return;
     }
 
-    this.startPostSchedule(interval, text, firstDelay);
-    console.log(`[Post] 已从配置恢复自动发推，每 ${interval} 分钟`);
+    if (task.contentMode === 'ai') {
+      // PR3 之前：记错误并保持调度
+      console.warn(`[Post] 任务 ${taskId} contentMode=ai 尚未启用，跳过`);
+      await updatePostConfig((c) => {
+        const t = c.tasks.find((x) => x.id === taskId);
+        if (t) {
+          t.lastError = 'AI mode not enabled yet';
+          t.lastResult = 'skipped: ai not implemented';
+          t.updatedAt = new Date().toISOString();
+        }
+      });
+      rt.phase = 'waiting';
+      return;
+    }
+
+    if (!(this.service['xClient'] instanceof BrowserClient)) {
+      console.warn('[Post] 非浏览器模式，无法发帖');
+      return;
+    }
+
+    // 递增 postAutoIndex（与旧行为一致：每次 attempt 都加）
+    let attemptIndex = 0;
+    await updatePostConfig((c) => {
+      const t = c.tasks.find((x) => x.id === taskId);
+      if (t) {
+        t.postAutoIndex = (t.postAutoIndex || 0) + 1;
+        attemptIndex = t.postAutoIndex;
+        t.updatedAt = new Date().toISOString();
+      }
+    });
+
+    const suffix = antiDupeSuffix(new Date(), DEFAULT_TIMEZONE);
+    const body = clampTweetBody(task.content || '', suffix);
+    const postText = body + suffix;
+
+    rt.phase = 'queued';
+    console.log(`[Post] 定时发帖 #${attemptIndex} task=${taskId} …`);
+
+    try {
+      rt.phase = 'posting';
+      const result = await (this.service['xClient'] as BrowserClient).postTweet(postText);
+      if (result.ok) {
+        const now = new Date().toISOString();
+        await updatePostConfig((c) => {
+          const t = c.tasks.find((x) => x.id === taskId);
+          if (t) {
+            t.lastPostAt = now;
+            t.postCount = (t.postCount || 0) + 1;
+            t.lastResult = 'ok';
+            t.lastError = null;
+            t.updatedAt = now;
+          }
+        });
+        rt.consecutiveErrors = 0;
+        console.log(`[Post] 定时发帖 #${attemptIndex} 成功`);
+      } else if (result.skipped) {
+        await updatePostConfig((c) => {
+          const t = c.tasks.find((x) => x.id === taskId);
+          if (t) {
+            t.lastResult = 'skipped: inactive hours';
+            t.updatedAt = new Date().toISOString();
+          }
+        });
+        console.log(`[Post] 定时发帖 #${attemptIndex} 非活跃时段跳过`);
+      } else {
+        rt.consecutiveErrors++;
+        await updatePostConfig((c) => {
+          const t = c.tasks.find((x) => x.id === taskId);
+          if (t) {
+            t.lastError = 'post failed';
+            t.lastResult = 'failed';
+            t.updatedAt = new Date().toISOString();
+          }
+        });
+        console.warn(`[Post] 定时发帖 #${attemptIndex} 发送失败`);
+      }
+    } catch (err) {
+      rt.consecutiveErrors++;
+      const msg = (err as Error).message || String(err);
+      await updatePostConfig((c) => {
+        const t = c.tasks.find((x) => x.id === taskId);
+        if (t) {
+          t.lastError = msg;
+          t.lastResult = 'error';
+          t.updatedAt = new Date().toISOString();
+        }
+      });
+      console.error('[Post] 定时发帖失败:', err);
+    } finally {
+      rt.phase = 'waiting';
+    }
+  }
+
+  /** 进程启动：恢复所有 enabled 任务 */
+  restorePostScheduleFromConfig(): void {
+    const cfg = loadPostConfig();
+    const enabled = cfg.tasks.filter((t) => t.enabled && String(t.content || '').trim());
+    if (enabled.length === 0) {
+      // 兼容：若仅有 legacy 开关（迁移后应已 dual-write）
+      if (cfg.autoPostEnabled) {
+        const text = cfg.templates?.[0];
+        if (text) {
+          void updatePostConfig((c) =>
+            ensureComposerTask(c, {
+              content: text,
+              enabled: true,
+              intervalMinutes: cfg.autoPostIntervalMinutes,
+            }),
+          ).then(() => this.armPostTask(COMPOSER_TASK_ID));
+        }
+      }
+      return;
+    }
+    for (const t of enabled) {
+      this.armPostTask(t.id);
+    }
+    console.log(`[Post] 已从配置恢复 ${enabled.length} 个自动发推任务`);
   }
 
   /** 启动后台扫描待回关（不阻塞请求；结果仅内存，经 /api/status 给前端，不持久化） */
@@ -853,12 +1026,43 @@ export class TaskManager {
         enabled: this.processUnfollowTimer !== null,
         intervalSeconds: this.processUnfollowInterval,
       },
-      postSchedule: {
-        enabled: this.postTimer !== null,
-        intervalSeconds: this.postInterval * 60,
-        templatePreview: this.postTemplateText.substring(0, 50),
-        nextRunAt: this.postNextRunAt,
-      },
+      postSchedule: (() => {
+        const cfg = loadPostConfig();
+        const composer = getComposerTask(cfg);
+        const rt = this.getPostRuntime(COMPOSER_TASK_ID);
+        return {
+          enabled: !!(composer?.enabled && this.postTaskTimers.has(COMPOSER_TASK_ID)),
+          intervalSeconds: (composer?.intervalMinutes || cfg.autoPostIntervalMinutes || 60) * 60,
+          templatePreview: (composer?.content || cfg.templates?.[0] || '').substring(0, 50),
+          nextRunAt: rt.nextRunAt,
+        };
+      })(),
+      postTasks: (() => {
+        const cfg = loadPostConfig();
+        return (cfg.tasks || []).map((t) => {
+          const rt = this.getPostRuntime(t.id);
+          return {
+            id: t.id,
+            name: t.name,
+            enabled: !!t.enabled,
+            intervalMinutes: t.intervalMinutes,
+            contentMode: t.contentMode,
+            contentPreview: (t.content || '').substring(0, 80),
+            phase: t.enabled ? rt.phase : 'idle',
+            nextRunAt: rt.nextRunAt,
+            lastPostAt: t.lastPostAt,
+            lastResult: t.lastResult,
+            lastError: t.lastError,
+            postCount: t.postCount || 0,
+          };
+        });
+      })(),
+      pageQueue: (() => {
+        if (this.service['xClient'] instanceof BrowserClient) {
+          return (this.service['xClient'] as BrowserClient).getPageQueueStatus();
+        }
+        return { depth: 0, currentLabel: null };
+      })(),
       followBackAuto: {
         enabled: this.followBackAutoEnabled,
         intervalMinutes: this.followBackAutoIntervalMin,
