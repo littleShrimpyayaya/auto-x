@@ -263,18 +263,20 @@
         <div style="font-size: 11px; color: #999; margin-top: 4px;">定时发推仅在此时段内发送；时段外到点会跳过并等下一周期。手动 Post Now 不受限制。</div>
       </div>
 
-      <!-- 额外自动发推任务（不改动上方 Composer / Post Now 行为） -->
-      <div style="margin-top: 14px; padding-top: 12px; border-top: 1px solid #eee;">
-        <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-bottom:8px;">
-          <h3 style="margin:0;font-size:15px;">📋 额外发推任务</h3>
-          <span style="font-size:12px;color:#888;" id="post-tasks-count">0 / 10</span>
-          <button class="btn-primary" onclick="createPostTask()" style="margin-left:auto;font-size:12px;padding:5px 12px;">+ 添加任务</button>
-        </div>
-        <div style="font-size:12px;color:#888;margin-bottom:8px;">
-          与上方 Post Composer 独立：可另设周期与文案，最多 10 个（含 Composer 默认任务）。Composer 任务请用上方 Post Now / Auto 管理。
-        </div>
-        <div id="post-tasks-list"></div>
+    </div>
+
+    <!-- 多任务发推：独立卡片，避免被误认为 Post Composer 附属 -->
+    <div class="card" id="post-tasks-card">
+      <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-bottom:8px;">
+        <h2 style="margin:0;">📋 发推任务</h2>
+        <span style="font-size:12px;color:#888;" id="post-tasks-count">0 / 10</span>
+        <button class="btn-primary" id="btn-add-post-task" onclick="createPostTask()" style="margin-left:auto;font-size:13px;padding:8px 16px;">+ 添加任务</button>
       </div>
+      <div style="font-size:13px;color:#666;margin-bottom:10px;line-height:1.5;">
+        在这里添加<strong>独立的自动发推任务</strong>（不同文案、不同周期，最多 10 个）。
+        上方 Post Composer 的 Post Now / Auto 仍然可用，互不影响。
+      </div>
+      <div id="post-tasks-list"></div>
     </div>
 
     <div class="card">
@@ -392,15 +394,21 @@
       });
     }
 
+    function isFollowUiLocked() {
+      return !!(batchFollowInProgress || (serverFollowBackAuto && serverFollowBackAuto.enabled) ||
+        (serverFollowBackAuto && serverFollowBackAuto.running));
+    }
+
     function restoreFollowSelection() {
+      const locked = isFollowUiLocked();
       document.querySelectorAll('.follow-checkbox').forEach(cb => {
         cb.checked = selectedFollowIds.has(String(cb.dataset.userId || ''));
-        cb.disabled = batchFollowInProgress;
+        cb.disabled = locked;
       });
       const all = document.querySelectorAll('.follow-checkbox');
       const allCb = document.getElementById('follow-select-all');
       if (allCb) {
-        allCb.disabled = batchFollowInProgress;
+        allCb.disabled = locked;
         if (all.length) allCb.checked = Array.from(all).every(cb => cb.checked);
       }
     }
@@ -556,6 +564,11 @@
         !listVisible ||
         (pendingUsers.length > 0 && !document.querySelector('.follow-checkbox'));
 
+      // 自动化运行时始终展示列表区域（否则进度条被 display:none 藏住）
+      if (autoRunning || pendingUsers.length || followDoneList.length) {
+        document.getElementById('follow-list').style.display = 'block';
+      }
+
       if (needRender) {
         followListData = pendingUsers;
         // 自动化回关中：勾选框同步为「本轮处理中的用户」
@@ -565,15 +578,13 @@
               .map(u => String(u.userId))
               .filter(id => processingIds.has(id)),
           );
-          // 若 processing 尚未写入（刚扫完准备回关），勾选本批全部待回关（截到列表内）
+          // 若 processing 尚未写入（刚扫完准备回关），勾选本批全部待回关
           if (!selectedFollowIds.size && phase === 'following') {
             followListData.forEach(u => selectedFollowIds.add(String(u.userId)));
           }
         }
         renderUserList('follow-list-items', followListData, 'follow', { preserveSelection: true });
-        document.getElementById('follow-list').style.display = 'block';
       } else if (autoRunning && (phase === 'following' || processingIds.size)) {
-        // 列表未重绘时，仍更新勾选状态
         selectedFollowIds = new Set(
           followListData
             .map(u => String(u.userId))
@@ -586,21 +597,34 @@
       }
 
       document.getElementById('follow-queue-count').textContent =
-        '待回关: ' + followListData.length;
+        '待回关: ' + followListData.length +
+        (followDoneList.length ? ' · 已回关: ' + followDoneList.length : '');
 
-      // 进度条：自动化 following 时展示
+      // 进度条：自动化 scanning / following 时展示（并强制显示列表容器）
       const progress = autoInfo && autoInfo.progress;
       if (autoRunning && phase === 'following' && progress) {
+        document.getElementById('follow-list').style.display = 'block';
         updateBatchProgressUI(
-          '自动回关 ' + progress.current + '/' + progress.total +
-          (progress.label ? ' ' + progress.label : ''),
+          '⚡ 自动回关 ' + progress.current + '/' + progress.total +
+          (progress.label ? ' ' + progress.label : '') +
+          ' · 成功列表 ' + followDoneList.length,
           true,
         );
       } else if (autoRunning && phase === 'scanning') {
-        updateBatchProgressUI('自动扫描待回关中…', true);
+        document.getElementById('follow-list').style.display = 'block';
+        updateBatchProgressUI('⚡ 自动扫描待回关中…', true);
+      } else if (autoRunning && phase === 'following') {
+        document.getElementById('follow-list').style.display = 'block';
+        updateBatchProgressUI(
+          '⚡ 自动回关进行中… 已成功 ' + followDoneList.length + ' 人',
+          true,
+        );
       } else if (!batchFollowInProgress && !autoRunning) {
         updateBatchProgressUI('', false);
       }
+
+      // 成功列表：有数据就显示
+      if (followDoneList.length) renderDoneList();
 
       applyFollowAutoManualLock();
     }
@@ -616,11 +640,12 @@
           selectedFollowIds.clear();
           lastFollowListSig = '';
           const allCb = document.getElementById('follow-select-all');
-          if (allCb) { allCb.checked = false; allCb.disabled = batchFollowInProgress; }
+          if (allCb) { allCb.checked = false; allCb.disabled = isFollowUiLocked(); }
         }
         return;
       }
-      const lockAttr = batchFollowInProgress ? ' disabled' : '';
+      const locked = type === 'follow' && isFollowUiLocked();
+      const lockAttr = locked ? ' disabled' : '';
       container.innerHTML = users.map((u, i) => {
         const displayName = escHtml(u.name || u.username);
         const handle = escHtml(u.username);
@@ -630,11 +655,14 @@
           ? `<img src="${escHtml(proxyAvatarUrl(u.profileImageUrl))}" alt="" referrerpolicy="no-referrer" style="width: 36px; height: 36px; border-radius: 50%; object-fit: cover; flex-shrink: 0; background: #eee;" onerror="this.style.display='none';this.nextElementSibling.style.display='flex';">
              <div style="display:none;width:36px;height:36px;border-radius:50%;background:#1d9bf0;color:#fff;align-items:center;justify-content:center;font-weight:bold;font-size:14px;flex-shrink:0;">${escHtml(initial)}</div>`
           : `<div style="width:36px;height:36px;border-radius:50%;background:#1d9bf0;color:#fff;display:flex;align-items:center;justify-content:center;font-weight:bold;font-size:14px;flex-shrink:0;">${escHtml(initial)}</div>`;
-        const rowOpacity = batchFollowInProgress ? 'opacity:0.65;' : '';
+        const isProc = type === 'follow' && selectedFollowIds.has(String(u.userId));
+        const rowOpacity = locked ? 'opacity:0.7;' : '';
+        const rowBg = isProc && (serverFollowBackAuto && serverFollowBackAuto.running)
+          ? 'background:#e8f5fd;' : '';
         return `
-        <div style="display: flex; align-items: center; gap: 10px; padding: 10px 12px; border-bottom: 1px solid #f0f0f0; font-size: 13px;${rowOpacity}">
+        <div style="display: flex; align-items: center; gap: 10px; padding: 10px 12px; border-bottom: 1px solid #f0f0f0; font-size: 13px;${rowOpacity}${rowBg}">
           <input type="checkbox" class="${type}-checkbox" data-idx="${i}" data-user-id="${uid}"
-            onchange="onFollowCheckboxChange(this)"${lockAttr}
+            onchange="onFollowCheckboxChange(this)"${lockAttr}${isProc ? ' checked' : ''}
             style="width: 15px; height: 15px; flex-shrink: 0;">
           ${avatar}
           <div style="flex: 1; min-width: 0;">

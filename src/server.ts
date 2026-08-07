@@ -23,7 +23,18 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 export function createServer(taskManager: TaskManager): express.Express {
   const app = express();
   app.use(express.json());
-  app.use(express.static(path.join(__dirname, 'public')));
+  // index.html 禁止缓存，避免部署后浏览器仍用旧 UI
+  app.get(['/', '/index.html'], (_req, res, next) => {
+    res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate');
+    next();
+  });
+  app.use(express.static(path.join(__dirname, 'public'), {
+    setHeaders(res, filePath) {
+      if (filePath.endsWith('index.html')) {
+        res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate');
+      }
+    },
+  }));
 
   app.get('/api/status', async (_req, res) => {
     try {
