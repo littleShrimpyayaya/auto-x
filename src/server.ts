@@ -178,12 +178,25 @@ export function createServer(taskManager: TaskManager): express.Express {
 
   app.post('/api/batch-follow', async (req, res) => {
     try {
-      const { userIds } = req.body;
-      if (!userIds || !Array.isArray(userIds) || userIds.length === 0) {
-        res.status(400).json({ error: 'userIds array is required' });
+      const { userIds, users } = req.body as {
+        userIds?: string[];
+        users?: Array<{ userId: string; username?: string }>;
+      };
+      // 优先 users（带 username），兼容旧的 userIds
+      let targets: Array<string | { userId: string; username?: string }> = [];
+      if (Array.isArray(users) && users.length > 0) {
+        targets = users.filter((u) => u && u.userId);
+      } else if (Array.isArray(userIds) && userIds.length > 0) {
+        targets = userIds;
+      }
+      if (targets.length === 0) {
+        res.status(400).json({ error: 'users 或 userIds 数组必填' });
         return;
       }
-      const result = await taskManager.batchFollow(userIds);
+      const result = await taskManager.batchFollow(targets);
+      // 成功的从内存扫描列表剔除，前端可立即刷新展示
+      const okIds = (result.results || []).filter((r) => r.ok).map((r) => r.userId);
+      taskManager.removeFromFollowBackScan(okIds);
       res.json({ ok: true, ...result });
     } catch (err: any) {
       res.status(500).json({ error: err.message });

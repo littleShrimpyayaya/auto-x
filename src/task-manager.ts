@@ -475,8 +475,17 @@ export class TaskManager {
     return this.service.computeUnfollowWithDetails(this.userId);
   }
 
-  async batchFollow(targetUserIds: string[]): Promise<{ done: number; failed: number }> {
-    return this.service.batchFollow(this.userId, targetUserIds);
+  async batchFollow(
+    targets: Array<string | { userId: string; username?: string }>,
+  ): Promise<{ done: number; failed: number; results: Array<{ userId: string; username?: string; ok: boolean }> }> {
+    return this.service.batchFollow(this.userId, targets);
+  }
+
+  /** 批量回关成功后，从内存扫描结果中剔除，避免 UI 仍显示已回关用户 */
+  removeFromFollowBackScan(userIds: string[]): void {
+    if (!this.followBackScanResults || userIds.length === 0) return;
+    const drop = new Set(userIds.map(String));
+    this.followBackScanResults = this.followBackScanResults.filter((u) => !drop.has(String(u.userId)));
   }
 
   async batchUnfollow(targetUserIds: string[]): Promise<{ done: number; failed: number }> {

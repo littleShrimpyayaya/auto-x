@@ -336,16 +336,63 @@
     // ── Compute & Batch ────────────────────────────────────
 
     let followListData = [];
+    /** 用 userId 记住勾选，避免 status 轮询重绘时勾选被冲掉 */
+    let selectedFollowIds = new Set();
+    /** 批量回关进行中时，禁止轮询重绘列表 */
+    let batchFollowInProgress = false;
+    let lastFollowListSig = '';
 
-    function renderUserList(containerId, users, type) {
+    function followListSignature(users) {
+      if (!users || !users.length) return '';
+      return users.map(u => String(u.userId) + '@' + (u.username || '')).join('|');
+    }
+
+    function captureFollowSelection() {
+      document.querySelectorAll('.follow-checkbox').forEach(cb => {
+        const id = cb.dataset.userId;
+        if (!id) return;
+        if (cb.checked) selectedFollowIds.add(String(id));
+        else selectedFollowIds.delete(String(id));
+      });
+    }
+
+    function restoreFollowSelection() {
+      document.querySelectorAll('.follow-checkbox').forEach(cb => {
+        cb.checked = selectedFollowIds.has(String(cb.dataset.userId || ''));
+      });
+      const all = document.querySelectorAll('.follow-checkbox');
+      const allCb = document.getElementById('follow-select-all');
+      if (allCb && all.length) {
+        allCb.checked = Array.from(all).every(cb => cb.checked);
+      }
+    }
+
+    function onFollowCheckboxChange(el) {
+      const id = String(el.dataset.userId || '');
+      if (!id) return;
+      if (el.checked) selectedFollowIds.add(id);
+      else selectedFollowIds.delete(id);
+    }
+
+    function renderUserList(containerId, users, type, opts) {
+      const preserveSelection = !opts || opts.preserveSelection !== false;
+      if (preserveSelection && type === 'follow') captureFollowSelection();
+
       const container = document.getElementById(containerId);
       if (!users.length) {
         container.innerHTML = '<div style="padding: 16px; text-align: center; color: #888; font-size: 13px;">没有待回关用户 — 粉丝都已回关</div>';
+        if (type === 'follow') {
+          selectedFollowIds.clear();
+          lastFollowListSig = '';
+          const allCb = document.getElementById('follow-select-all');
+          if (allCb) allCb.checked = false;
+        }
         return;
       }
       container.innerHTML = users.map((u, i) => {
         const displayName = escHtml(u.name || u.username);
         const handle = escHtml(u.username);
+        const uid = escHtml(String(u.userId || ''));
         const initial = (u.name || u.username || '?').charAt(0).toUpperCase();
         const avatar = u.profileImageUrl
           ? `<img src="${escHtml(proxyAvatarUrl(u.profileImageUrl))}" alt="" referrerpolicy="no-referrer" style="width: 36px; height: 36px; border-radius: 50%; object-fit: cover; flex-shrink: 0; background: #eee;" onerror="this.style.display='none';this.nextElementSibling.style.display='flex';">
@@ -353,7 +400,9 @@
           : `<div style="width:36px;height:36px;border-radius:50%;background:#1d9bf0;color:#fff;display:flex;align-items:center;justify-content:center;font-weight:bold;font-size:14px;flex-shrink:0;">${escHtml(initial)}</div>`;
         return `
         <div style="display: flex; align-items: center; gap: 10px; padding: 10px 12px; border-bottom: 1px solid #f0f0f0; font-size: 13px;">
-          <input type="checkbox" class="${type}-checkbox" data-idx="${i}" style="width: 15px; height: 15px; flex-shrink: 0;">
+          <input type="checkbox" class="${type}-checkbox" data-idx="${i}" data-user-id="${uid}"
+            onchange="onFollowCheckboxChange(this)"
+            style="width: 15px; height: 15px; flex-shrink: 0;">
           ${avatar}
           <div style="flex: 1; min-width: 0;">
             <div style="font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;">${displayName}</div>
@@ -362,20 +411,49 @@
           <a href="https://x.com/${handle}" target="_blank" rel="noopener" style="font-size: 12px; color: #1d9bf0; text-decoration: none; flex-shrink: 0;">查看</a>
         </div>`;
       }).join('');
+
+      if (type === 'follow') {
+        lastFollowListSig = followListSignature(users);
+        if (preserveSelection) restoreFollowSelection();
+      }
     }
 
     function toggleSelectAll(type) {
       const checked = document.getElementById(type + '-select-all').checked;
-      document.querySelectorAll('.' + type + '-checkbox').forEach(cb => { cb.checked = checked; });
+      document.querySelectorAll('.' + type + '-checkbox').forEach(cb => {
+        cb.checked = checked;
+        if (type === 'follow') onFollowCheckboxChange(cb);
+      });
     }
 
     function getSelectedUserIds(type) {
+      if (type === 'follow' && selectedFollowIds.size) {
+        return followListData
+          .filter(u => selectedFollowIds.has(String(u.userId)))
+          .map(u => u.userId);
+      }
       const userIds = [];
       document.querySelectorAll('.' + type + '-checkbox:checked').forEach(cb => {
         const idx = parseInt(cb.dataset.idx);
         if (followListData[idx]) userIds.push(followListData[idx].userId);
       });
       return userIds;
+    }
+
+    /** 勾选用户带 username；优先用内存 selectedFollowIds，不被 DOM 重绘影响 */
+    function getSelectedUsers(type) {
+      if (type === 'follow' && selectedFollowIds.size) {
+        return followListData
+          .filter(u => selectedFollowIds.has(String(u.userId)))
+          .map(u => ({ userId: u.userId, username: u.username, name: u.name }));
+      }
+      const users = [];
+      document.querySelectorAll('.' + type + '-checkbox:checked').forEach(cb => {
+        const idx = parseInt(cb.dataset.idx, 10);
+        const u = followListData[idx];
+        if (u) users.push({ userId: u.userId, username: u.username, name: u.name });
+      });
+      return users;
     }
 
     let followBackPollTimer = null;
@@ -392,6 +470,10 @@
       statusEl.style.color = '#1d9bf0';
       lastFollowBackScanStatus = 'scanning';
       followBackPollCount = 0;
+      // 新扫描：清空旧勾选与列表签名，允许完成后重新渲染
+      selectedFollowIds.clear();
+      lastFollowListSig = '';
+      followListData = [];
 
       try {
         const res = await fetch('/api/compute-follow-back', { method: 'POST' });
@@ -420,11 +502,12 @@
 
     async function checkFollowBackScan() {
       if (followBackBusy) return;
+      // 用户正在勾选/批量回关时，不要用 status 轮询冲掉列表
+      if (batchFollowInProgress) return;
       followBackBusy = true;
       const btn = document.getElementById('btn-compute-follow');
       const statusEl = document.getElementById('compute-follow-status');
       try {
-        // 必须自己拉 /api/status，不能只读 lastData（否则 10s 刷新间隙会一直卡在 scanning）
         const res = await fetch('/api/status');
         if (!res.ok) return;
         const data = await res.json();
@@ -434,21 +517,37 @@
 
         if (scan.status === 'done') {
           if (followBackPollTimer) { clearInterval(followBackPollTimer); followBackPollTimer = null; }
-          followListData = Array.isArray(scan.users) ? scan.users : [];
-          try {
-            renderUserList('follow-list-items', followListData, 'follow');
-          } catch (renderErr) {
-            console.error('renderUserList failed', renderErr);
-            document.getElementById('follow-list-items').innerHTML =
-              '<div style="padding:12px;color:#f4212e;font-size:13px;">列表渲染失败: ' + escHtml(renderErr.message || renderErr) + '</div>';
+
+          const users = Array.isArray(scan.users) ? scan.users : [];
+          const sig = followListSignature(users);
+          const justFinished = lastFollowBackScanStatus === 'scanning';
+          // 仅：扫描刚完成 / 列表内容真的变了 / 尚未渲染过 → 才重绘
+          // 已展示且内容相同 → 绝不重绘，保护用户勾选
+          const needRender = justFinished || sig !== lastFollowListSig || !document.querySelector('.follow-checkbox');
+
+          if (needRender) {
+            followListData = users;
+            // 新扫描刚完成：清空勾选；列表内容变化：保留勾选
+            if (justFinished) selectedFollowIds.clear();
+            try {
+              renderUserList('follow-list-items', followListData, 'follow', {
+                preserveSelection: !justFinished,
+              });
+            } catch (renderErr) {
+              console.error('renderUserList failed', renderErr);
+              document.getElementById('follow-list-items').innerHTML =
+                '<div style="padding:12px;color:#f4212e;font-size:13px;">列表渲染失败: ' + escHtml(renderErr.message || renderErr) + '</div>';
+            }
           }
+
           document.getElementById('follow-list').style.display = 'block';
-          document.getElementById('follow-queue-count').textContent = '待回关: ' + (scan.count ?? followListData.length);
-          statusEl.textContent = '找到 ' + (scan.count ?? followListData.length) + ' 个待回关粉丝';
+          document.getElementById('follow-queue-count').textContent =
+            '待回关: ' + (followListData.length || scan.count || 0);
+          statusEl.textContent = '找到 ' + (followListData.length || scan.count || 0) + ' 个待回关粉丝';
           statusEl.style.color = '#00ba7c';
-          if (lastFollowBackScanStatus === 'scanning') {
-            showToast('待回关: ' + (scan.count ?? followListData.length) + ' 人', 'success');
-            addLog('扫描完成: ' + (scan.count ?? followListData.length) + ' 个待回关');
+          if (justFinished) {
+            showToast('待回关: ' + (followListData.length || scan.count || 0) + ' 人', 'success');
+            addLog('扫描完成: ' + (followListData.length || scan.count || 0) + ' 个待回关');
           }
           btn.textContent = '计算待回关';
           btn.disabled = false;
@@ -465,7 +564,6 @@
           followBackPollCount++;
           statusEl.textContent = '后台扫描中…（轮询 #' + followBackPollCount + '）';
           statusEl.style.color = '#1d9bf0';
-          // 粉丝多时扫描较久：放宽到约 15 分钟（2s * 450）
           if (followBackPollCount > 450) {
             statusEl.textContent = '扫描超时，请刷新页面后重试';
             statusEl.style.color = '#f4212e';
@@ -474,7 +572,6 @@
             btn.disabled = false;
           }
         } else if (scan.status === 'idle') {
-          // 启动瞬间或已重置
           if (lastFollowBackScanStatus === 'scanning' && followBackPollCount > 2) {
             statusEl.textContent = '扫描状态已重置';
             statusEl.style.color = '#888';
@@ -486,25 +583,57 @@
         lastFollowBackScanStatus = scan.status;
       } catch (e) {
         console.warn('checkFollowBackScan error', e);
-        // 网络错误，下次轮询重试
       } finally {
         followBackBusy = false;
       }
     }
 
     async function batchFollow() {
-      const userIds = getSelectedUserIds('follow');
-      if (!userIds.length) { showToast('No users selected', 'error'); return; }
-      addLog('Batch following ' + userIds.length + ' users...');
-      const res = await fetch('/api/batch-follow', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ userIds }),
-      });
-      const data = await res.json();
-      if (data.ok) {
-        showToast('Done: ' + data.done + ', Failed: ' + data.failed, data.failed ? 'error' : 'success');
-        computeFollowBack(); // refresh list
+      captureFollowSelection();
+      const users = getSelectedUsers('follow');
+      if (!users.length) { showToast('请先勾选用户', 'error'); return; }
+      const btn = document.querySelector('#follow-list button.btn-success');
+      if (btn) { btn.disabled = true; btn.textContent = '回关中…'; }
+      batchFollowInProgress = true;
+      addLog('批量回关 ' + users.length + ' 人…');
+      showToast('回关中，请稍候…', 'info');
+      try {
+        const res = await fetch('/api/batch-follow', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ users }),
+        });
+        const data = await res.json();
+        if (data.ok) {
+          const doneIds = new Set(
+            (data.results || []).filter(r => r.ok).map(r => String(r.userId))
+          );
+          // 本地立刻从列表移除成功的；失败的保留勾选
+          doneIds.forEach(id => selectedFollowIds.delete(id));
+          if (doneIds.size > 0) {
+            followListData = followListData.filter(u => !doneIds.has(String(u.userId)));
+            renderUserList('follow-list-items', followListData, 'follow', { preserveSelection: true });
+            document.getElementById('follow-list').style.display = 'block';
+            document.getElementById('follow-queue-count').textContent = '待回关: ' + followListData.length;
+            if (lastData && lastData.computedFollowBack) {
+              lastData.computedFollowBack.users = followListData;
+              lastData.computedFollowBack.count = followListData.length;
+              lastData.computedFollowBack.status = 'done';
+            }
+          }
+          const msg = '成功 ' + (data.done || 0) + '，失败 ' + (data.failed || 0) + '，剩余 ' + followListData.length;
+          addLog(msg);
+          showToast(msg, data.failed ? 'error' : 'success');
+        } else {
+          showToast(data.error || '回关失败', 'error');
+          addLog('回关失败: ' + (data.error || ''));
+        }
+      } catch (e) {
+        showToast('网络错误', 'error');
+        addLog('回关请求失败: ' + e.message);
+      } finally {
+        batchFollowInProgress = false;
+        if (btn) { btn.disabled = false; btn.textContent = 'Follow Selected'; }
       }
     }
 
@@ -706,9 +835,24 @@
         // Post schedule
         updatePostScheduleUI(data);
 
-        // Follow-back scan (async)
-        if (data.computedFollowBack && data.computedFollowBack.status !== 'idle') {
-          checkFollowBackScan();
+        // Follow-back scan：仅 scanning 时轮询；done 且尚未渲染过才补一次
+        // 已展示列表时不要反复 check，否则会冲掉用户勾选
+        const fb = data.computedFollowBack;
+        if (fb) {
+          if (fb.status === 'scanning') {
+            checkFollowBackScan();
+          } else if (fb.status === 'done' && lastFollowBackScanStatus !== 'done') {
+            checkFollowBackScan();
+          } else if (fb.status === 'error' && lastFollowBackScanStatus === 'scanning') {
+            checkFollowBackScan();
+          }
+          // 队列数字：用本地列表长度（可能已被批量回关裁剪），不要被服务端旧 count 盖掉
+          if (fb.status === 'done' && followListData.length >= 0 && document.getElementById('follow-list').style.display !== 'none') {
+            const countEl = document.getElementById('follow-queue-count');
+            if (countEl && !countEl.textContent.startsWith('Pending:')) {
+              countEl.textContent = '待回关: ' + followListData.length;
+            }
+          }
         }
       } catch (err) {
         // Server not ready
