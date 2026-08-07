@@ -451,10 +451,10 @@ export class BrowserClient {
     this.page!.on('response', onResponse);
 
     await this.page!.goto(url, { waitUntil: 'domcontentloaded', timeout: 30000 });
-    await this.page!.waitForTimeout(3000);
+    await this.page!.waitForTimeout(2000);
 
     try {
-      await this.page!.waitForSelector('[data-testid="UserCell"]', { timeout: 10000 });
+      await this.page!.waitForSelector('[data-testid="UserCell"]', { timeout: 8000 });
     } catch {
       this.page!.off('response', onResponse);
       console.warn('[BrowserClient] 粉丝列表未加载');
@@ -467,7 +467,7 @@ export class BrowserClient {
     let prevSeenAll = 0;
     let noNewCount = 0;
     const MAX_SCROLLS = 800;
-    const MAX_NO_NEW = 10;
+    const MAX_NO_NEW = 6;
 
     for (let i = 0; i < MAX_SCROLLS; i++) {
       // 扫描当前视口：只收「需要回关」的 UserCell，同时统计所有出现过的粉丝
@@ -726,12 +726,12 @@ export class BrowserClient {
       }
       prevSeenAll = seenAllUsers.size;
 
-      // 滚动加载更多粉丝
-      for (let r = 0; r < 4; r++) {
+      // 滚动加载更多粉丝（减少等待加速扫描）
+      for (let r = 0; r < 2; r++) {
         await this.scrollUserList();
-        await this.page!.waitForTimeout(200);
+        await this.page!.waitForTimeout(150);
       }
-      await this.page!.waitForTimeout(600 + Math.random() * 400);
+      await this.page!.waitForTimeout(300 + Math.random() * 200);
 
       if (i === 0) {
         const sample = batch.slice(0, 5).map((u) =>
