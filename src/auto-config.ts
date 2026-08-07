@@ -39,6 +39,12 @@ export interface AutomationConfig {
   activeHoursEnd: number;
   /** 活跃时段使用的时区，默认 Asia/Shanghai（容器多为 UTC） */
   timezone: string;
+  /** 是否开启自动扫描+回关（服务端定时，关 UI 也继续） */
+  followBackAutoEnabled: boolean;
+  /** 自动扫描周期（分钟），最低 10 */
+  followBackAutoIntervalMinutes: number;
+  /** 上一轮自动扫描回关完成时间 ISO */
+  lastFollowBackAutoAt: string | null;
   authToken: string;
   ct0: string;
 }
@@ -54,9 +60,15 @@ export const DEFAULT_AUTOMATION: AutomationConfig = {
   activeHoursStart: 9,
   activeHoursEnd: 23,
   timezone: 'Asia/Shanghai',
+  followBackAutoEnabled: false,
+  followBackAutoIntervalMinutes: 30,
+  lastFollowBackAutoAt: null,
   authToken: '',
   ct0: '',
 };
+
+/** 自动扫描回关最短周期（分钟） */
+export const MIN_FOLLOW_BACK_AUTO_INTERVAL = 10;
 
 export function loadAutomationConfig(): AutomationConfig {
   try {

@@ -10,6 +10,8 @@ import {
   loadAutomationConfig,
   formatInTimezone,
   DEFAULT_TIMEZONE,
+  isActiveHours,
+  MIN_FOLLOW_BACK_AUTO_INTERVAL,
   type PostConfig,
 } from './auto-config.js';
 
@@ -49,6 +51,15 @@ export interface StatusInfo {
     intervalSeconds: number;
     templatePreview: string;
     nextRunAt: string | null;
+  };
+  /** 自动扫描回关（服务端定时，持久化） */
+  followBackAuto: {
+    enabled: boolean;
+    intervalMinutes: number;
+    nextRunAt: string | null;
+    lastRunAt: string | null;
+    running: boolean;
+    lastResult: string | null;
   };
   connected: boolean;
   computedFollowBack: {
@@ -95,6 +106,15 @@ export class TaskManager {
   private postTemplateText = '';
   private postNextRunAt: string | null = null;
   private postAutoIndex = 0;  // 自动发帖序号，防 X.com 重复内容静默拒绝
+
+  // 自动扫描回关（服务端定时，关 UI 也继续）
+  private followBackAutoTimer: ReturnType<typeof setTimeout> | null = null;
+  private followBackAutoIntervalMin = 30;
+  private followBackAutoNextRunAt: string | null = null;
+  private followBackAutoLastRunAt: string | null = null;
+  private followBackAutoRunning = false;
+  private followBackAutoEnabled = false;
+  private followBackAutoLastResult: string | null = null;
 
   private me: XUser | null = null;
   private connected = false;
@@ -440,7 +460,10 @@ export class TaskManager {
 
   /** 启动后台扫描待回关（不阻塞请求；结果仅内存，经 /api/status 给前端，不持久化） */
   startComputeFollowBack(): void {
-    if (this.followBackScanStatus === 'scanning') {
+    if (this.followBackAutoEnabled) {
+      throw new Error('自动扫描回关已开启，请先关闭自动化后再手动扫描');
+    }
+    if (this.followBackScanStatus === 'scanning' || this.followBackAutoRunning) {
       throw new Error('扫描进行中，请等待完成后再试');
     }
     // 每次新扫描先丢掉上一轮内存结果
@@ -462,6 +485,162 @@ export class TaskManager {
       });
   }
 
+  // ── 自动扫描回关（持久化，关 UI 仍运行）────────────────
+
+  /**
+   * 开启/刷新自动扫描回关。
+   * @param intervalMinutes 周期分钟，最低 10
+   * @param firstDelayMs 首次触发延迟；未指定则按 lastRunAt 对齐或短暂延迟后跑一轮
+   */
+  startFollowBackAuto(intervalMinutes: number, firstDelayMs?: number): void {
+    const interval = Math.max(MIN_FOLLOW_BACK_AUTO_INTERVAL, Math.floor(intervalMinutes || 30));
+    this.stopFollowBackAuto(false);
+
+    this.followBackAutoEnabled = true;
+    this.followBackAutoIntervalMin = interval;
+
+    const cfg = loadAutomationConfig();
+    cfg.followBackAutoEnabled = true;
+    cfg.followBackAutoIntervalMinutes = interval;
+    saveAutomationConfig(cfg);
+
+    const intervalMs = interval * 60_000;
+    let delay = typeof firstDelayMs === 'number' ? Math.max(0, firstDelayMs) : 5_000;
+
+    if (typeof firstDelayMs !== 'number' && cfg.lastFollowBackAutoAt) {
+      const elapsed = Date.now() - new Date(cfg.lastFollowBackAutoAt).getTime();
+      if (elapsed < intervalMs) {
+        delay = intervalMs - elapsed;
+      } else {
+        delay = 3_000; // 已过周期，尽快跑一轮
+      }
+    }
+
+    this.followBackAutoLastRunAt = cfg.lastFollowBackAutoAt;
+    this.scheduleFollowBackAutoNext(delay);
+
+    console.log(
+      `[AutoFollowBack] 已开启，周期 ${interval} 分钟，下次 ` +
+      `${formatInTimezone(this.followBackAutoNextRunAt || Date.now(), DEFAULT_TIMEZONE)} (北京时间)`,
+    );
+  }
+
+  /** 停止自动扫描回关；persist=true 时写入配置 */
+  stopFollowBackAuto(persist = true): void {
+    if (this.followBackAutoTimer) {
+      clearTimeout(this.followBackAutoTimer);
+      this.followBackAutoTimer = null;
+    }
+    this.followBackAutoEnabled = false;
+    this.followBackAutoNextRunAt = null;
+    if (persist) {
+      const cfg = loadAutomationConfig();
+      cfg.followBackAutoEnabled = false;
+      saveAutomationConfig(cfg);
+      console.log('[AutoFollowBack] 已关闭');
+    }
+  }
+
+  private scheduleFollowBackAutoNext(delayMs: number): void {
+    if (this.followBackAutoTimer) {
+      clearTimeout(this.followBackAutoTimer);
+      this.followBackAutoTimer = null;
+    }
+    this.followBackAutoNextRunAt = new Date(Date.now() + delayMs).toISOString();
+    this.followBackAutoTimer = setTimeout(() => {
+      void this.runFollowBackAutoCycle().finally(() => {
+        if (!this.followBackAutoEnabled) return;
+        const ms = this.followBackAutoIntervalMin * 60_000;
+        this.scheduleFollowBackAutoNext(ms);
+      });
+    }, delayMs);
+  }
+
+  /** 一轮：扫描待回关 → 自动批量回关（受 batchSize / 活跃时段约束） */
+  private async runFollowBackAutoCycle(): Promise<void> {
+    if (this.followBackAutoRunning) {
+      console.warn('[AutoFollowBack] 上一轮仍在进行，跳过');
+      return;
+    }
+    if (this.followBackScanStatus === 'scanning') {
+      console.warn('[AutoFollowBack] 手动扫描进行中，跳过本轮');
+      return;
+    }
+
+    this.followBackAutoRunning = true;
+    const cfg = loadAutomationConfig();
+
+    try {
+      // 刷新活跃时段配置
+      try {
+        if (this.service['xClient'] instanceof BrowserClient) {
+          (this.service['xClient'] as BrowserClient).reloadConfig();
+        }
+      } catch { /* ignore */ }
+
+      if (!isActiveHours(cfg)) {
+        const msg = `非活跃时段（${cfg.activeHoursStart}:00-${cfg.activeHoursEnd}:00 ${cfg.timezone || 'Asia/Shanghai'}），跳过本轮`;
+        console.log(`[AutoFollowBack] ${msg}`);
+        this.followBackAutoLastResult = msg;
+        return;
+      }
+
+      console.log('[AutoFollowBack] 开始自动扫描待回关…');
+      this.followBackScanStatus = 'scanning';
+      this.followBackScanResults = null;
+      this.followBackScanError = null;
+
+      const results = await this.service.computeFollowBackWithDetails(this.userId);
+      this.followBackScanResults = results;
+      this.followBackScanStatus = 'done';
+      console.log(`[AutoFollowBack] 扫描完成: ${results.length} 个待回关`);
+
+      if (results.length === 0) {
+        this.followBackAutoLastResult = '扫描完成：0 个待回关';
+      } else {
+        const maxBatch = Math.max(1, cfg.batchSizeMax || 18);
+        const targets = results.slice(0, maxBatch).map((u) => ({
+          userId: u.userId,
+          username: u.username,
+        }));
+        console.log(`[AutoFollowBack] 开始自动回关 ${targets.length}/${results.length} 人…`);
+        const r = await this.service.batchFollow(this.userId, targets);
+        const okIds = (r.results || []).filter((x) => x.ok).map((x) => x.userId);
+        this.removeFromFollowBackScan(okIds);
+        this.followBackAutoLastResult =
+          `扫描 ${results.length}，回关成功 ${r.done}，失败 ${r.failed}`;
+        console.log(`[AutoFollowBack] ${this.followBackAutoLastResult}`);
+      }
+
+      const now = new Date().toISOString();
+      this.followBackAutoLastRunAt = now;
+      const updated = loadAutomationConfig();
+      updated.lastFollowBackAutoAt = now;
+      updated.followBackAutoEnabled = true;
+      updated.followBackAutoIntervalMinutes = this.followBackAutoIntervalMin;
+      saveAutomationConfig(updated);
+    } catch (err) {
+      this.followBackScanStatus = 'error';
+      this.followBackScanError = (err as Error).message;
+      this.followBackAutoLastResult = '失败: ' + (err as Error).message;
+      console.error('[AutoFollowBack] 本轮失败:', err);
+    } finally {
+      this.followBackAutoRunning = false;
+    }
+  }
+
+  /** 进程启动时按配置恢复自动扫描回关 */
+  restoreFollowBackAutoFromConfig(): void {
+    const cfg = loadAutomationConfig();
+    if (!cfg.followBackAutoEnabled) return;
+    const interval = Math.max(
+      MIN_FOLLOW_BACK_AUTO_INTERVAL,
+      cfg.followBackAutoIntervalMinutes || 30,
+    );
+    console.log(`[AutoFollowBack] 从配置恢复，周期 ${interval} 分钟`);
+    this.startFollowBackAuto(interval);
+  }
+
   async computeFollowBack(): Promise<Array<{
     userId: string;
     username: string;
@@ -478,7 +657,16 @@ export class TaskManager {
   async batchFollow(
     targets: Array<string | { userId: string; username?: string }>,
   ): Promise<{ done: number; failed: number; results: Array<{ userId: string; username?: string; ok: boolean }> }> {
+    // 自动周期内跑的 batch 不拦；仅拦前端手动触发（由 server 在 auto 开启时拒绝）
     return this.service.batchFollow(this.userId, targets);
+  }
+
+  isFollowBackAutoEnabled(): boolean {
+    return this.followBackAutoEnabled;
+  }
+
+  isFollowBackAutoRunning(): boolean {
+    return this.followBackAutoRunning;
   }
 
   /** 批量回关成功后，从内存扫描结果中剔除，避免 UI 仍显示已回关用户 */
@@ -548,6 +736,14 @@ export class TaskManager {
         intervalSeconds: this.postInterval * 60,
         templatePreview: this.postTemplateText.substring(0, 50),
         nextRunAt: this.postNextRunAt,
+      },
+      followBackAuto: {
+        enabled: this.followBackAutoEnabled,
+        intervalMinutes: this.followBackAutoIntervalMin,
+        nextRunAt: this.followBackAutoNextRunAt,
+        lastRunAt: this.followBackAutoLastRunAt,
+        running: this.followBackAutoRunning,
+        lastResult: this.followBackAutoLastResult,
       },
       connected: this.connected,
       computedFollowBack: {

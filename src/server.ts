@@ -5,7 +5,15 @@ import { TaskManager } from './task-manager.js';
 import { XClient } from './x-client.js';
 import { Service } from './service.js';
 import { saveXConfig, getXConfigStatus, loadConfig } from './config.js';
-import { loadAutomationConfig, saveAutomationConfig, loadPostConfig, savePostConfig, type AutomationConfig, type PostConfig } from './auto-config.js';
+import {
+  loadAutomationConfig,
+  saveAutomationConfig,
+  loadPostConfig,
+  savePostConfig,
+  MIN_FOLLOW_BACK_AUTO_INTERVAL,
+  type AutomationConfig,
+  type PostConfig,
+} from './auto-config.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -167,6 +175,39 @@ export function createServer(taskManager: TaskManager): express.Express {
     }
   });
 
+  // ── 自动扫描回关 启停（持久化，关 UI 仍运行）──────────
+
+  app.post('/api/follow-back-auto/start', (req, res) => {
+    try {
+      const body = req.body || {};
+      const existing = loadAutomationConfig();
+      let interval = Number(body.intervalMinutes ?? existing.followBackAutoIntervalMinutes ?? 30);
+      if (!interval || interval < MIN_FOLLOW_BACK_AUTO_INTERVAL) {
+        res.status(400).json({
+          error: `扫描周期至少 ${MIN_FOLLOW_BACK_AUTO_INTERVAL} 分钟`,
+        });
+        return;
+      }
+      taskManager.startFollowBackAuto(interval);
+      res.json({
+        ok: true,
+        message: `自动扫描回关已开启，每 ${interval} 分钟一轮`,
+        intervalMinutes: interval,
+      });
+    } catch (err: any) {
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  app.post('/api/follow-back-auto/stop', (_req, res) => {
+    try {
+      taskManager.stopFollowBackAuto(true);
+      res.json({ ok: true, message: '自动扫描回关已关闭' });
+    } catch (err: any) {
+      res.status(500).json({ error: err.message });
+    }
+  });
+
   app.post('/api/compute-unfollow', async (_req, res) => {
     try {
       const list = await taskManager.computeUnfollow();
@@ -178,6 +219,11 @@ export function createServer(taskManager: TaskManager): express.Express {
 
   app.post('/api/batch-follow', async (req, res) => {
     try {
+      // 自动化开启时禁止手动回关（自动周期直接调 service，不走本接口）
+      if (taskManager.isFollowBackAutoEnabled()) {
+        res.status(409).json({ error: '自动扫描回关已开启，请先关闭自动化后再手动回关' });
+        return;
+      }
       const { userIds, users } = req.body as {
         userIds?: string[];
         users?: Array<{ userId: string; username?: string }>;
@@ -269,6 +315,21 @@ export function createServer(taskManager: TaskManager): express.Express {
         return;
       }
 
+      let autoInterval =
+        body.followBackAutoIntervalMinutes ?? existing.followBackAutoIntervalMinutes ?? 30;
+      autoInterval = Math.floor(Number(autoInterval) || 30);
+      if (autoInterval < MIN_FOLLOW_BACK_AUTO_INTERVAL) {
+        res.status(400).json({
+          error: `自动扫描周期至少 ${MIN_FOLLOW_BACK_AUTO_INTERVAL} 分钟`,
+        });
+        return;
+      }
+
+      const autoEnabled =
+        typeof body.followBackAutoEnabled === 'boolean'
+          ? body.followBackAutoEnabled
+          : existing.followBackAutoEnabled;
+
       const config: AutomationConfig = {
         batchSizeMin: body.batchSizeMin ?? existing.batchSizeMin,
         batchSizeMax: body.batchSizeMax ?? existing.batchSizeMax,
@@ -280,6 +341,9 @@ export function createServer(taskManager: TaskManager): express.Express {
         activeHoursStart: start,
         activeHoursEnd: end,
         timezone: body.timezone || existing.timezone || 'Asia/Shanghai',
+        followBackAutoEnabled: autoEnabled,
+        followBackAutoIntervalMinutes: autoInterval,
+        lastFollowBackAutoAt: existing.lastFollowBackAutoAt,
         // 只有传入非占位符值时才更新 cookie
         authToken: (body.authToken && body.authToken !== '••••••••') ? body.authToken : existing.authToken,
         ct0: (body.ct0 && body.ct0 !== '••••••••') ? body.ct0 : existing.ct0,
@@ -288,9 +352,21 @@ export function createServer(taskManager: TaskManager): express.Express {
       saveAutomationConfig(config);
       // 立即刷新浏览器客户端内存中的活跃时段，无需重启
       taskManager.reloadAutomationConfig();
+
+      // 按开关启停服务端定时任务（关 UI 也继续）
+      if (config.followBackAutoEnabled) {
+        taskManager.startFollowBackAuto(config.followBackAutoIntervalMinutes);
+      } else {
+        taskManager.stopFollowBackAuto(true);
+      }
+
       res.json({
         ok: true,
-        message: `活跃时段已保存: ${start}:00-${end}:00 (${config.timezone})`,
+        message: config.followBackAutoEnabled
+          ? `自动化已开启：每 ${config.followBackAutoIntervalMinutes} 分钟扫描并回关`
+          : '自动化已关闭；配置已保存',
+        followBackAutoEnabled: config.followBackAutoEnabled,
+        followBackAutoIntervalMinutes: config.followBackAutoIntervalMinutes,
         activeHoursStart: start,
         activeHoursEnd: end,
         timezone: config.timezone,

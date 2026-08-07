@@ -92,6 +92,13 @@ async function main() {
     console.warn('[Post] 恢复自动发推失败:', (err as Error).message);
   }
 
+  // 若配置里已开启自动扫描回关，重启后恢复（关 UI 也继续）
+  try {
+    taskManager.restoreFollowBackAutoFromConfig();
+  } catch (err) {
+    console.warn('[AutoFollowBack] 恢复失败:', (err as Error).message);
+  }
+
   const app = createServer(taskManager);
   app.listen(PORT, '0.0.0.0', () => {
     console.log(`Server running at http://localhost:${PORT}`);

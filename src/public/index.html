@@ -161,7 +161,23 @@
           <h3>🔁 Follow-back Queue</h3>
           <span style="font-size: 13px; color: #888;" id="follow-queue-count"></span>
         </div>
-        <div class="section-desc">从「我的关注者」中扫描带「回关 / Follow」按钮的粉丝（你尚未回关的人）</div>
+        <div class="section-desc">从「我的关注者」中扫描带「回关」按钮的粉丝；可手动操作，也可开启服务端自动周期（关页面也继续跑）</div>
+
+        <!-- 自动扫描回关状态条 -->
+        <div id="follow-auto-bar" style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;padding:10px 12px;margin-bottom:10px;background:#f8f8f8;border-radius:8px;font-size:13px;">
+          <label style="display:flex;align-items:center;gap:6px;cursor:pointer;font-weight:500;">
+            <input type="checkbox" id="follow-auto-enabled" onchange="onFollowAutoToggle()" style="width:16px;height:16px;">
+            开启自动扫描回关
+          </label>
+          <span style="color:#ddd;">|</span>
+          <span style="color:#666;">周期</span>
+          <input type="number" id="follow-auto-interval" min="10" max="1440" step="5" value="30" style="width:64px;padding:4px 6px;border:1px solid #ddd;border-radius:5px;font-size:13px;">
+          <span style="color:#666;">分钟（≥10）</span>
+          <button class="btn-primary" onclick="saveFollowAutoConfig()" style="font-size:12px;padding:5px 12px;">保存并应用</button>
+          <span id="follow-auto-status" style="font-size:12px;color:#888;"></span>
+        </div>
+        <div id="follow-auto-countdown" style="font-size:12px;color:#1d9bf0;margin:-4px 0 10px 0;min-height:18px;"></div>
+
         <button class="btn-primary" onclick="computeFollowBack()" id="btn-compute-follow" style="margin-bottom: 10px;">计算待回关</button>
         <span id="compute-follow-status" style="font-size: 12px; color: #888; margin-left: 8px;"></span>
         <div id="follow-list" style="display: none; max-height: 300px; overflow-y: auto; border: 1px solid #eee; border-radius: 6px;">
@@ -181,32 +197,23 @@
           <div id="follow-done-list" style="max-height: 180px; overflow-y: auto; border: 1px solid #e6f7ef; border-radius: 6px; background: #f6fffa;"></div>
         </div>
 
-        <!-- 自动化配置（折叠） -->
+        <!-- 自动化细节（折叠）：每轮上限 / 操作间隔 -->
         <div style="margin-top: 10px;">
-          <button class="btn-outline" onclick="toggleAutoSettings()" style="font-size: 12px; padding: 4px 12px;">⚙ Automation Settings</button>
+          <button class="btn-outline" onclick="toggleAutoSettings()" style="font-size: 12px; padding: 4px 12px;">⚙ 回关参数（每轮人数 / 操作间隔）</button>
           <span id="auto-config-status" style="font-size: 12px; color: #888; margin-left: 8px;"></span>
         </div>
         <div id="auto-settings-panel" style="display: none; margin-top: 10px; padding: 12px; background: #fafafa; border-radius: 8px;">
           <div class="section-row" style="margin-bottom: 8px;">
-            <span style="font-size: 12px; min-width: 75px;">Batch Size:</span>
-            <input type="number" id="auto-batch-min" min="1" max="50" value="10" style="width: 55px; font-size: 12px; padding: 4px;">
-            <span style="font-size: 12px;">~</span>
+            <span style="font-size: 12px; min-width: 90px;">每轮最多回关:</span>
             <input type="number" id="auto-batch-max" min="1" max="50" value="18" style="width: 55px; font-size: 12px; padding: 4px;">
-            <span style="font-size: 12px;">users</span>
-          </div>
-          <div class="section-row" style="margin-bottom: 8px;">
-            <span style="font-size: 12px; min-width: 75px;">Interval:</span>
-            <input type="number" id="auto-interval-min" min="1" max="60" value="5" style="width: 55px; font-size: 12px; padding: 4px;">
-            <span style="font-size: 12px;">~</span>
-            <input type="number" id="auto-interval-max" min="1" max="60" value="15" style="width: 55px; font-size: 12px; padding: 4px;">
-            <span style="font-size: 12px;">min</span>
+            <span style="font-size: 12px;">人</span>
           </div>
           <div class="section-row">
-            <span style="font-size: 12px; min-width: 75px;">Per Action:</span>
+            <span style="font-size: 12px; min-width: 90px;">操作间隔:</span>
             <input type="number" id="auto-action-min" min="1" max="60" value="8" style="width: 55px; font-size: 12px; padding: 4px;">
             <span style="font-size: 12px;">~</span>
             <input type="number" id="auto-action-max" min="1" max="60" value="25" style="width: 55px; font-size: 12px; padding: 4px;">
-            <span style="font-size: 12px;">sec</span>
+            <span style="font-size: 12px;">秒</span>
           </div>
           <button class="btn-primary" onclick="saveAutoConfig()" style="margin-top: 8px; font-size: 12px; padding: 4px 12px;">Save</button>
         </div>
@@ -939,6 +946,29 @@
         // Post schedule
         updatePostScheduleUI(data);
 
+        // 自动扫描回关状态（服务端定时，与 UI 是否打开无关）
+        if (data.followBackAuto) {
+          serverFollowBackAuto = {
+            enabled: !!data.followBackAuto.enabled,
+            intervalMinutes: data.followBackAuto.intervalMinutes || 30,
+            nextRunAt: data.followBackAuto.nextRunAt || null,
+            lastRunAt: data.followBackAuto.lastRunAt || null,
+            running: !!data.followBackAuto.running,
+            lastResult: data.followBackAuto.lastResult || null,
+          };
+          const en = document.getElementById('follow-auto-enabled');
+          const iv = document.getElementById('follow-auto-interval');
+          // 仅当用户未在编辑意图时同步勾选（避免打断正在改的勾选）
+          if (en && document.activeElement !== en) {
+            en.checked = serverFollowBackAuto.enabled;
+          }
+          if (iv && document.activeElement !== iv) {
+            iv.value = serverFollowBackAuto.intervalMinutes;
+          }
+          updateFollowAutoCountdown();
+          applyFollowAutoManualLock();
+        }
+
         // Follow-back scan：仅 scanning 时轮询；done 且尚未渲染过才补一次
         // 已展示列表时不要反复 check，否则会冲掉用户勾选
         const fb = data.computedFollowBack;
@@ -965,24 +995,149 @@
 
     // ── Automation Config ───────────────────────────────────
 
+    let serverFollowBackAuto = {
+      enabled: false,
+      intervalMinutes: 30,
+      nextRunAt: null,
+      lastRunAt: null,
+      running: false,
+      lastResult: null,
+    };
+    let followAutoCountdownTimer = null;
+
     function toggleAutoSettings() {
       const panel = document.getElementById('auto-settings-panel');
       panel.style.display = panel.style.display === 'none' ? 'block' : 'none';
+    }
+
+    function formatRemain(ms) {
+      if (ms <= 0) return '即将开始';
+      const s = Math.floor(ms / 1000);
+      const h = Math.floor(s / 3600);
+      const m = Math.floor((s % 3600) / 60);
+      const sec = s % 60;
+      if (h > 0) return h + '小时' + m + '分' + sec + '秒';
+      if (m > 0) return m + '分' + sec + '秒';
+      return sec + '秒';
+    }
+
+    function formatBeijingTime(iso) {
+      if (!iso) return '—';
+      try {
+        return new Date(iso).toLocaleString('zh-CN', {
+          timeZone: 'Asia/Shanghai',
+          month: '2-digit', day: '2-digit',
+          hour: '2-digit', minute: '2-digit', second: '2-digit',
+          hour12: false,
+        });
+      } catch { return iso; }
+    }
+
+    function updateFollowAutoCountdown() {
+      const el = document.getElementById('follow-auto-countdown');
+      if (!el) return;
+      const a = serverFollowBackAuto;
+      if (!a.enabled) {
+        el.textContent = '自动化未开启 · 可手动「计算待回关」与勾选回关';
+        el.style.color = '#888';
+        return;
+      }
+      if (a.running) {
+        el.textContent = '⚡ 自动任务进行中（扫描/回关）… ' + (a.lastResult ? '上轮: ' + a.lastResult : '');
+        el.style.color = '#1d9bf0';
+        return;
+      }
+      const next = a.nextRunAt ? new Date(a.nextRunAt).getTime() : 0;
+      const remain = next ? next - Date.now() : 0;
+      el.textContent =
+        '✓ 已开启 · 周期 ' + a.intervalMinutes + ' 分钟 · 下次 ' +
+        formatBeijingTime(a.nextRunAt) + '（剩余 ' + formatRemain(remain) + '）' +
+        (a.lastResult ? ' · 上轮: ' + a.lastResult : '');
+      el.style.color = '#00ba7c';
+    }
+
+    function applyFollowAutoManualLock() {
+      const locked = !!serverFollowBackAuto.enabled || batchFollowInProgress;
+      const scanBtn = document.getElementById('btn-compute-follow');
+      const batchBtn = document.getElementById('btn-batch-follow');
+      const selectAll = document.getElementById('follow-select-all');
+      if (scanBtn && !batchFollowInProgress) {
+        scanBtn.disabled = !!serverFollowBackAuto.enabled;
+        scanBtn.title = serverFollowBackAuto.enabled ? '自动化已开启，请先关闭' : '';
+      }
+      if (batchBtn && !batchFollowInProgress) {
+        batchBtn.disabled = !!serverFollowBackAuto.enabled;
+        batchBtn.title = serverFollowBackAuto.enabled ? '自动化已开启，请先关闭' : '';
+      }
+      if (selectAll) selectAll.disabled = locked;
+      document.querySelectorAll('.follow-checkbox').forEach(cb => {
+        cb.disabled = locked;
+      });
+    }
+
+    function onFollowAutoToggle() {
+      // 仅本地勾选意图；点「保存并应用」才生效
+      const checked = document.getElementById('follow-auto-enabled').checked;
+      const st = document.getElementById('follow-auto-status');
+      if (st) {
+        st.textContent = checked ? '已勾选，点「保存并应用」后生效' : '已取消勾选，点「保存并应用」后关闭';
+        st.style.color = '#ffad1f';
+      }
+    }
+
+    async function saveFollowAutoConfig() {
+      const st = document.getElementById('follow-auto-status');
+      const enabled = document.getElementById('follow-auto-enabled').checked;
+      let interval = parseInt(document.getElementById('follow-auto-interval').value, 10);
+      if (!interval || interval < 10) {
+        showToast('扫描周期至少 10 分钟', 'error');
+        if (st) { st.textContent = '✗ 周期 ≥ 10 分钟'; st.style.color = '#f4212e'; }
+        return;
+      }
+      if (st) { st.textContent = 'Saving...'; st.style.color = '#888'; }
+      try {
+        const res = await fetch('/api/auto-config', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            followBackAutoEnabled: enabled,
+            followBackAutoIntervalMinutes: interval,
+          }),
+        });
+        const data = await res.json();
+        if (res.ok) {
+          if (st) {
+            st.textContent = '✓ ' + (data.message || 'Saved');
+            st.style.color = '#00ba7c';
+          }
+          showToast(data.message || 'Saved', 'success');
+          addLog(data.message || '自动化配置已保存');
+          refreshStatus();
+        } else {
+          if (st) { st.textContent = '✗ ' + (data.error || 'Failed'); st.style.color = '#f4212e'; }
+          showToast(data.error || 'Failed', 'error');
+        }
+      } catch (e) {
+        if (st) { st.textContent = '✗ 网络错误'; st.style.color = '#f4212e'; }
+      }
     }
 
     async function loadAutoConfig() {
       try {
         const res = await fetch('/api/auto-config');
         const cfg = await res.json();
-        document.getElementById('auto-batch-min').value = cfg.batchSizeMin;
-        document.getElementById('auto-batch-max').value = cfg.batchSizeMax;
-        document.getElementById('auto-interval-min').value = cfg.batchIntervalMinMinutes;
-        document.getElementById('auto-interval-max').value = cfg.batchIntervalMaxMinutes;
+        const batchMax = document.getElementById('auto-batch-max');
+        if (batchMax) batchMax.value = cfg.batchSizeMax ?? 18;
         document.getElementById('auto-action-min').value = cfg.actionIntervalMinSeconds;
         document.getElementById('auto-action-max').value = cfg.actionIntervalMaxSeconds;
         // 活跃时段仅在 Post Composer 配置
         document.getElementById('post-active-start').value = cfg.activeHoursStart ?? 9;
         document.getElementById('post-active-end').value = cfg.activeHoursEnd ?? 23;
+        // 自动扫描回关
+        const en = document.getElementById('follow-auto-enabled');
+        const iv = document.getElementById('follow-auto-interval');
+        if (en) en.checked = !!cfg.followBackAutoEnabled;
+        if (iv) iv.value = cfg.followBackAutoIntervalMinutes ?? 30;
       } catch { /* server not ready */ }
     }
 
@@ -1035,12 +1190,9 @@
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
-            batchSizeMin: parseInt(document.getElementById('auto-batch-min').value),
-            batchSizeMax: parseInt(document.getElementById('auto-batch-max').value),
-            batchIntervalMinMinutes: parseInt(document.getElementById('auto-interval-min').value),
-            batchIntervalMaxMinutes: parseInt(document.getElementById('auto-interval-max').value),
-            actionIntervalMinSeconds: parseInt(document.getElementById('auto-action-min').value),
-            actionIntervalMaxSeconds: parseInt(document.getElementById('auto-action-max').value),
+            batchSizeMax: parseInt(document.getElementById('auto-batch-max').value, 10),
+            actionIntervalMinSeconds: parseInt(document.getElementById('auto-action-min').value, 10),
+            actionIntervalMaxSeconds: parseInt(document.getElementById('auto-action-max').value, 10),
           }),
         });
         const data = await res.json();
@@ -1264,6 +1416,9 @@
     loadAutoConfig();
     refreshStatus();
     setInterval(refreshStatus, 10000);
+    // 倒计时每秒刷新（数据来自 status 的 nextRunAt）
+    if (followAutoCountdownTimer) clearInterval(followAutoCountdownTimer);
+    followAutoCountdownTimer = setInterval(updateFollowAutoCountdown, 1000);
   </script>
 </body>
 </html>
