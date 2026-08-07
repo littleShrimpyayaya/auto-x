@@ -262,6 +262,19 @@
         </div>
         <div style="font-size: 11px; color: #999; margin-top: 4px;">定时发推仅在此时段内发送；时段外到点会跳过并等下一周期。手动 Post Now 不受限制。</div>
       </div>
+
+      <!-- 额外自动发推任务（不改动上方 Composer / Post Now 行为） -->
+      <div style="margin-top: 14px; padding-top: 12px; border-top: 1px solid #eee;">
+        <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-bottom:8px;">
+          <h3 style="margin:0;font-size:15px;">📋 额外发推任务</h3>
+          <span style="font-size:12px;color:#888;" id="post-tasks-count">0 / 10</span>
+          <button class="btn-primary" onclick="createPostTask()" style="margin-left:auto;font-size:12px;padding:5px 12px;">+ 添加任务</button>
+        </div>
+        <div style="font-size:12px;color:#888;margin-bottom:8px;">
+          与上方 Post Composer 独立：可另设周期与文案，最多 10 个（含 Composer 默认任务）。Composer 任务请用上方 Post Now / Auto 管理。
+        </div>
+        <div id="post-tasks-list"></div>
+      </div>
     </div>
 
     <div class="card">
@@ -270,6 +283,7 @@
         <div class="status-dot idle" id="status-dot"></div>
         <span id="status-text">Idle</span>
       </div>
+      <div id="post-tasks-status" style="margin-top:10px;font-size:12px;"></div>
     </div>
 
     <div class="card">
@@ -1705,9 +1719,341 @@
         serverAutoPostEnabled = false;
       }
       updateLocalAutoHint();
+      // 多任务列表 / Task Status（不改 Composer 控件）
+      if (Array.isArray(data.postTasks)) {
+        renderPostTasksStatus(data.postTasks, data.pageQueue);
+        // 仅当用户未在编辑展开任务时，用 status 刷新折叠摘要
+        if (!postTaskEditingId) {
+          mergePostTasksFromStatus(data.postTasks);
+        }
+      }
+    }
+
+    // ── 额外发推任务 UI（独立于 Post Composer）────────────
+    const COMPOSER_TASK_ID = 'task-migrated-default';
+    let postTasksCache = [];
+    let postTaskExpanded = new Set();
+    let postTaskEditingId = null;
+
+    function mergePostTasksFromStatus(statusTasks) {
+      // 用 status 更新摘要字段，保留展开态
+      if (!postTasksCache.length && statusTasks.length) {
+        // 首次：拉完整配置
+        loadPostTasksList();
+        return;
+      }
+      const byId = new Map(statusTasks.map(t => [t.id, t]));
+      postTasksCache = postTasksCache.map(t => {
+        const s = byId.get(t.id);
+        if (!s) return t;
+        return {
+          ...t,
+          enabled: s.enabled,
+          intervalMinutes: s.intervalMinutes,
+          lastPostAt: s.lastPostAt,
+          lastResult: s.lastResult,
+          lastError: s.lastError,
+          postCount: s.postCount,
+          _phase: s.phase,
+          _nextRunAt: s.nextRunAt,
+        };
+      });
+      // 新任务只在 status 里
+      statusTasks.forEach(s => {
+        if (!postTasksCache.some(t => t.id === s.id)) {
+          postTasksCache.push({
+            id: s.id,
+            name: s.name,
+            enabled: s.enabled,
+            intervalMinutes: s.intervalMinutes,
+            contentMode: s.contentMode || 'static',
+            content: s.contentPreview || '',
+            lastPostAt: s.lastPostAt,
+            lastResult: s.lastResult,
+            lastError: s.lastError,
+            postCount: s.postCount,
+            _phase: s.phase,
+            _nextRunAt: s.nextRunAt,
+          });
+        }
+      });
+      // 已删除
+      postTasksCache = postTasksCache.filter(t => byId.has(t.id) || t.id === COMPOSER_TASK_ID);
+      renderPostTasksList();
+    }
+
+    async function loadPostTasksList() {
+      try {
+        const res = await fetch('/api/post/tasks');
+        const data = await res.json();
+        if (data.ok && Array.isArray(data.tasks)) {
+          postTasksCache = data.tasks;
+          renderPostTasksList();
+        }
+      } catch { /* ignore */ }
+    }
+
+    function renderPostTasksStatus(tasks, pageQueue) {
+      const el = document.getElementById('post-tasks-status');
+      if (!el) return;
+      if (!tasks || !tasks.length) {
+        el.innerHTML = '<div style="color:#888;">暂无发推任务</div>';
+        return;
+      }
+      const pq = pageQueue && pageQueue.currentLabel
+        ? '<div style="color:#1d9bf0;margin-bottom:6px;">浏览器: ' + escHtml(pageQueue.currentLabel) +
+          (pageQueue.depth ? ' (队列 ' + pageQueue.depth + ')' : '') + '</div>'
+        : '';
+      el.innerHTML = pq + tasks.map(t => {
+        const phase = t.phase || 'idle';
+        const color = t.enabled
+          ? (phase === 'error' ? '#f4212e' : phase === 'posting' || phase === 'queued' ? '#1d9bf0' : '#00ba7c')
+          : '#888';
+        const next = t.nextRunAt ? formatBeijing(t.nextRunAt) : '—';
+        const tag = t.id === COMPOSER_TASK_ID ? 'Composer' : escHtml(t.name || t.id);
+        return '<div style="display:flex;flex-wrap:wrap;gap:8px;padding:6px 0;border-bottom:1px solid #f0f0f0;align-items:center;">' +
+          '<span style="font-weight:600;min-width:90px;">' + tag + '</span>' +
+          '<span style="color:' + color + ';">' + (t.enabled ? phase : 'off') + '</span>' +
+          '<span style="color:#888;">下次 ' + escHtml(next) + '</span>' +
+          (t.lastResult ? '<span style="color:#666;">· ' + escHtml(String(t.lastResult).slice(0, 40)) + '</span>' : '') +
+          (t.lastError ? '<span style="color:#f4212e;">· ' + escHtml(String(t.lastError).slice(0, 40)) + '</span>' : '') +
+          '</div>';
+      }).join('');
+    }
+
+    function renderPostTasksList() {
+      const list = document.getElementById('post-tasks-list');
+      const countEl = document.getElementById('post-tasks-count');
+      if (!list) return;
+      const n = postTasksCache.length;
+      if (countEl) countEl.textContent = n + ' / 10';
+
+      if (!n) {
+        list.innerHTML = '<div style="padding:12px;color:#888;font-size:13px;border:1px dashed #ddd;border-radius:8px;text-align:center;">暂无任务。可用上方 Composer 发推，或点「添加任务」。</div>';
+        return;
+      }
+
+      list.innerHTML = postTasksCache.map(t => {
+        const isComposer = t.id === COMPOSER_TASK_ID;
+        const expanded = postTaskExpanded.has(t.id);
+        const phase = t._phase || (t.enabled ? 'waiting' : 'idle');
+        const badge = isComposer
+          ? '<span style="font-size:11px;background:#e8f5fd;color:#1d9bf0;padding:2px 6px;border-radius:4px;">Composer</span>'
+          : '';
+        const enColor = t.enabled ? '#00ba7c' : '#888';
+        const head =
+          '<div style="display:flex;align-items:center;gap:8px;padding:10px 12px;cursor:pointer;user-select:none;" onclick="togglePostTaskExpand(\'' + escHtml(t.id) + '\')">' +
+          '<span style="color:#666;width:14px;">' + (expanded ? '▼' : '▶') + '</span>' +
+          '<span style="font-weight:600;flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">' +
+          escHtml(t.name || t.id) + '</span>' + badge +
+          '<span style="font-size:12px;color:' + enColor + ';">' + (t.enabled ? 'ON · ' + phase : 'OFF') + '</span>' +
+          '<span style="font-size:12px;color:#888;">每 ' + (t.intervalMinutes || 60) + ' 分</span>' +
+          '</div>';
+
+        if (!expanded) {
+          return '<div style="border:1px solid #eee;border-radius:8px;margin-bottom:8px;background:#fafafa;">' + head + '</div>';
+        }
+
+        const contentVal = escHtml(t.content || '');
+        const nameVal = escHtml(t.name || '');
+        const hint = isComposer
+          ? '<div style="font-size:11px;color:#ffad1f;margin-bottom:8px;">此为 Composer 绑定任务：内容/开关请优先用上方 Post Now；此处可查看状态，改内容后点保存也会 dual-write。</div>'
+          : '';
+        const delBtn = isComposer
+          ? ''
+          : '<button class="btn-outline" onclick="deletePostTask(\'' + escHtml(t.id) + '\')" style="font-size:12px;padding:5px 10px;color:#f4212e;border-color:#f8c0c0;">删除</button>';
+
+        const body =
+          '<div style="padding:0 12px 12px 12px;border-top:1px solid #eee;background:#fff;" onclick="event.stopPropagation()">' +
+          hint +
+          '<div style="display:flex;flex-wrap:wrap;gap:8px;margin:10px 0;align-items:center;">' +
+          '<label style="font-size:12px;color:#666;">名称</label>' +
+          '<input id="pt-name-' + escHtml(t.id) + '" value="' + nameVal + '" ' + (isComposer ? 'readonly' : '') +
+          ' style="width:140px;padding:5px 8px;border:1px solid #ddd;border-radius:5px;font-size:13px;">' +
+          '<label style="font-size:12px;color:#666;">周期(分)</label>' +
+          '<input type="number" id="pt-interval-' + escHtml(t.id) + '" min="5" step="5" value="' + (t.intervalMinutes || 60) +
+          '" style="width:70px;padding:5px 8px;border:1px solid #ddd;border-radius:5px;font-size:13px;">' +
+          '<label style="display:flex;align-items:center;gap:4px;font-size:12px;color:#666;cursor:pointer;">' +
+          '<input type="checkbox" id="pt-enabled-' + escHtml(t.id) + '" ' + (t.enabled ? 'checked' : '') +
+          (isComposer ? ' title="Composer 建议用上方 Auto + Post Now"' : '') + '> 启用</label>' +
+          '</div>' +
+          '<textarea id="pt-content-' + escHtml(t.id) + '" maxlength="280" rows="3" placeholder="推文内容（static）" ' +
+          'style="width:100%;padding:10px;border:1px solid #ddd;border-radius:6px;font-size:13px;box-sizing:border-box;resize:vertical;">' +
+          contentVal + '</textarea>' +
+          '<div style="font-size:11px;color:#888;margin:4px 0 8px;">上次: ' +
+          (t.lastPostAt ? escHtml(formatBeijing(t.lastPostAt)) : '—') +
+          (t.lastResult ? ' · ' + escHtml(String(t.lastResult).slice(0, 50)) : '') +
+          (t._nextRunAt ? ' · 下次 ' + escHtml(formatBeijing(t._nextRunAt)) : '') +
+          '</div>' +
+          '<div style="display:flex;flex-wrap:wrap;gap:8px;">' +
+          '<button class="btn-primary" onclick="savePostTask(\'' + escHtml(t.id) + '\')" style="font-size:12px;padding:5px 12px;">保存</button>' +
+          '<button class="btn-outline" onclick="runPostTaskOnce(\'' + escHtml(t.id) + '\')" style="font-size:12px;padding:5px 12px;">立即发送一次</button>' +
+          delBtn +
+          '<span id="pt-status-' + escHtml(t.id) + '" style="font-size:12px;color:#888;align-self:center;"></span>' +
+          '</div></div>';
+
+        return '<div style="border:1px solid #ddd;border-radius:8px;margin-bottom:8px;background:#fafafa;">' + head + body + '</div>';
+      }).join('');
+    }
+
+    function togglePostTaskExpand(id) {
+      if (postTaskExpanded.has(id)) postTaskExpanded.delete(id);
+      else postTaskExpanded.add(id);
+      postTaskEditingId = postTaskExpanded.size ? id : null;
+      renderPostTasksList();
+    }
+
+    async function createPostTask() {
+      if (postTasksCache.length >= 10) {
+        showToast('最多 10 个发帖任务', 'error');
+        return;
+      }
+      try {
+        const res = await fetch('/api/post/tasks', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            name: '任务 ' + (postTasksCache.length + 1),
+            content: '',
+            intervalMinutes: 60,
+            enabled: false,
+            contentMode: 'static',
+          }),
+        });
+        const data = await res.json();
+        if (!res.ok || !data.ok) {
+          showToast(data.error || '创建失败', 'error');
+          return;
+        }
+        addLog('已创建发推任务: ' + (data.task.name || data.task.id));
+        showToast('任务已创建', 'success');
+        await loadPostTasksList();
+        if (data.task && data.task.id) {
+          postTaskExpanded.add(data.task.id);
+          postTaskEditingId = data.task.id;
+          renderPostTasksList();
+        }
+      } catch (e) {
+        showToast('创建失败', 'error');
+      }
+    }
+
+    async function savePostTask(id) {
+      const nameEl = document.getElementById('pt-name-' + id);
+      const intervalEl = document.getElementById('pt-interval-' + id);
+      const enabledEl = document.getElementById('pt-enabled-' + id);
+      const contentEl = document.getElementById('pt-content-' + id);
+      const st = document.getElementById('pt-status-' + id);
+      if (!contentEl) return;
+      const content = contentEl.value;
+      const intervalMinutes = parseInt(intervalEl && intervalEl.value, 10) || 60;
+      const enabled = !!(enabledEl && enabledEl.checked);
+      if (enabled && !content.trim()) {
+        showToast('启用时内容不能为空', 'error');
+        return;
+      }
+      if (content.length > 280) {
+        showToast('超过 280 字符', 'error');
+        return;
+      }
+      if (st) { st.textContent = 'Saving...'; st.style.color = '#888'; }
+      postTaskEditingId = id;
+      try {
+        const res = await fetch('/api/post/tasks/' + encodeURIComponent(id), {
+          method: 'PATCH',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            name: nameEl ? nameEl.value : undefined,
+            content,
+            intervalMinutes,
+            enabled,
+            contentMode: 'static',
+          }),
+        });
+        const data = await res.json();
+        if (!res.ok || !data.ok) {
+          if (st) { st.textContent = '✗ ' + (data.error || '失败'); st.style.color = '#f4212e'; }
+          showToast(data.error || '保存失败', 'error');
+          return;
+        }
+        if (st) { st.textContent = '✓ 已保存'; st.style.color = '#00ba7c'; }
+        showToast('任务已保存', 'success');
+        addLog('发推任务已保存: ' + (data.task.name || id));
+        // 若改的是 composer，同步上方 Composer 控件（不打断用户编辑中的意图）
+        if (id === COMPOSER_TASK_ID) {
+          serverAutoPostEnabled = !!data.task.enabled;
+          serverAutoPostIntervalMin = data.task.intervalMinutes || 60;
+          const ta = document.getElementById('post-textarea');
+          if (ta && data.task.content != null) {
+            ta.value = data.task.content;
+            updateCharCount();
+          }
+          const cb = document.getElementById('auto-post-checkbox');
+          const iv = document.getElementById('post-interval-input');
+          if (cb) cb.checked = !!data.task.enabled;
+          if (iv) iv.value = data.task.intervalMinutes || 60;
+          updateLocalAutoHint();
+        }
+        await loadPostTasksList();
+        postTaskExpanded.add(id);
+        renderPostTasksList();
+        refreshStatus();
+      } catch (e) {
+        if (st) { st.textContent = '✗ 网络错误'; st.style.color = '#f4212e'; }
+      }
+    }
+
+    async function deletePostTask(id) {
+      if (id === COMPOSER_TASK_ID) {
+        showToast('不能删除 Composer 任务', 'error');
+        return;
+      }
+      if (!confirm('确定删除此发推任务？')) return;
+      try {
+        const res = await fetch('/api/post/tasks/' + encodeURIComponent(id), { method: 'DELETE' });
+        const data = await res.json();
+        if (!res.ok || !data.ok) {
+          showToast(data.error || '删除失败', 'error');
+          return;
+        }
+        postTaskExpanded.delete(id);
+        showToast('已删除', 'success');
+        addLog('已删除发推任务: ' + id);
+        await loadPostTasksList();
+        refreshStatus();
+      } catch {
+        showToast('删除失败', 'error');
+      }
+    }
+
+    async function runPostTaskOnce(id) {
+      const st = document.getElementById('pt-status-' + id);
+      if (st) { st.textContent = 'Sending...'; st.style.color = '#1d9bf0'; }
+      try {
+        const res = await fetch('/api/post/tasks/' + encodeURIComponent(id) + '/run', { method: 'POST' });
+        const data = await res.json();
+        if (!res.ok || !data.ok) {
+          if (st) { st.textContent = '✗ ' + (data.error || '失败'); st.style.color = '#f4212e'; }
+          showToast(data.error || '发送失败', 'error');
+          return;
+        }
+        if (st) {
+          st.textContent = data.posted ? '✓ 已发送' : '✗ 未发出';
+          st.style.color = data.posted ? '#00ba7c' : '#f4212e';
+        }
+        showToast(data.message || (data.posted ? '已发送' : '失败'), data.posted ? 'success' : 'error');
+        addLog('任务立即发送: ' + id + ' → ' + (data.message || ''));
+        await loadPostTasksList();
+        postTaskExpanded.add(id);
+        renderPostTasksList();
+        refreshStatus();
+      } catch {
+        if (st) { st.textContent = '✗ 网络错误'; st.style.color = '#f4212e'; }
+      }
     }
 
     loadPostConfig();
+    loadPostTasksList();
     loadAutoConfig();
     refreshStatus();
     setInterval(refreshStatus, 10000);

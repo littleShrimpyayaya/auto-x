@@ -635,5 +635,105 @@ export function createServer(taskManager: TaskManager): express.Express {
     }
   });
 
+  // ── 多任务 CRUD（额外任务；composer 仍走 /api/post）────
+
+  app.get('/api/post/tasks', (_req, res) => {
+    try {
+      res.json({ ok: true, tasks: taskManager.listPostTasks() });
+    } catch (err: any) {
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  app.post('/api/post/tasks', async (req, res) => {
+    try {
+      const body = req.body || {};
+      const task = await taskManager.createPostTask({
+        name: body.name,
+        content: body.content,
+        intervalMinutes: body.intervalMinutes,
+        enabled: body.enabled,
+        contentMode: body.contentMode === 'ai' ? 'ai' : 'static',
+      });
+      res.json({ ok: true, task });
+    } catch (err: any) {
+      const msg = err.message || String(err);
+      const code = msg.includes('最多') ? 400 : 400;
+      res.status(code).json({ error: msg });
+    }
+  });
+
+  app.get('/api/post/tasks/:id', (req, res) => {
+    try {
+      const task = taskManager.getPostTask(req.params.id);
+      if (!task) {
+        res.status(404).json({ error: '任务不存在' });
+        return;
+      }
+      res.json({ ok: true, task });
+    } catch (err: any) {
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  app.patch('/api/post/tasks/:id', async (req, res) => {
+    try {
+      const body = req.body || {};
+      const task = await taskManager.updatePostTask(req.params.id, {
+        name: body.name,
+        content: body.content,
+        intervalMinutes: body.intervalMinutes,
+        enabled: body.enabled,
+        contentMode: body.contentMode,
+      });
+      res.json({ ok: true, task });
+    } catch (err: any) {
+      const msg = err.message || String(err);
+      const status = msg.includes('不存在') ? 404 : 400;
+      res.status(status).json({ error: msg });
+    }
+  });
+
+  app.delete('/api/post/tasks/:id', async (req, res) => {
+    try {
+      await taskManager.deletePostTask(req.params.id);
+      res.json({ ok: true, message: '已删除' });
+    } catch (err: any) {
+      const msg = err.message || String(err);
+      const status = msg.includes('composer') || msg.includes('Cannot delete')
+        ? 400
+        : msg.includes('不存在')
+          ? 404
+          : 400;
+      res.status(status).json({ error: msg });
+    }
+  });
+
+  app.post('/api/post/tasks/:id/enable', async (req, res) => {
+    try {
+      const enabled = !!(req.body && req.body.enabled);
+      const task = await taskManager.setPostTaskEnabled(req.params.id, enabled);
+      res.json({ ok: true, task });
+    } catch (err: any) {
+      const msg = err.message || String(err);
+      res.status(msg.includes('不存在') ? 404 : 400).json({ error: msg });
+    }
+  });
+
+  app.post('/api/post/tasks/:id/run', async (req, res) => {
+    try {
+      const result = await taskManager.runPostTaskOnce(req.params.id);
+      res.json({
+        ok: true,
+        posted: result.ok,
+        skipped: result.skipped,
+        message: result.ok ? '已发送' : result.skipped ? '已跳过' : '发送失败',
+      });
+    } catch (err: any) {
+      const msg = err.message || String(err);
+      res.status(msg.includes('不存在') ? 404 : 400).json({ error: msg });
+    }
+  });
+
   return app;
 }

@@ -17,8 +17,11 @@ import {
   MIN_FOLLOW_BACK_AUTO_INTERVAL,
   COMPOSER_TASK_ID,
   MIN_POST_INTERVAL_MINUTES,
+  MAX_POST_TASKS,
+  type PostTaskConfig,
   type PostTaskPhase,
 } from './auto-config.js';
+import { randomUUID } from 'crypto';
 
 export type TaskType = 'sync-followers' | 'sync-following' | 'auto-follow' | 'process-follow' | 'process-unfollow';
 export type TaskStatusType = 'idle' | 'running' | 'completed' | 'error' | 'cancelled';
@@ -655,6 +658,147 @@ export class TaskManager {
       this.armPostTask(t.id);
     }
     console.log(`[Post] 已从配置恢复 ${enabled.length} 个自动发推任务`);
+  }
+
+  // ── 多任务 CRUD（不影响 composer Post Now 路径）────────
+
+  listPostTasks(): PostTaskConfig[] {
+    return loadPostConfig().tasks || [];
+  }
+
+  getPostTask(taskId: string): PostTaskConfig | null {
+    return loadPostConfig().tasks.find((t) => t.id === taskId) || null;
+  }
+
+  async createPostTask(input: {
+    name?: string;
+    content?: string;
+    intervalMinutes?: number;
+    enabled?: boolean;
+    contentMode?: 'static' | 'ai';
+  }): Promise<PostTaskConfig> {
+    const now = new Date().toISOString();
+    const content = String(input.content || '').trim();
+    const interval = Math.max(
+      MIN_POST_INTERVAL_MINUTES,
+      Math.floor(Number(input.intervalMinutes) || 60),
+    );
+    const contentMode = input.contentMode === 'ai' ? 'ai' : 'static';
+    const wantEnabled = !!input.enabled;
+    if (wantEnabled && !content) {
+      throw new Error('启用任务时内容不能为空');
+    }
+    if (contentMode === 'ai') {
+      // PR3 前允许创建但启用时提示；创建时允许保存草稿
+    }
+    let created!: PostTaskConfig;
+    await updatePostConfig((cfg) => {
+      if ((cfg.tasks || []).length >= MAX_POST_TASKS) {
+        throw new Error(`最多 ${MAX_POST_TASKS} 个发帖任务`);
+      }
+      created = {
+        id: `task-${randomUUID()}`,
+        name: String(input.name || '任务').slice(0, 64) || '任务',
+        enabled: wantEnabled && !!content,
+        intervalMinutes: interval,
+        contentMode,
+        content,
+        model: null,
+        lastPostAt: null,
+        postAutoIndex: 0,
+        postCount: 0,
+        lastResult: null,
+        lastError: null,
+        createdAt: now,
+        updatedAt: now,
+      };
+      cfg.tasks = [...(cfg.tasks || []), created];
+    });
+    if (created.enabled) this.armPostTask(created.id);
+    return created;
+  }
+
+  async updatePostTask(
+    taskId: string,
+    patch: {
+      name?: string;
+      content?: string;
+      intervalMinutes?: number;
+      enabled?: boolean;
+      contentMode?: 'static' | 'ai';
+    },
+  ): Promise<PostTaskConfig> {
+    const cfgAfter = await updatePostConfig((cfg) => {
+      const t = cfg.tasks.find((x) => x.id === taskId);
+      if (!t) throw new Error('任务不存在');
+      if (patch.name !== undefined) t.name = String(patch.name).slice(0, 64) || t.name;
+      if (patch.content !== undefined) t.content = String(patch.content);
+      if (patch.intervalMinutes !== undefined) {
+        t.intervalMinutes = Math.max(
+          MIN_POST_INTERVAL_MINUTES,
+          Math.floor(Number(patch.intervalMinutes) || t.intervalMinutes),
+        );
+      }
+      if (patch.contentMode !== undefined) {
+        t.contentMode = patch.contentMode === 'ai' ? 'ai' : 'static';
+      }
+      if (patch.enabled !== undefined) {
+        if (patch.enabled && !String(t.content || '').trim()) {
+          throw new Error('启用任务时内容不能为空');
+        }
+        t.enabled = !!patch.enabled;
+      }
+      t.updatedAt = new Date().toISOString();
+    });
+    const updated = cfgAfter.tasks.find((x) => x.id === taskId);
+    if (!updated) throw new Error('任务不存在');
+    if (updated.enabled) this.armPostTask(taskId);
+    else this.stopPostTaskSchedule(taskId);
+    return { ...updated };
+  }
+
+  async deletePostTask(taskId: string): Promise<void> {
+    if (taskId === COMPOSER_TASK_ID) {
+      throw new Error('Cannot delete composer-linked task; disable Auto instead');
+    }
+    this.stopPostTaskSchedule(taskId);
+    await updatePostConfig((cfg) => {
+      const before = cfg.tasks.length;
+      cfg.tasks = cfg.tasks.filter((t) => t.id !== taskId);
+      if (cfg.tasks.length === before) throw new Error('任务不存在');
+    });
+    this.postTaskRuntime.delete(taskId);
+  }
+
+  async setPostTaskEnabled(taskId: string, enabled: boolean): Promise<PostTaskConfig> {
+    return this.updatePostTask(taskId, { enabled });
+  }
+
+  /** 立即执行一次（force，无 anti-dupe 后缀）；不改 lastPostAt 周期对齐逻辑以外的 enabled */
+  async runPostTaskOnce(taskId: string): Promise<{ ok: boolean; skipped?: boolean; text?: string }> {
+    const task = this.getPostTask(taskId);
+    if (!task) throw new Error('任务不存在');
+    const content = String(task.content || '').trim();
+    if (!content) throw new Error('内容为空');
+    if (task.contentMode === 'ai') {
+      throw new Error('AI 模式尚未启用，请使用 static 文案或等待 AI 功能');
+    }
+    if (content.length > 280) throw new Error('超过 280 字符限制');
+    const result = await this.postNow(content);
+    if (result.ok) {
+      const now = new Date().toISOString();
+      await updatePostConfig((cfg) => {
+        const t = cfg.tasks.find((x) => x.id === taskId);
+        if (t) {
+          t.lastPostAt = now;
+          t.postCount = (t.postCount || 0) + 1;
+          t.lastResult = 'ok (run-once)';
+          t.lastError = null;
+          t.updatedAt = now;
+        }
+      });
+    }
+    return { ...result, text: content };
   }
 
   /** 启动后台扫描待回关（不阻塞请求；结果仅内存，经 /api/status 给前端，不持久化） */
