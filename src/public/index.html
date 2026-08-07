@@ -73,12 +73,52 @@
     .badge.pending { background: #fff3cd; color: #856404; }
     .badge.running { background: #e8f5fd; color: #1d9bf0; }
     .badge.done { background: #e6f7ef; color: #00ba7c; }
+    /* 访问密钥全屏锁 */
+    #access-gate {
+      display: none; position: fixed; inset: 0; z-index: 2000;
+      background: #0f1419; align-items: center; justify-content: center;
+      padding: 24px;
+    }
+    #access-gate.show { display: flex; }
+    #access-gate .gate-card {
+      width: 100%; max-width: 380px; background: #fff; border-radius: 12px;
+      padding: 28px 24px; box-shadow: 0 8px 32px rgba(0,0,0,0.35);
+    }
+    #access-gate h1 { font-size: 20px; margin-bottom: 8px; }
+    #access-gate .gate-desc { font-size: 13px; color: #666; margin-bottom: 18px; line-height: 1.5; }
+    #access-gate input {
+      width: 100%; padding: 12px; border: 1px solid #ddd; border-radius: 8px;
+      font-size: 15px; font-family: monospace; margin-bottom: 12px;
+    }
+    #access-gate input:focus { outline: none; border-color: #1d9bf0; }
+    #access-gate .gate-error { font-size: 13px; color: #f4212e; min-height: 18px; margin-bottom: 8px; }
+    #access-gate button { width: 100%; padding: 12px; font-size: 15px; }
+    body.locked .container { visibility: hidden; }
+    .lock-btn {
+      font-size: 12px; padding: 4px 10px; background: transparent;
+      color: #888; border: 1px solid #ddd; border-radius: 6px; cursor: pointer;
+    }
+    .lock-btn:hover { color: #333; border-color: #999; }
   </style>
 </head>
 <body>
+  <div id="access-gate" aria-hidden="true">
+    <div class="gate-card">
+      <h1>访问验证</h1>
+      <p class="gate-desc">此控制台已启用访问密钥。请输入密钥后继续。</p>
+      <form id="access-form" autocomplete="off">
+        <input type="password" id="access-key-input" placeholder="访问密钥" autocomplete="current-password" autofocus />
+        <div class="gate-error" id="access-error"></div>
+        <button type="submit" class="btn-primary" id="access-submit">解锁</button>
+      </form>
+    </div>
+  </div>
   <div class="toast" id="toast"></div>
   <div class="container">
-    <h1>Auto-X Control Panel</h1>
+    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:20px;gap:12px;flex-wrap:wrap;">
+      <h1 style="margin:0;">Auto-X Control Panel</h1>
+      <button type="button" class="lock-btn" id="lock-btn" style="display:none;" title="清除本机访问凭证">锁定</button>
+    </div>
 
     <div class="card" id="account-card">
       <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 14px;">
@@ -287,22 +327,169 @@
       toast._timer = setTimeout(() => { toast.className = 'toast'; }, 4000);
     }
 
+    // ── 访问密钥门禁 ───────────────────────────────────
+    let accessUnlocked = false;
+    let accessRequired = false;
+    let statusPollTimer = null;
+    let appBooted = false;
+    let followAutoCountdownTimer = null;
+
+    function showAccessGate(msg) {
+      accessUnlocked = false;
+      document.body.classList.add('locked');
+      const gate = document.getElementById('access-gate');
+      gate.classList.add('show');
+      gate.setAttribute('aria-hidden', 'false');
+      const lockBtn = document.getElementById('lock-btn');
+      if (lockBtn) lockBtn.style.display = 'none';
+      const err = document.getElementById('access-error');
+      if (err) err.textContent = msg || '';
+      const input = document.getElementById('access-key-input');
+      if (input) { input.value = ''; setTimeout(() => input.focus(), 50); }
+    }
+
+    function hideAccessGate() {
+      accessUnlocked = true;
+      document.body.classList.remove('locked');
+      const gate = document.getElementById('access-gate');
+      gate.classList.remove('show');
+      gate.setAttribute('aria-hidden', 'true');
+      const lockBtn = document.getElementById('lock-btn');
+      // 仅在服务端启用了访问密钥时显示「锁定」
+      if (lockBtn) lockBtn.style.display = accessRequired ? '' : 'none';
+      const err = document.getElementById('access-error');
+      if (err) err.textContent = '';
+    }
+
+    /** 拦截 401 needAuth，所有页面 fetch 共用 */
+    const _origFetch = window.fetch.bind(window);
+    window.fetch = async function (input, init) {
+      const res = await _origFetch(input, init);
+      if (res.status === 401) {
+        try {
+          const data = await res.clone().json();
+          if (data && data.needAuth) {
+            showAccessGate(data.error || '需要访问密钥');
+            if (statusPollTimer) { clearInterval(statusPollTimer); statusPollTimer = null; }
+          }
+        } catch { /* ignore */ }
+      }
+      return res;
+    };
+
+    /** 统一 JSON 请求 */
+    async function fetchJson(url, options) {
+      const opts = Object.assign({ credentials: 'same-origin' }, options || {});
+      const res = await fetch(url, opts);
+      let data = null;
+      try { data = await res.json(); } catch { data = null; }
+      return { res, data };
+    }
+
+    async function checkAccessAuth() {
+      try {
+        const { res, data } = await fetchJson('/api/auth/status');
+        if (!res.ok || !data) {
+          // 鉴权接口异常时不挡页面（避免配置错误整站打不开）
+          accessRequired = false;
+          hideAccessGate();
+          return true;
+        }
+        accessRequired = !!data.required;
+        if (!data.required || data.authenticated) {
+          hideAccessGate();
+          return true;
+        }
+        showAccessGate();
+        return false;
+      } catch {
+        accessRequired = false;
+        hideAccessGate();
+        return true;
+      }
+    }
+
+    async function submitAccessKey(key) {
+      const { res, data } = await fetchJson('/api/auth/login', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ key }),
+      });
+      if (res.ok && data && data.ok) {
+        hideAccessGate();
+        showToast(data.message || '已解锁', 'success');
+        bootApp();
+        return true;
+      }
+      const err = document.getElementById('access-error');
+      if (err) err.textContent = (data && data.error) || '密钥错误';
+      return false;
+    }
+
+    document.getElementById('access-form').addEventListener('submit', async (e) => {
+      e.preventDefault();
+      const input = document.getElementById('access-key-input');
+      const btn = document.getElementById('access-submit');
+      const key = (input && input.value) || '';
+      if (!key.trim()) {
+        document.getElementById('access-error').textContent = '请输入访问密钥';
+        return;
+      }
+      btn.disabled = true;
+      try {
+        await submitAccessKey(key);
+      } finally {
+        btn.disabled = false;
+      }
+    });
+
+    document.getElementById('lock-btn').addEventListener('click', async () => {
+      try {
+        await fetchJson('/api/auth/logout', { method: 'POST' });
+      } catch { /* ignore */ }
+      showAccessGate('已锁定，请重新输入密钥');
+      if (statusPollTimer) { clearInterval(statusPollTimer); statusPollTimer = null; }
+    });
+
+    function bootApp() {
+      if (appBooted) {
+        // 已启动过：仅恢复轮询
+        if (!statusPollTimer) statusPollTimer = setInterval(refreshStatus, 10000);
+        refreshStatus();
+        loadPostTasksList();
+        loadAutoConfig();
+        return;
+      }
+      appBooted = true;
+      loadPostTasksList();
+      loadAutoConfig();
+      refreshStatus();
+      statusPollTimer = setInterval(refreshStatus, 10000);
+      if (followAutoCountdownTimer) clearInterval(followAutoCountdownTimer);
+      followAutoCountdownTimer = setInterval(updateFollowAutoCountdown, 1000);
+    }
+
     async function api(url, method, body) {
       try {
-        const res = await fetch(url, {
+        const { res, data } = await fetchJson(url, {
           method,
           headers: { 'Content-Type': 'application/json' },
           body: body ? JSON.stringify(body) : undefined,
         });
-        const data = await res.json();
+        if (!data) {
+          showToast('Request failed', 'error');
+          return { ok: false, data: null };
+        }
         if (!res.ok) {
-          addLog('Error: ' + (data.error || 'Unknown'));
-          showToast(data.error || 'Request failed', 'error');
+          if (!(data && data.needAuth)) {
+            addLog('Error: ' + (data.error || 'Unknown'));
+            showToast(data.error || 'Request failed', 'error');
+          }
         } else {
           addLog(data.message || 'OK');
           showToast(data.message || 'Done', 'success');
         }
-        refreshStatus();
+        if (accessUnlocked) refreshStatus();
         return { ok: res.ok, data };
       } catch (err) {
         addLog('Request failed: ' + err.message);
@@ -1259,7 +1446,6 @@
       progress: null,
       sessionSucceeded: [],
     };
-    let followAutoCountdownTimer = null;
     /** 自动化运行时 2s 快轮询；空闲时交给 10s refreshStatus */
     let followBackFastPollActive = false;
 
@@ -1796,13 +1982,11 @@
       }
     }
 
-    loadPostTasksList();
-    loadAutoConfig();
-    refreshStatus();
-    setInterval(refreshStatus, 10000);
-    // 倒计时每秒刷新（数据来自 status 的 nextRunAt）
-    if (followAutoCountdownTimer) clearInterval(followAutoCountdownTimer);
-    followAutoCountdownTimer = setInterval(updateFollowAutoCountdown, 1000);
+    // 先过访问密钥门禁，通过后再启动轮询与数据加载
+    (async function initAccessGate() {
+      const ok = await checkAccessAuth();
+      if (ok) bootApp();
+    })();
   </script>
 </body>
 </html>

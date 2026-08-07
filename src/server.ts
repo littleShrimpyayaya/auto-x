@@ -1,4 +1,5 @@
-import express from 'express';
+import crypto from 'crypto';
+import express, { type Request, type Response, type NextFunction } from 'express';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import { TaskManager } from './task-manager.js';
@@ -20,9 +21,143 @@ import {
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
+/** Cookie 名：通过后写入，用于后续请求鉴权 */
+const ACCESS_COOKIE = 'auto_x_access';
+const ACCESS_COOKIE_MAX_AGE_MS = 30 * 24 * 60 * 60 * 1000; // 30 天
+
+function getWebAccessKey(): string {
+  return (process.env.WEB_ACCESS_KEY || '').trim();
+}
+
+function isAccessKeyEnabled(): boolean {
+  return getWebAccessKey().length > 0;
+}
+
+/** 用访问密钥派生无状态 session token（改密钥后旧 cookie 全部失效） */
+function deriveSessionToken(key: string): string {
+  return crypto.createHmac('sha256', key).update('auto-x-web-access-v1').digest('hex');
+}
+
+function parseCookies(header: string | undefined): Record<string, string> {
+  const out: Record<string, string> = {};
+  if (!header) return out;
+  for (const part of header.split(';')) {
+    const idx = part.indexOf('=');
+    if (idx < 0) continue;
+    const k = part.slice(0, idx).trim();
+    const v = part.slice(idx + 1).trim();
+    if (k) out[k] = decodeURIComponent(v);
+  }
+  return out;
+}
+
+function safeEqualHex(a: string, b: string): boolean {
+  try {
+    const ba = Buffer.from(a, 'utf8');
+    const bb = Buffer.from(b, 'utf8');
+    if (ba.length !== bb.length) return false;
+    return crypto.timingSafeEqual(ba, bb);
+  } catch {
+    return false;
+  }
+}
+
+function isAuthenticated(req: Request): boolean {
+  if (!isAccessKeyEnabled()) return true;
+  const key = getWebAccessKey();
+  const expected = deriveSessionToken(key);
+  const cookies = parseCookies(req.headers.cookie);
+  const token = cookies[ACCESS_COOKIE] || '';
+  return token.length > 0 && safeEqualHex(token, expected);
+}
+
+function setAccessCookie(res: Response, token: string): void {
+  const secure = process.env.COOKIE_SECURE === '1' || process.env.COOKIE_SECURE === 'true';
+  const parts = [
+    `${ACCESS_COOKIE}=${encodeURIComponent(token)}`,
+    'Path=/',
+    'HttpOnly',
+    'SameSite=Lax',
+    `Max-Age=${Math.floor(ACCESS_COOKIE_MAX_AGE_MS / 1000)}`,
+  ];
+  if (secure) parts.push('Secure');
+  res.setHeader('Set-Cookie', parts.join('; '));
+}
+
+function clearAccessCookie(res: Response): void {
+  const secure = process.env.COOKIE_SECURE === '1' || process.env.COOKIE_SECURE === 'true';
+  const parts = [
+    `${ACCESS_COOKIE}=`,
+    'Path=/',
+    'HttpOnly',
+    'SameSite=Lax',
+    'Max-Age=0',
+  ];
+  if (secure) parts.push('Secure');
+  res.setHeader('Set-Cookie', parts.join('; '));
+}
+
+function accessAuthMiddleware(req: Request, res: Response, next: NextFunction): void {
+  if (!isAccessKeyEnabled()) {
+    next();
+    return;
+  }
+  // 鉴权接口本身放行
+  if (req.path === '/api/auth/status' || req.path === '/api/auth/login' || req.path === '/api/auth/logout') {
+    next();
+    return;
+  }
+  // 页面本身可访问（前端用遮罩锁），静态资源同理；API 必须登录
+  if (!req.path.startsWith('/api/')) {
+    next();
+    return;
+  }
+  if (isAuthenticated(req)) {
+    next();
+    return;
+  }
+  res.status(401).json({ error: '需要访问密钥', needAuth: true });
+}
+
 export function createServer(taskManager: TaskManager): express.Express {
   const app = express();
   app.use(express.json());
+
+  // 访问密钥中间件（WEB_ACCESS_KEY 未配置时不生效）
+  app.use(accessAuthMiddleware);
+
+  // ── 访问密钥鉴权 ────────────────────────────────────
+  app.get('/api/auth/status', (req, res) => {
+    const required = isAccessKeyEnabled();
+    res.json({
+      required,
+      authenticated: !required || isAuthenticated(req),
+    });
+  });
+
+  app.post('/api/auth/login', (req, res) => {
+    if (!isAccessKeyEnabled()) {
+      res.json({ ok: true, message: '未启用访问密钥' });
+      return;
+    }
+    const key = String((req.body && req.body.key) || '');
+    const expected = getWebAccessKey();
+    // 哈希后再比，避免密钥长度不同时直接暴露长度信息
+    const a = crypto.createHash('sha256').update(key, 'utf8').digest();
+    const b = crypto.createHash('sha256').update(expected, 'utf8').digest();
+    if (!key || !crypto.timingSafeEqual(a, b)) {
+      res.status(401).json({ ok: false, error: '访问密钥错误' });
+      return;
+    }
+    setAccessCookie(res, deriveSessionToken(expected));
+    res.json({ ok: true, message: '已解锁' });
+  });
+
+  app.post('/api/auth/logout', (_req, res) => {
+    clearAccessCookie(res);
+    res.json({ ok: true, message: '已锁定' });
+  });
+
   // index.html 禁止缓存，避免部署后浏览器仍用旧 UI
   app.get(['/', '/index.html'], (_req, res, next) => {
     res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate');

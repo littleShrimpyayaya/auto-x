@@ -5,7 +5,7 @@
   "type": "module",
   "main": "dist/index.js",
   "scripts": {
-    "build": "tsc && cp -r src/public dist/public",
+    "build": "tsc && rm -rf dist/public && cp -r src/public dist/public",
     "start": "tsx src/index.ts",
     "dev": "tsx watch src/index.ts",
     "typecheck": "tsc --noEmit",
