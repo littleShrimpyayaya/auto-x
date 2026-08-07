@@ -138,6 +138,21 @@ export class BrowserClient {
     this.config = config ?? loadAutomationConfig();
   }
 
+  /** 从磁盘重新加载自动化配置（活跃时段等），前端保存后立即生效 */
+  reloadConfig(): void {
+    const fresh = loadAutomationConfig();
+    this.config = {
+      ...this.config,
+      ...fresh,
+      // 保留当前会话 cookie（可能刚 reconnect 写入内存，尚未落盘时仍以内存为准）
+      authToken: this.config.authToken || fresh.authToken,
+      ct0: this.config.ct0 || fresh.ct0,
+    };
+    console.log(
+      `[BrowserClient] 配置已刷新: 活跃时段 ${this.config.activeHoursStart}:00-${this.config.activeHoursEnd}:00 (${this.config.timezone || 'Asia/Shanghai'})`,
+    );
+  }
+
   // ── 生命周期 ──────────────────────────────────────────
 
   async init(): Promise<void> {
@@ -1192,15 +1207,26 @@ export class BrowserClient {
 
   // ── 发帖 ─────────────────────────────────────────────
 
-  async postTweet(text: string): Promise<{ ok: boolean; skipped?: boolean }> {
+  /**
+   * 发帖。
+   * @param options.force  true = 手动发帖，忽略活跃时段；定时发帖不传 force
+   */
+  async postTweet(text: string, options?: { force?: boolean }): Promise<{ ok: boolean; skipped?: boolean }> {
     this.ensureReady();
 
-    if (!isActiveHours(this.config)) {
-      const now = new Date();
-      const nextStart = new Date(now);
-      nextStart.setHours(this.config.activeHoursStart, 0, 0, 0);
-      if (nextStart <= now) nextStart.setDate(nextStart.getDate() + 1);
-      console.log(`[BrowserClient] 当前不在活跃时段（${this.config.activeHoursStart}:00-${this.config.activeHoursEnd}:00），跳过发帖，下次活跃时段 ${nextStart.toLocaleString()}`);
+    // 每次发帖前刷新活跃时段，确保前端刚保存的配置立即生效
+    try {
+      const fresh = loadAutomationConfig();
+      this.config.activeHoursStart = fresh.activeHoursStart;
+      this.config.activeHoursEnd = fresh.activeHoursEnd;
+      this.config.timezone = fresh.timezone || this.config.timezone || 'Asia/Shanghai';
+    } catch { /* keep existing */ }
+
+    if (!options?.force && !isActiveHours(this.config)) {
+      const tz = this.config.timezone || 'Asia/Shanghai';
+      console.log(
+        `[BrowserClient] 当前不在活跃时段（${this.config.activeHoursStart}:00-${this.config.activeHoursEnd}:00 ${tz}），跳过发帖`,
+      );
       return { ok: false, skipped: true };
     }
 
@@ -1411,15 +1437,21 @@ export class BrowserClient {
   }
 
   private async waitUntilActive(): Promise<void> {
-    while (!isActiveHours(this.config)) {
-      const now = new Date();
-      const nextStart = new Date(now);
-      nextStart.setHours(this.config.activeHoursStart, 0, 0, 0);
-      if (nextStart <= now) nextStart.setDate(nextStart.getDate() + 1);
+    while (true) {
+      try {
+        const fresh = loadAutomationConfig();
+        this.config.activeHoursStart = fresh.activeHoursStart;
+        this.config.activeHoursEnd = fresh.activeHoursEnd;
+        this.config.timezone = fresh.timezone || this.config.timezone || 'Asia/Shanghai';
+      } catch { /* keep */ }
 
-      const waitMs = nextStart.getTime() - now.getTime();
-      console.log(`[BrowserClient] 等待至 ${nextStart.toLocaleString()}（${Math.round(waitMs / 60000)} 分钟）`);
-      await new Promise((r) => setTimeout(r, Math.min(waitMs, 600_000))); // 最多等 10 分钟检查一次
+      if (isActiveHours(this.config)) break;
+
+      const tz = this.config.timezone || 'Asia/Shanghai';
+      console.log(
+        `[BrowserClient] 等待活跃时段 ${this.config.activeHoursStart}:00-${this.config.activeHoursEnd}:00 (${tz})…`,
+      );
+      await new Promise((r) => setTimeout(r, 60_000)); // 每分钟检查一次
     }
   }
 

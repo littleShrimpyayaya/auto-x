@@ -33,8 +33,12 @@ export interface AutomationConfig {
   actionIntervalMinSeconds: number;
   actionIntervalMaxSeconds: number;
   dailyLimit: number;
+  /** 活跃时段开始小时（0-23），按时区 timezone 计算 */
   activeHoursStart: number;
+  /** 活跃时段结束小时（1-24，不含），按时区 timezone 计算 */
   activeHoursEnd: number;
+  /** 活跃时段使用的时区，默认 Asia/Shanghai（容器多为 UTC） */
+  timezone: string;
   authToken: string;
   ct0: string;
 }
@@ -49,6 +53,7 @@ export const DEFAULT_AUTOMATION: AutomationConfig = {
   dailyLimit: 400,
   activeHoursStart: 9,
   activeHoursEnd: 23,
+  timezone: 'Asia/Shanghai',
   authToken: '',
   ct0: '',
 };
@@ -81,9 +86,71 @@ export function saveAutomationConfig(config: AutomationConfig): void {
   fs.writeFileSync(CONFIG_FILE, JSON.stringify(existing, null, 2));
 }
 
-/** 检查当前时间是否在活跃时段内 */
+/** 应用默认时区：活跃时段、日志、UI 展示统一用北京时间 */
+export const DEFAULT_TIMEZONE = 'Asia/Shanghai';
+
+/** 将时间格式化为指定时区的本地字符串（默认北京时间） */
+export function formatInTimezone(
+  date: Date | string | number = new Date(),
+  timezone: string = DEFAULT_TIMEZONE,
+  opts?: { withSeconds?: boolean; compact?: boolean },
+): string {
+  const d = date instanceof Date ? date : new Date(date);
+  if (Number.isNaN(d.getTime())) return String(date);
+  const withSeconds = opts?.withSeconds !== false;
+  if (opts?.compact) {
+    return d.toLocaleString('zh-CN', {
+      timeZone: timezone,
+      month: 'numeric',
+      day: 'numeric',
+      hour: '2-digit',
+      minute: '2-digit',
+      hour12: false,
+    });
+  }
+  return d.toLocaleString('zh-CN', {
+    timeZone: timezone,
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+    second: withSeconds ? '2-digit' : undefined,
+    hour12: false,
+  });
+}
+
+/** 按配置时区获取当前小时（0-23） */
+export function getLocalHour(config: AutomationConfig): number {
+  const tz = config.timezone || DEFAULT_TIMEZONE;
+  try {
+    const hourStr = new Intl.DateTimeFormat('en-US', {
+      timeZone: tz,
+      hour: 'numeric',
+      hour12: false,
+    }).format(new Date());
+    let hour = parseInt(hourStr, 10);
+    // 部分环境午夜会返回 24
+    if (hour === 24) hour = 0;
+    if (Number.isFinite(hour) && hour >= 0 && hour <= 23) return hour;
+  } catch { /* fall through */ }
+  // 回退也尽量用北京时间，避免容器 UTC 把活跃时段判错
+  try {
+    const hourStr = new Intl.DateTimeFormat('en-US', {
+      timeZone: DEFAULT_TIMEZONE,
+      hour: 'numeric',
+      hour12: false,
+    }).format(new Date());
+    let hour = parseInt(hourStr, 10);
+    if (hour === 24) hour = 0;
+    if (Number.isFinite(hour) && hour >= 0 && hour <= 23) return hour;
+  } catch { /* ignore */ }
+  return new Date().getHours();
+}
+
+/** 检查当前时间是否在活跃时段内（使用 config.timezone，默认 Asia/Shanghai） */
 export function isActiveHours(config: AutomationConfig): boolean {
-  const hour = new Date().getHours();
+  const hour = getLocalHour(config);
   if (config.activeHoursStart <= config.activeHoursEnd) {
     return hour >= config.activeHoursStart && hour < config.activeHoursEnd;
   }

@@ -92,7 +92,9 @@
       <!-- 已连接：用户信息 -->
       <div id="account-connected" style="display: none;">
         <div class="user-info">
-          <img id="user-avatar" src="" alt="" style="width: 64px; height: 64px; border-radius: 50%; object-fit: cover; display: none;">
+          <img id="user-avatar" src="" alt="" referrerpolicy="no-referrer"
+            style="width: 64px; height: 64px; border-radius: 50%; object-fit: cover; display: none; background: #eee;"
+            onerror="this.style.display='none';var f=document.getElementById('avatar');if(f){f.style.display='flex';}">
           <div class="avatar" id="avatar">-</div>
           <div class="details">
             <div class="name" id="user-name">
@@ -240,14 +242,17 @@
       </div>
       <div id="post-hint" style="font-size: 12px; color: #888; margin-top: 8px;">勾选 Auto 只是本地意图；点 <b>Post Now</b> 才会发推并保存定时设置</div>
 
-      <div style="margin-top: 10px; padding-top: 10px; border-top: 1px solid #eee; display: flex; align-items: center; gap: 8px; flex-wrap: wrap;">
-        <span style="font-size: 12px; color: #666;">Active hours:</span>
-        <input type="number" id="post-active-start" min="0" max="23" value="9" style="width: 50px; padding: 4px; border: 1px solid #ddd; border-radius: 5px; font-size: 12px;">
-        <span style="font-size: 12px; color: #666;">~</span>
-        <input type="number" id="post-active-end" min="1" max="24" value="23" style="width: 50px; padding: 4px; border: 1px solid #ddd; border-radius: 5px; font-size: 12px;">
-        <span style="font-size: 12px; color: #888;">o'clock</span>
-        <button class="btn-outline" onclick="saveActiveHours()" style="font-size: 11px; padding: 4px 10px;">Save</button>
-        <span id="active-hours-status" style="font-size: 11px; color: #888;"></span>
+      <div style="margin-top: 10px; padding-top: 10px; border-top: 1px solid #eee;">
+        <div style="display: flex; align-items: center; gap: 8px; flex-wrap: wrap;">
+          <span style="font-size: 12px; color: #666; font-weight: 500;">活跃时段 Active hours:</span>
+          <input type="number" id="post-active-start" min="0" max="23" value="9" style="width: 50px; padding: 4px; border: 1px solid #ddd; border-radius: 5px; font-size: 12px;">
+          <span style="font-size: 12px; color: #666;">~</span>
+          <input type="number" id="post-active-end" min="0" max="24" value="23" style="width: 50px; padding: 4px; border: 1px solid #ddd; border-radius: 5px; font-size: 12px;">
+          <span style="font-size: 12px; color: #888;">点（北京时间）</span>
+          <button class="btn-outline" onclick="saveActiveHours()" style="font-size: 11px; padding: 4px 10px;">保存</button>
+          <span id="active-hours-status" style="font-size: 11px; color: #888;"></span>
+        </div>
+        <div style="font-size: 11px; color: #999; margin-top: 4px;">定时发推仅在此时段内发送；时段外到点会跳过并等下一周期。手动 Post Now 不受限制。</div>
       </div>
     </div>
 
@@ -269,6 +274,25 @@
     const logEl = document.getElementById('log');
     const logs = [];
     let lastData = null;
+
+    /** HTML escape — 列表渲染必须用，缺失会导致扫描完成时 UI 崩溃卡在 scanning */
+    function escHtml(s) {
+      return String(s == null ? '' : s)
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;')
+        .replace(/'/g, '&#39;');
+    }
+
+    /** 头像走后端代理，避免浏览器直连 pbs.twimg.com 失败 */
+    function proxyAvatarUrl(url) {
+      if (!url) return '';
+      let u = String(url);
+      // 高清：_normal → _400x400（仅替换一次）
+      u = u.replace('_normal.', '_400x400.');
+      return '/api/proxy-image?url=' + encodeURIComponent(u);
+    }
 
     function addLog(msg) {
       const time = new Date().toLocaleTimeString();
@@ -324,9 +348,9 @@
         const handle = escHtml(u.username);
         const initial = (u.name || u.username || '?').charAt(0).toUpperCase();
         const avatar = u.profileImageUrl
-          ? `<img src="${escHtml(u.profileImageUrl)}" alt="" style="width: 36px; height: 36px; border-radius: 50%; object-fit: cover; flex-shrink: 0; background: #eee;" onerror="this.style.display='none';this.nextElementSibling.style.display='flex';">
-             <div style="display:none;width:36px;height:36px;border-radius:50%;background:#1d9bf0;color:#fff;align-items:center;justify-content:center;font-weight:bold;font-size:14px;flex-shrink:0;">${initial}</div>`
-          : `<div style="width:36px;height:36px;border-radius:50%;background:#1d9bf0;color:#fff;display:flex;align-items:center;justify-content:center;font-weight:bold;font-size:14px;flex-shrink:0;">${initial}</div>`;
+          ? `<img src="${escHtml(proxyAvatarUrl(u.profileImageUrl))}" alt="" referrerpolicy="no-referrer" style="width: 36px; height: 36px; border-radius: 50%; object-fit: cover; flex-shrink: 0; background: #eee;" onerror="this.style.display='none';this.nextElementSibling.style.display='flex';">
+             <div style="display:none;width:36px;height:36px;border-radius:50%;background:#1d9bf0;color:#fff;align-items:center;justify-content:center;font-weight:bold;font-size:14px;flex-shrink:0;">${escHtml(initial)}</div>`
+          : `<div style="width:36px;height:36px;border-radius:50%;background:#1d9bf0;color:#fff;display:flex;align-items:center;justify-content:center;font-weight:bold;font-size:14px;flex-shrink:0;">${escHtml(initial)}</div>`;
         return `
         <div style="display: flex; align-items: center; gap: 10px; padding: 10px 12px; border-bottom: 1px solid #f0f0f0; font-size: 13px;">
           <input type="checkbox" class="${type}-checkbox" data-idx="${i}" style="width: 15px; height: 15px; flex-shrink: 0;">
@@ -397,7 +421,10 @@
     async function checkFollowBackScan() {
       if (followBackBusy) return;
       followBackBusy = true;
+      const btn = document.getElementById('btn-compute-follow');
+      const statusEl = document.getElementById('compute-follow-status');
       try {
+        // 必须自己拉 /api/status，不能只读 lastData（否则 10s 刷新间隙会一直卡在 scanning）
         const res = await fetch('/api/status');
         if (!res.ok) return;
         const data = await res.json();
@@ -405,19 +432,23 @@
         const scan = data.computedFollowBack;
         if (!scan) return;
 
-        const btn = document.getElementById('btn-compute-follow');
-        const statusEl = document.getElementById('compute-follow-status');
-
         if (scan.status === 'done') {
           if (followBackPollTimer) { clearInterval(followBackPollTimer); followBackPollTimer = null; }
-          followListData = scan.users || [];
-          renderUserList('follow-list-items', followListData, 'follow');
+          followListData = Array.isArray(scan.users) ? scan.users : [];
+          try {
+            renderUserList('follow-list-items', followListData, 'follow');
+          } catch (renderErr) {
+            console.error('renderUserList failed', renderErr);
+            document.getElementById('follow-list-items').innerHTML =
+              '<div style="padding:12px;color:#f4212e;font-size:13px;">列表渲染失败: ' + escHtml(renderErr.message || renderErr) + '</div>';
+          }
           document.getElementById('follow-list').style.display = 'block';
-          document.getElementById('follow-queue-count').textContent = '待回关: ' + scan.count;
-          statusEl.textContent = '找到 ' + scan.count + ' 个待回关粉丝';
+          document.getElementById('follow-queue-count').textContent = '待回关: ' + (scan.count ?? followListData.length);
+          statusEl.textContent = '找到 ' + (scan.count ?? followListData.length) + ' 个待回关粉丝';
           statusEl.style.color = '#00ba7c';
           if (lastFollowBackScanStatus === 'scanning') {
-            showToast('待回关: ' + scan.count + ' 人', 'success');
+            showToast('待回关: ' + (scan.count ?? followListData.length) + ' 人', 'success');
+            addLog('扫描完成: ' + (scan.count ?? followListData.length) + ' 个待回关');
           }
           btn.textContent = '计算待回关';
           btn.disabled = false;
@@ -432,19 +463,29 @@
           btn.disabled = false;
         } else if (scan.status === 'scanning') {
           followBackPollCount++;
-          statusEl.textContent = '后台扫描中… 已收集 ' + (scan.count || 0) + ' 个（轮询 #' + followBackPollCount + '）';
+          statusEl.textContent = '后台扫描中…（轮询 #' + followBackPollCount + '）';
           statusEl.style.color = '#1d9bf0';
-          // 超过 120 次（4 分钟）还没结果，提示用户
-          if (followBackPollCount > 120) {
+          // 粉丝多时扫描较久：放宽到约 15 分钟（2s * 450）
+          if (followBackPollCount > 450) {
             statusEl.textContent = '扫描超时，请刷新页面后重试';
             statusEl.style.color = '#f4212e';
             if (followBackPollTimer) { clearInterval(followBackPollTimer); followBackPollTimer = null; }
             btn.textContent = '计算待回关';
             btn.disabled = false;
           }
+        } else if (scan.status === 'idle') {
+          // 启动瞬间或已重置
+          if (lastFollowBackScanStatus === 'scanning' && followBackPollCount > 2) {
+            statusEl.textContent = '扫描状态已重置';
+            statusEl.style.color = '#888';
+            if (followBackPollTimer) { clearInterval(followBackPollTimer); followBackPollTimer = null; }
+            btn.textContent = '计算待回关';
+            btn.disabled = false;
+          }
         }
         lastFollowBackScanStatus = scan.status;
-      } catch {
+      } catch (e) {
+        console.warn('checkFollowBackScan error', e);
         // 网络错误，下次轮询重试
       } finally {
         followBackBusy = false;
@@ -605,13 +646,21 @@
           const avatarImg = document.getElementById('user-avatar');
           const avatarFallback = document.getElementById('avatar');
           if (me.profileImageUrl) {
-            avatarImg.src = me.profileImageUrl.replace('_normal', '_400x400');
+            const nextSrc = proxyAvatarUrl(me.profileImageUrl);
+            // 避免每 10s 轮询反复重置 src 导致闪烁
+            if (avatarImg.dataset.raw !== me.profileImageUrl) {
+              avatarImg.dataset.raw = me.profileImageUrl;
+              avatarImg.src = nextSrc;
+            }
             avatarImg.style.display = 'block';
             avatarFallback.style.display = 'none';
+            avatarFallback.textContent = (me.name || me.username || '?').charAt(0).toUpperCase();
           } else {
             avatarImg.style.display = 'none';
+            avatarImg.removeAttribute('src');
+            delete avatarImg.dataset.raw;
             avatarFallback.style.display = 'flex';
-            avatarFallback.textContent = me.name.charAt(0).toUpperCase();
+            avatarFallback.textContent = (me.name || me.username || '?').charAt(0).toUpperCase();
           }
 
           const badge = document.getElementById('verified-badge');
@@ -693,23 +742,35 @@
 
     async function saveActiveHours() {
       const statusEl = document.getElementById('active-hours-status');
-      const start = parseInt(document.getElementById('post-active-start').value);
-      const end = parseInt(document.getElementById('post-active-end').value);
+      const start = parseInt(document.getElementById('post-active-start').value, 10);
+      const end = parseInt(document.getElementById('post-active-end').value, 10);
+      if (Number.isNaN(start) || Number.isNaN(end) || start < 0 || start > 23 || end < 0 || end > 24) {
+        statusEl.textContent = '✗ 请填 0-23 / 0-24';
+        statusEl.style.color = '#f4212e';
+        return;
+      }
       statusEl.textContent = 'Saving...';
       try {
         const res = await fetch('/api/auto-config', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ activeHoursStart: start, activeHoursEnd: end }),
+          body: JSON.stringify({
+            activeHoursStart: start,
+            activeHoursEnd: end,
+            timezone: 'Asia/Shanghai',
+          }),
         });
+        const data = await res.json().catch(() => ({}));
         if (res.ok) {
-          statusEl.textContent = '✓ ' + start + ':00-' + end + ':00';
+          statusEl.textContent = '✓ ' + start + ':00-' + end + ':00 北京时间';
           statusEl.style.color = '#00ba7c';
           // 同步到折叠面板
-          document.getElementById('auto-active-start').value = start;
-          document.getElementById('auto-active-end').value = end;
+          const a = document.getElementById('auto-active-start');
+          const b = document.getElementById('auto-active-end');
+          if (a) a.value = start;
+          if (b) b.value = end;
+          showToast('活跃时段已保存: ' + start + ':00-' + end + ':00', 'success');
         } else {
-          const data = await res.json();
           statusEl.textContent = '✗ ' + (data.error || 'Failed');
           statusEl.style.color = '#f4212e';
         }
@@ -717,7 +778,11 @@
         statusEl.textContent = '✗ Error';
         statusEl.style.color = '#f4212e';
       }
-      setTimeout(() => { statusEl.textContent = ''; }, 3000);
+      setTimeout(() => {
+        if (statusEl.textContent.startsWith('✓') || statusEl.textContent.startsWith('✗')) {
+          /* keep success hint a bit longer then clear only error */
+        }
+      }, 5000);
     }
 
     async function saveAutoConfig() {
@@ -910,10 +975,25 @@
       }, 5000);
     }
 
+    /** 统一按北京时间展示（与后端活跃时段一致，避免 UTC/本地浏览器时区混淆） */
+    function formatBeijing(dateOrIso) {
+      const d = dateOrIso instanceof Date ? dateOrIso : new Date(dateOrIso);
+      if (Number.isNaN(d.getTime())) return String(dateOrIso || '');
+      return d.toLocaleString('zh-CN', {
+        timeZone: 'Asia/Shanghai',
+        month: '2-digit',
+        day: '2-digit',
+        hour: '2-digit',
+        minute: '2-digit',
+        second: '2-digit',
+        hour12: false,
+      });
+    }
+
     function updateNextPostTime(intervalMin, nextRunAtIso) {
       const el = document.getElementById('post-schedule-status');
       const next = nextRunAtIso ? new Date(nextRunAtIso) : new Date(Date.now() + intervalMin * 60000);
-      el.textContent = 'Next: ' + next.toLocaleTimeString();
+      el.textContent = '下次: ' + formatBeijing(next) + ' (北京时间)';
       el.style.color = '#00ba7c';
     }
 

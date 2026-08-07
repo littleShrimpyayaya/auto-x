@@ -3,7 +3,15 @@ import { UserRepository } from './user-repository.js';
 import { XClient } from './x-client.js';
 import { BrowserClient } from './browser-client.js';
 import type { XUser, PendingStats } from './types.js';
-import { loadPostConfig, savePostConfig, saveAutomationConfig, loadAutomationConfig, type PostConfig } from './auto-config.js';
+import {
+  loadPostConfig,
+  savePostConfig,
+  saveAutomationConfig,
+  loadAutomationConfig,
+  formatInTimezone,
+  DEFAULT_TIMEZONE,
+  type PostConfig,
+} from './auto-config.js';
 
 export type TaskType = 'sync-followers' | 'sync-following' | 'auto-follow' | 'process-follow' | 'process-unfollow';
 export type TaskStatusType = 'idle' | 'running' | 'completed' | 'error' | 'cancelled';
@@ -304,12 +312,20 @@ export class TaskManager {
 
   // ── 发帖 ─────────────────────────────────────────────
 
-  async postNow(text: string): Promise<{ ok: boolean }> {
+  /** 手动发帖：不受活跃时段限制 */
+  async postNow(text: string): Promise<{ ok: boolean; skipped?: boolean }> {
     if (this.service['xClient'] instanceof BrowserClient) {
-      return (this.service['xClient'] as BrowserClient).postTweet(text);
+      return (this.service['xClient'] as BrowserClient).postTweet(text, { force: true });
     }
     // X API 模式暂不支持发帖
     return { ok: false };
+  }
+
+  /** 配置保存后立即刷新 BrowserClient 内存中的活跃时段等 */
+  reloadAutomationConfig(): void {
+    if (this.service['xClient'] instanceof BrowserClient) {
+      (this.service['xClient'] as BrowserClient).reloadConfig();
+    }
   }
 
   startPostSchedule(intervalMinutes: number, templateText: string, firstDelayMs?: number): void {
@@ -327,10 +343,10 @@ export class TaskManager {
       if (this.service['xClient'] instanceof BrowserClient) {
         this.postAutoIndex++;
         // 自动发帖末尾加时间戳，防 X.com 重复检测（完全相同的推文会被静默拒绝）
-        const now = new Date();
-        const ts = now.toLocaleString('zh-CN', { month:'numeric', day:'numeric', hour:'2-digit', minute:'2-digit', hour12: false });
+        // 时间戳用北京时间，与活跃时段一致
+        const ts = formatInTimezone(new Date(), DEFAULT_TIMEZONE, { compact: true });
         const postText = templateText + `\n\n${ts} ⏳`;
-        console.log(`[Post] 定时发帖 #${this.postAutoIndex} @ ${ts}...`);
+        console.log(`[Post] 定时发帖 #${this.postAutoIndex} @ ${ts} (北京时间)...`);
         try {
           const result = await (this.service['xClient'] as BrowserClient).postTweet(postText);
           if (result.ok) {
@@ -364,7 +380,10 @@ export class TaskManager {
     // 用 setTimeout 处理首次触发，支持非完整周期间隔
     this.postTimer = setTimeout(doPost, firstDelay);
 
-    console.log(`[Post] 定时发帖已启动，间隔 ${intervalMinutes} 分钟，首次 ${this.postNextRunAt}`);
+    const firstLocal = formatInTimezone(this.postNextRunAt, DEFAULT_TIMEZONE);
+    console.log(
+      `[Post] 定时发帖已启动，间隔 ${intervalMinutes} 分钟，首次 ${firstLocal} (北京时间)`,
+    );
   }
 
   stopPostSchedule(): void {
@@ -419,11 +438,12 @@ export class TaskManager {
     console.log(`[Post] 已从配置恢复自动发推，每 ${interval} 分钟`);
   }
 
-  /** 启动后台扫描待回关（不阻塞请求，结果通过 /api/status 获取） */
+  /** 启动后台扫描待回关（不阻塞请求；结果仅内存，经 /api/status 给前端，不持久化） */
   startComputeFollowBack(): void {
     if (this.followBackScanStatus === 'scanning') {
       throw new Error('扫描进行中，请等待完成后再试');
     }
+    // 每次新扫描先丢掉上一轮内存结果
     this.followBackScanStatus = 'scanning';
     this.followBackScanResults = null;
     this.followBackScanError = null;
@@ -433,7 +453,7 @@ export class TaskManager {
       .then((results) => {
         this.followBackScanResults = results;
         this.followBackScanStatus = 'done';
-        console.log(`[TaskManager] 后台扫描完成: ${results.length} 个待回关`);
+        console.log(`[TaskManager] 后台扫描完成: ${results.length} 个待回关（仅内存，未落库）`);
       })
       .catch((err) => {
         this.followBackScanStatus = 'error';

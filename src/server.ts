@@ -249,6 +249,13 @@ export function createServer(taskManager: TaskManager): express.Express {
       // 加载现有配置（保留敏感字段如果传入了占位符）
       const existing = loadAutomationConfig();
 
+      const start = body.activeHoursStart ?? existing.activeHoursStart;
+      const end = body.activeHoursEnd ?? existing.activeHoursEnd;
+      if (start < 0 || start > 23 || end < 0 || end > 24) {
+        res.status(400).json({ error: 'activeHoursStart 0-23, activeHoursEnd 0-24' });
+        return;
+      }
+
       const config: AutomationConfig = {
         batchSizeMin: body.batchSizeMin ?? existing.batchSizeMin,
         batchSizeMax: body.batchSizeMax ?? existing.batchSizeMax,
@@ -257,17 +264,79 @@ export function createServer(taskManager: TaskManager): express.Express {
         actionIntervalMinSeconds: body.actionIntervalMinSeconds ?? existing.actionIntervalMinSeconds,
         actionIntervalMaxSeconds: body.actionIntervalMaxSeconds ?? existing.actionIntervalMaxSeconds,
         dailyLimit: body.dailyLimit ?? existing.dailyLimit,
-        activeHoursStart: body.activeHoursStart ?? existing.activeHoursStart,
-        activeHoursEnd: body.activeHoursEnd ?? existing.activeHoursEnd,
+        activeHoursStart: start,
+        activeHoursEnd: end,
+        timezone: body.timezone || existing.timezone || 'Asia/Shanghai',
         // 只有传入非占位符值时才更新 cookie
         authToken: (body.authToken && body.authToken !== '••••••••') ? body.authToken : existing.authToken,
         ct0: (body.ct0 && body.ct0 !== '••••••••') ? body.ct0 : existing.ct0,
       };
 
       saveAutomationConfig(config);
-      res.json({ ok: true, message: 'Automation settings saved' });
+      // 立即刷新浏览器客户端内存中的活跃时段，无需重启
+      taskManager.reloadAutomationConfig();
+      res.json({
+        ok: true,
+        message: `活跃时段已保存: ${start}:00-${end}:00 (${config.timezone})`,
+        activeHoursStart: start,
+        activeHoursEnd: end,
+        timezone: config.timezone,
+      });
     } catch (err: any) {
       res.status(500).json({ error: err.message });
+    }
+  });
+
+  // ── 头像/图片代理（绕过浏览器直连 pbs.twimg.com 失败）──
+
+  const ALLOWED_IMG_HOSTS = new Set(['pbs.twimg.com', 'abs.twimg.com', 'pbs.twitter.com', 'abs.twitter.com']);
+
+  app.get('/api/proxy-image', async (req, res) => {
+    try {
+      const raw = String(req.query.url || '');
+      if (!raw) {
+        res.status(400).json({ error: 'url required' });
+        return;
+      }
+      let parsed: URL;
+      try {
+        parsed = new URL(raw);
+      } catch {
+        res.status(400).json({ error: 'invalid url' });
+        return;
+      }
+      if (parsed.protocol !== 'https:' || !ALLOWED_IMG_HOSTS.has(parsed.hostname)) {
+        res.status(400).json({ error: 'host not allowed' });
+        return;
+      }
+
+      const upstream = await fetch(parsed.toString(), {
+        headers: {
+          'User-Agent':
+            'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
+          Accept: 'image/avif,image/webp,image/apng,image/*,*/*;q=0.8',
+          Referer: 'https://x.com/',
+        },
+        signal: AbortSignal.timeout(15_000),
+      });
+
+      if (!upstream.ok) {
+        res.status(upstream.status).json({ error: `upstream ${upstream.status}` });
+        return;
+      }
+
+      const contentType = upstream.headers.get('content-type') || 'image/jpeg';
+      if (!contentType.startsWith('image/')) {
+        res.status(502).json({ error: 'not an image' });
+        return;
+      }
+
+      res.setHeader('Content-Type', contentType);
+      res.setHeader('Cache-Control', 'public, max-age=86400');
+      const buf = Buffer.from(await upstream.arrayBuffer());
+      res.send(buf);
+    } catch (err: any) {
+      res.status(502).json({ error: err.message || 'proxy failed' });
     }
   });
 

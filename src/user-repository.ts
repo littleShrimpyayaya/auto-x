@@ -219,6 +219,11 @@ export class UserRepository {
     await this.pool.query(`DELETE FROM pending_follow WHERE user_id = ANY($1)`, [userIds]);
   }
 
+  /** 清空待回关队列（扫描结果改为内存展示后，避免旧 pending 残留） */
+  async clearPendingFollow(): Promise<void> {
+    await this.pool.query(`DELETE FROM pending_follow`);
+  }
+
   async removePendingUnfollowByUserIds(userIds: string[]): Promise<void> {
     if (userIds.length === 0) return;
     await this.pool.query(`DELETE FROM pending_unfollow WHERE user_id = ANY($1)`, [userIds]);

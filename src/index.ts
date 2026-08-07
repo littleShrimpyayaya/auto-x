@@ -8,8 +8,18 @@ import { Service } from './service.js';
 import { TaskManager } from './task-manager.js';
 import { createServer } from './server.js';
 
-// ── 全局日志时间戳 ──────────────────────────────────────
-const ts = () => new Date().toLocaleString('zh-CN', { month:'2-digit', day:'2-digit', hour:'2-digit', minute:'2-digit', second:'2-digit', hour12: false });
+// ── 全局日志时间戳（强制北京时间，容器多为 UTC）────────
+const LOG_TZ = 'Asia/Shanghai';
+const ts = () =>
+  new Date().toLocaleString('zh-CN', {
+    timeZone: LOG_TZ,
+    month: '2-digit',
+    day: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+    second: '2-digit',
+    hour12: false,
+  });
 const _log = console.log, _warn = console.warn, _error = console.error;
 console.log = (...a: any[]) => _log(`[${ts()}]`, ...a);
 console.warn = (...a: any[]) => _warn(`[${ts()}]`, ...a);

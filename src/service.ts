@@ -145,32 +145,12 @@ export class Service {
     if (this.xClient instanceof BrowserClient) {
       const result = await (this.xClient as BrowserClient).scanFollowBack();
 
-      // 写入 users + pending_follow，便于后续批量回关
-      if (result.length > 0) {
-        // 只写入有有效数字 ID 的用户
-        const usersWithId = result
-          .filter((u) => u.userId !== '0' && /^\d+$/.test(u.userId))
-          .map((u) => ({
-            id: u.userId,
-            username: u.username,
-            name: u.name,
-            profileImageUrl: u.profileImageUrl,
-          }));
-        if (usersWithId.length > 0) {
-          await this.repo.upsertUsers(usersWithId);
-        }
-
-        // pending_follow 也只写有效数字 ID 的
-        const pendingItems = result
-          .filter((u) => u.userId !== '0' && /^\d+$/.test(u.userId))
-          .map((u) => ({
-            userId: u.userId,
-            username: u.username,
-            name: u.name,
-          }));
-        if (pendingItems.length > 0) {
-          await this.repo.upsertPendingFollowWithInfo(pendingItems);
-        }
+      // 扫描结果只给前端展示 + 勾选后直接 batch-follow，无需落库。
+      // 清掉历史上 upsert 进 pending_follow 的残留，避免 Dashboard Pending 假数据越积越多。
+      try {
+        await this.repo.clearPendingFollow();
+      } catch (err) {
+        console.warn('[Service] 清理旧 pending_follow 失败（可忽略）:', (err as Error).message);
       }
 
       return result;
@@ -219,12 +199,13 @@ export class Service {
     for (const tid of targetUserIds) {
       try {
         await this.xClient.follow(userId, tid);
-        await this.repo.markPendingFollowStatus(tid, 'completed');
-        await this.repo.upsertRelationships(userId, [{ id: tid, name: '', username: '' }], 'following');
+        // 关系可选写入；待回关列表本身不再依赖 pending_follow
+        try {
+          await this.repo.upsertRelationships(userId, [{ id: tid, name: '', username: '' }], 'following');
+        } catch { /* ignore */ }
         done++;
       } catch {
         failed++;
-        await this.repo.markPendingFollowStatus(tid, 'failed', 'Batch follow failed');
       }
     }
     return { done, failed };

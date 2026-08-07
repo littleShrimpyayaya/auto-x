@@ -32,6 +32,8 @@ services:
       DB_USER: postgres
       DB_PASSWORD: ${DB_PASSWORD:-change-me}
       PORT: 3000
+      # 与活跃时段、日志展示统一为北京时间（避免容器默认 UTC 造成误解）
+      TZ: Asia/Shanghai
     volumes:
       - appdata:/app/data
     # 不暴露端口到宿主机，仅 nginx 通过 Docker 网络访问
