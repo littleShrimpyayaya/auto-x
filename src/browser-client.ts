@@ -483,11 +483,74 @@ export class BrowserClient {
 
         const SKIP = new Set(['home', 'explore', 'notifications', 'messages', 'i', 'settings', 'compose']);
 
-        /** 从按钮 data-testid 中提取用户 ID（如 "123456-follow" → "123456"） */
-        function extractUserIdFromButton(btn: Element): string {
+        /** 从各种 DOM 属性中提取用户数字 ID */
+        function extractUserId(cell: Element, btn: Element): string {
+          // 方式 1: 按钮 data-testid 如 "123456-follow"
           const testId = ((btn as HTMLElement).getAttribute('data-testid') || '');
-          const m = testId.match(/^(\d+)-(?:follow|unfollow|pending)/);
-          return m ? m[1] : '';
+          let m = testId.match(/^(\d+)-/);
+          if (m) return m[1];
+          m = testId.match(/-(\d+)$/);
+          if (m) return m[1];
+
+          // 方式 2: 按钮 aria-label 如 "Follow @username"（需要从缓存反查，这里只做提取标记）
+          const aria = (btn as HTMLElement).getAttribute('aria-label') || '';
+          // aria 里通常是 @username，不是数字 ID，跳过
+
+          // 方式 3: 从 UserCell 中所有链接的 data-user-id 获取
+          const links = cell.querySelectorAll('a[href]');
+          for (const link of links) {
+            const dataId = (link as HTMLElement).getAttribute('data-user-id');
+            if (dataId && /^\d+$/.test(dataId)) return dataId;
+          }
+
+          // 方式 4: 从链接 href 中提取（某些场景下 link 有 /intent/user?user_id=123 之类）
+          // X.com 粉丝页面不带 user_id，但留作备选
+
+          return '';
+        }
+
+        /** 从 UserCell 中提取显示名（非 @username 的文字，且看起来像是人名） */
+        function extractName(cell: Element, username: string): string {
+          // 策略：遍历 cell 中所有 span/div 文本，找不等于 @username 且不是按钮文本的
+          const allTextNodes = cell.querySelectorAll('span');
+          const candidates: string[] = [];
+
+          for (const span of allTextNodes) {
+            const t = (span.textContent || '').trim();
+            // 排除空文本、@username、按钮文本、过长的文本（可能是 bio）
+            if (!t || t.startsWith('@') || t === username) continue;
+            if (t.length > 100) continue;
+            // 排除明显的按钮文本
+            const lower = t.toLowerCase();
+            if (['follow', 'following', 'pending', 'unfollow', '关注', '正在关注', '取消关注', '回关', '已请求'].includes(lower)) continue;
+
+            // 排除纯数字/纯符号
+            if (/^[\d,.\s]+$/.test(t)) continue;
+
+            // 如果此 span 的父级是按钮，跳过
+            const parent = span.closest('button, [role="button"]');
+            if (parent) continue;
+
+            // 同一段文字可能出现在多个嵌套 span 中，选最长的
+            const existing = candidates.find(c => t.includes(c) || c.includes(t));
+            if (existing) {
+              if (t.length > existing.length) {
+                candidates[candidates.indexOf(existing)] = t;
+              }
+            } else {
+              candidates.push(t);
+            }
+          }
+
+          // 优先返回最短的可能人名（名字通常 1-50 字符，bio/描述更长）
+          // 排除太长的（很可能不是名字）
+          const names = candidates.filter(c => c.length <= 50);
+          if (names.length > 0) {
+            // 返回最长的（通常名字比单个词更有可能是显示名）
+            return names.reduce((a, b) => a.length >= b.length ? a : b);
+          }
+
+          return '';
         }
 
         /** 是否为「可关注」按钮 — 排除已关注/请求中/取关，其余 Follow 系列都视为候选。
@@ -546,24 +609,20 @@ export class BrowserClient {
         const cells = document.querySelectorAll('[data-testid="UserCell"]');
 
         for (const cell of cells) {
-          // 提取 username / name
+          // 提取 username：遍历所有 role="link" 的 a 标签
           let username = '';
-          let name = '';
           const links = cell.querySelectorAll('a[role="link"]');
           for (const link of links) {
             const href = link.getAttribute('href') || '';
             const m = href.match(/^\/([A-Za-z0-9_]+)$/);
             if (!m || SKIP.has(m[1].toLowerCase())) continue;
             username = m[1];
-            const spans = link.querySelectorAll('span');
-            for (const span of spans) {
-              const t = (span.textContent || '').trim();
-              if (!t || t.startsWith('@')) continue;
-              if (t.length < 100 && !name) name = t;
-            }
             break;
           }
           if (!username) continue;
+
+          // 提取显示名（不再只从第一个 link 取，而是扫描整个 cell）
+          const name = extractName(cell, username);
 
           // 头像
           const img =
@@ -584,7 +643,7 @@ export class BrowserClient {
               buttonHint = `text="${t}" aria="${a}" testid="${d}"`;
             }
             if (!domUserId) {
-              domUserId = extractUserIdFromButton(btn);
+              domUserId = extractUserId(cell, btn);
             }
             if (isFollowBackButton(btn)) {
               needsFollowBack = true;
@@ -596,7 +655,7 @@ export class BrowserClient {
           if (!domUserId) {
             const userLink = cell.querySelector(`a[href="/${username}"]`);
             if (userLink) {
-              domUserId = userLink.getAttribute('data-user-id') || '';
+              domUserId = (userLink as HTMLElement).getAttribute('data-user-id') || '';
             }
           }
 
@@ -690,15 +749,30 @@ export class BrowserClient {
 
     this.page!.off('response', onResponse);
 
-    // 对仍缺 userId 的，再试一次 GraphQL 缓存
+    // 对仍缺 userId 的，依次尝试：GraphQL 缓存 → idCache → profile 页面抓取
     for (const u of needFollow) {
       if (u.userId !== '0') continue;
+
+      // 1. GraphQL 缓存
       const gql = gqlByUsername.get(u.username.toLowerCase());
       if (gql?.id) {
         u.userId = gql.id;
         if (!u.profileImageUrl && gql.profileImageUrl) u.profileImageUrl = gql.profileImageUrl;
         if (gql.name) u.name = gql.name;
+        continue;
       }
+
+      // 2. idCache（扫描过程中由 onResponse 或之前操作填充）
+      const cachedId = this.idCache.get(u.username);
+      if (cachedId && /^\d+$/.test(cachedId)) {
+        u.userId = cachedId;
+      }
+    }
+
+    // 统计仍缺 ID 的数量
+    const missingId = needFollow.filter(u => u.userId === '0').length;
+    if (missingId > 0) {
+      console.warn(`[BrowserClient] ⚠ ${missingId}/${needFollow.length} 个待回关缺少数字 userId，将无法写入待处理队列`);
     }
 
     console.log(

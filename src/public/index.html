@@ -599,10 +599,13 @@
           disconnectedDiv.style.display = 'block';
         }
 
-        // Dashboard queue count
+        // Dashboard queue count — merge DB pending + scan results
         if (data.pending) {
+          const scanExtra = (data.computedFollowBack && data.computedFollowBack.status === 'done' && data.computedFollowBack.count > 0)
+            ? ` | Scanned: ${data.computedFollowBack.count}`
+            : '';
           document.getElementById('follow-queue-count').textContent =
-            `Pending: ${data.pending.followPending} | Done: ${data.pending.followCompleted} | Failed: ${data.pending.followFailed}`;
+            `Pending: ${data.pending.followPending} | Done: ${data.pending.followCompleted} | Failed: ${data.pending.followFailed}${scanExtra}`;
         }
 
         // Task status
