@@ -239,6 +239,16 @@
         <span id="post-schedule-status" style="font-size: 12px; color: #888;"></span>
       </div>
       <div id="post-hint" style="font-size: 12px; color: #888; margin-top: 8px;">勾选 Auto 只是本地意图；点 <b>Post Now</b> 才会发推并保存定时设置</div>
+
+      <div style="margin-top: 10px; padding-top: 10px; border-top: 1px solid #eee; display: flex; align-items: center; gap: 8px; flex-wrap: wrap;">
+        <span style="font-size: 12px; color: #666;">Active hours:</span>
+        <input type="number" id="post-active-start" min="0" max="23" value="9" style="width: 50px; padding: 4px; border: 1px solid #ddd; border-radius: 5px; font-size: 12px;">
+        <span style="font-size: 12px; color: #666;">~</span>
+        <input type="number" id="post-active-end" min="1" max="24" value="23" style="width: 50px; padding: 4px; border: 1px solid #ddd; border-radius: 5px; font-size: 12px;">
+        <span style="font-size: 12px; color: #888;">o'clock</span>
+        <button class="btn-outline" onclick="saveActiveHours()" style="font-size: 11px; padding: 4px 10px;">Save</button>
+        <span id="active-hours-status" style="font-size: 11px; color: #888;"></span>
+      </div>
     </div>
 
     <div class="card">
@@ -346,7 +356,8 @@
 
     let followBackPollTimer = null;
     let lastFollowBackScanStatus = 'idle';
-    let followBackPolling = false;  // 防重入
+    let followBackPollCount = 0;
+    let followBackBusy = false;
 
     async function computeFollowBack() {
       const btn = document.getElementById('btn-compute-follow');
@@ -356,6 +367,7 @@
       statusEl.textContent = '后台扫描中，请等待…';
       statusEl.style.color = '#1d9bf0';
       lastFollowBackScanStatus = 'scanning';
+      followBackPollCount = 0;
 
       try {
         const res = await fetch('/api/compute-follow-back', { method: 'POST' });
@@ -364,9 +376,8 @@
           statusEl.textContent = '后台扫描中… 结果出来会自动显示';
           statusEl.style.color = '#1d9bf0';
           if (followBackPollTimer) clearInterval(followBackPollTimer);
-          followBackPollTimer = setInterval(() => {
-            if (!followBackPolling) checkFollowBackScan();
-          }, 1500);
+          checkFollowBackScan();
+          followBackPollTimer = setInterval(checkFollowBackScan, 2000);
         } else {
           statusEl.textContent = data.error || '启动失败';
           statusEl.style.color = '#f4212e';
@@ -384,19 +395,14 @@
     }
 
     async function checkFollowBackScan() {
-      if (followBackPolling) return;
-      followBackPolling = true;
+      if (followBackBusy) return;
+      followBackBusy = true;
       try {
-        // 直接拉最新状态，不依赖 10 秒一轮的 lastData
-        let scan;
-        try {
-          const res = await fetch('/api/status');
-          const data = await res.json();
-          lastData = data;
-          scan = data.computedFollowBack;
-        } catch {
-          return; // 服务未就绪
-        }
+        const res = await fetch('/api/status');
+        if (!res.ok) return;
+        const data = await res.json();
+        lastData = data;
+        const scan = data.computedFollowBack;
         if (!scan) return;
 
         const btn = document.getElementById('btn-compute-follow');
@@ -425,12 +431,23 @@
           btn.textContent = '计算待回关';
           btn.disabled = false;
         } else if (scan.status === 'scanning') {
-          statusEl.textContent = '后台扫描中… 已收集 ' + (scan.count || 0) + ' 个';
+          followBackPollCount++;
+          statusEl.textContent = '后台扫描中… 已收集 ' + (scan.count || 0) + ' 个（轮询 #' + followBackPollCount + '）';
           statusEl.style.color = '#1d9bf0';
+          // 超过 120 次（4 分钟）还没结果，提示用户
+          if (followBackPollCount > 120) {
+            statusEl.textContent = '扫描超时，请刷新页面后重试';
+            statusEl.style.color = '#f4212e';
+            if (followBackPollTimer) { clearInterval(followBackPollTimer); followBackPollTimer = null; }
+            btn.textContent = '计算待回关';
+            btn.disabled = false;
+          }
         }
         lastFollowBackScanStatus = scan.status;
+      } catch {
+        // 网络错误，下次轮询重试
       } finally {
-        followBackPolling = false;
+        followBackBusy = false;
       }
     }
 
@@ -668,7 +685,39 @@
         document.getElementById('auto-action-max').value = cfg.actionIntervalMaxSeconds;
         document.getElementById('auto-active-start').value = cfg.activeHoursStart ?? 9;
         document.getElementById('auto-active-end').value = cfg.activeHoursEnd ?? 23;
+        // 同步到 Post Composer 的活跃时段输入
+        document.getElementById('post-active-start').value = cfg.activeHoursStart ?? 9;
+        document.getElementById('post-active-end').value = cfg.activeHoursEnd ?? 23;
       } catch { /* server not ready */ }
+    }
+
+    async function saveActiveHours() {
+      const statusEl = document.getElementById('active-hours-status');
+      const start = parseInt(document.getElementById('post-active-start').value);
+      const end = parseInt(document.getElementById('post-active-end').value);
+      statusEl.textContent = 'Saving...';
+      try {
+        const res = await fetch('/api/auto-config', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ activeHoursStart: start, activeHoursEnd: end }),
+        });
+        if (res.ok) {
+          statusEl.textContent = '✓ ' + start + ':00-' + end + ':00';
+          statusEl.style.color = '#00ba7c';
+          // 同步到折叠面板
+          document.getElementById('auto-active-start').value = start;
+          document.getElementById('auto-active-end').value = end;
+        } else {
+          const data = await res.json();
+          statusEl.textContent = '✗ ' + (data.error || 'Failed');
+          statusEl.style.color = '#f4212e';
+        }
+      } catch {
+        statusEl.textContent = '✗ Error';
+        statusEl.style.color = '#f4212e';
+      }
+      setTimeout(() => { statusEl.textContent = ''; }, 3000);
     }
 
     async function saveAutoConfig() {
