@@ -5,7 +5,6 @@ import type { XUser, PaginatedUsers, FollowResult, UnfollowResult } from './type
 import {
   loadAutomationConfig,
   actionInterval,
-  isActiveHours,
   type AutomationConfig,
 } from './auto-config.js';
 
@@ -189,7 +188,7 @@ export class BrowserClient {
     }
   }
 
-  /** 从磁盘重新加载自动化配置（活跃时段等），前端保存后立即生效 */
+  /** 从磁盘重新加载自动化配置（操作间隔等），前端保存后立即生效 */
   reloadConfig(): void {
     const fresh = loadAutomationConfig();
     this.config = {
@@ -200,7 +199,7 @@ export class BrowserClient {
       ct0: this.config.ct0 || fresh.ct0,
     };
     console.log(
-      `[BrowserClient] 配置已刷新: 活跃时段 ${this.config.activeHoursStart}:00-${this.config.activeHoursEnd}:00 (${this.config.timezone || 'Asia/Shanghai'})`,
+      `[BrowserClient] 配置已刷新: 操作间隔 ${this.config.actionIntervalMinSeconds}~${this.config.actionIntervalMaxSeconds}s`,
     );
   }
 
@@ -1695,9 +1694,9 @@ export class BrowserClient {
   // ── 发帖 ─────────────────────────────────────────────
 
   /**
-   * 发帖。
-   * @param options.force  true = 手动发帖，忽略活跃时段；定时发帖不传 force
-   * @param options.priority  手动 Post Now：排队时标记优先（不抢占 in-flight）
+   * 发帖（无活跃时段限制，到点即发）。
+   * @param options.priority  手动立即发送：排队时标记优先（不抢占 in-flight）
+   * @param options.force  兼容旧调用，已无时段门闩
    */
   async postTweet(
     text: string,
@@ -1705,23 +1704,7 @@ export class BrowserClient {
   ): Promise<{ ok: boolean; skipped?: boolean }> {
     this.ensureReady();
 
-    // 每次发帖前刷新活跃时段，确保前端刚保存的配置立即生效
-    try {
-      const fresh = loadAutomationConfig();
-      this.config.activeHoursStart = fresh.activeHoursStart;
-      this.config.activeHoursEnd = fresh.activeHoursEnd;
-      this.config.timezone = fresh.timezone || this.config.timezone || 'Asia/Shanghai';
-    } catch { /* keep existing */ }
-
-    if (!options?.force && !isActiveHours(this.config)) {
-      const tz = this.config.timezone || 'Asia/Shanghai';
-      console.log(
-        `[BrowserClient] 当前不在活跃时段（${this.config.activeHoursStart}:00-${this.config.activeHoursEnd}:00 ${tz}），跳过发帖`,
-      );
-      return { ok: false, skipped: true };
-    }
-
-    const label = options?.force ? 'post:force' : 'post:scheduled';
+    const label = options?.force || options?.priority ? 'post:force' : 'post:scheduled';
     return this.pageOp(label, () => this.postTweetUnlocked(text), { priority: options?.priority });
   }
 
@@ -1931,25 +1914,6 @@ export class BrowserClient {
     }
     console.warn(`[BrowserClient] resolveUsername: 未知 userId=${userId}，缓存未命中`);
     return userId;
-  }
-
-  private async waitUntilActive(): Promise<void> {
-    while (true) {
-      try {
-        const fresh = loadAutomationConfig();
-        this.config.activeHoursStart = fresh.activeHoursStart;
-        this.config.activeHoursEnd = fresh.activeHoursEnd;
-        this.config.timezone = fresh.timezone || this.config.timezone || 'Asia/Shanghai';
-      } catch { /* keep */ }
-
-      if (isActiveHours(this.config)) break;
-
-      const tz = this.config.timezone || 'Asia/Shanghai';
-      console.log(
-        `[BrowserClient] 等待活跃时段 ${this.config.activeHoursStart}:00-${this.config.activeHoursEnd}:00 (${tz})…`,
-      );
-      await new Promise((r) => setTimeout(r, 60_000)); // 每分钟检查一次
-    }
   }
 
   // ── 未使用的方法（接口兼容）─────────────────────────

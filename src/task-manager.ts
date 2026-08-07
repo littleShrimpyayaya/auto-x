@@ -396,7 +396,7 @@ export class TaskManager {
     return r;
   }
 
-  /** 手动发帖：不受活跃时段限制；force 优先于排队中的定时发帖 */
+  /** 手动发帖（force/priority，无时段限制） */
   async postNow(text: string): Promise<{ ok: boolean; skipped?: boolean }> {
     if (this.service['xClient'] instanceof BrowserClient) {
       return (this.service['xClient'] as BrowserClient).postTweet(text, {
@@ -407,7 +407,7 @@ export class TaskManager {
     return { ok: false };
   }
 
-  /** 配置保存后立即刷新 BrowserClient 内存中的活跃时段等 */
+  /** 配置保存后立即刷新 BrowserClient 内存配置 */
   reloadAutomationConfig(): void {
     if (this.service['xClient'] instanceof BrowserClient) {
       (this.service['xClient'] as BrowserClient).reloadConfig();
@@ -758,9 +758,6 @@ export class TaskManager {
   }
 
   async deletePostTask(taskId: string): Promise<void> {
-    if (taskId === COMPOSER_TASK_ID) {
-      throw new Error('Cannot delete composer-linked task; disable Auto instead');
-    }
     this.stopPostTaskSchedule(taskId);
     await updatePostConfig((cfg) => {
       const before = cfg.tasks.length;

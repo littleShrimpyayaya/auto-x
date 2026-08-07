@@ -4,7 +4,7 @@ import path from 'path';
 const CONFIG_DIR = path.join(process.cwd(), 'data');
 const CONFIG_FILE = path.join(CONFIG_DIR, 'config.json');
 
-/** Fixed id for the task bound to Post Composer + legacy dual-write + postSchedule */
+/** Fixed id for the default migrated task (legacy dual-write + postSchedule) */
 export const COMPOSER_TASK_ID = 'task-migrated-default';
 export const MAX_POST_TASKS = 10;
 export const MIN_POST_INTERVAL_MINUTES = 5;
