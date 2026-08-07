@@ -490,7 +490,8 @@ export class BrowserClient {
           return m ? m[1] : '';
         }
 
-        /** 是否为「需要回关」按钮 — 只匹配 Follow back / 回关（排除推荐用户的 Follow / 关注） */
+        /** 是否为「可关注」按钮 — 排除已关注/请求中/取关，其余 Follow 系列都视为候选。
+         *  后续用 GraphQL 的 followedBy / following 字段过滤掉推荐用户和已关注者。 */
         function isFollowBackButton(btn: Element): boolean {
           const rawText = (btn.textContent || '').replace(/\s+/g, ' ').trim();
           const text = rawText.toLowerCase();
@@ -513,40 +514,27 @@ export class BrowserClient {
             return false;
           }
 
-          // ⚠ 排除纯「关注 / Follow」（推荐用户），只保留「回关 / Follow back」
+          // Follow / 关注 / Follow back / 回关 —— 全部视为候选
+          // （粉丝列表页面上，非互关粉丝的按钮就是普通的 "Follow"，不是 "Follow back"）
           if (
             text === 'follow' ||
-            text === '关注'
-          ) {
-            return false;
-          }
-
-          // data-testid 形如 "123456-follow" + 上下文必须是 follow back
-          if (/-follow$/.test(testId)) {
-            // 按钮 text/aria 里必须带 "back" 或 "回" 才认定是回关
-            if (
-              text.includes('back') ||
-              text === '回关' ||
-              aria.includes('follow back') ||
-              aria.includes('回关')
-            ) {
-              return true;
-            }
-            return false;
-          }
-
-          // 中英文回关文案
-          if (
             text === 'follow back' ||
+            text === '关注' ||
             text === '回关'
           ) {
             return true;
           }
 
-          // aria-label: "Follow back @user" / "回关 @user"
+          // data-testid 形如 "123456-follow"
+          if (/-follow$/.test(testId)) {
+            return true;
+          }
+
+          // aria-label: "Follow @user" / "Follow back @user" / "回关 @user"
           if (
-            /^follow\s+back\s+@/.test(aria) ||
-            aria.startsWith('回关')
+            /^follow(\s+back)?\s+@/.test(aria) ||
+            aria.startsWith('回关') ||
+            aria.startsWith('关注')
           ) {
             return true;
           }
@@ -636,6 +624,13 @@ export class BrowserClient {
         // GraphQL 若明确说已经 following，以 GraphQL 为准跳过（避免误检）
         if (gql?.following === true) {
           console.log(`[BrowserClient] ⏭ 跳过 @${user.username} — GraphQL 显示已关注 (following=true)`);
+          continue;
+        }
+
+        // 用 GraphQL 的 followedBy 字段过滤推荐用户（非粉丝混入粉丝列表）
+        // followedBy === false 意味着对方没有关注我们 → 不是粉丝，跳过
+        if (gql?.followedBy === false) {
+          console.log(`[BrowserClient] ⏭ 跳过 @${user.username} — GraphQL 显示非粉丝 (followedBy=false)，可能为推荐用户`);
           continue;
         }
 
