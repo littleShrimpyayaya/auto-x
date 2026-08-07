@@ -22,6 +22,8 @@ import {
   type PostTaskPhase,
 } from './auto-config.js';
 import { randomUUID } from 'crypto';
+import { generateTweetText } from './ai-service.js';
+import { loadAiProviders } from './ai-config.js';
 
 export type TaskType = 'sync-followers' | 'sync-following' | 'auto-follow' | 'process-follow' | 'process-unfollow';
 export type TaskStatusType = 'idle' | 'running' | 'completed' | 'error' | 'cancelled';
@@ -69,6 +71,7 @@ export interface StatusInfo {
     intervalMinutes: number;
     contentMode: string;
     contentPreview: string;
+    model: string | null;
     phase: PostTaskPhase;
     nextRunAt: string | null;
     lastPostAt: string | null;
@@ -550,17 +553,136 @@ export class TaskManager {
     }
 
     if (task.contentMode === 'ai') {
-      // PR3 之前：记错误并保持调度
-      console.warn(`[Post] 任务 ${taskId} contentMode=ai 尚未启用，跳过`);
-      await updatePostConfig((c) => {
-        const t = c.tasks.find((x) => x.id === taskId);
-        if (t) {
-          t.lastError = 'AI mode not enabled yet';
-          t.lastResult = 'skipped: ai not implemented';
-          t.updatedAt = new Date().toISOString();
+      if (!(this.service['xClient'] instanceof BrowserClient)) {
+        console.warn('[Post] 非浏览器模式，无法发帖');
+        rt.phase = 'waiting';
+        return;
+      }
+
+      // 解析 prompt（task.content 即为给 AI 的提示词）
+      const prompt = String(task.content || '').trim();
+      if (!prompt) {
+        console.warn(`[Post] 任务 ${taskId} AI 模式但提示词为空，跳过`);
+        await updatePostConfig((c) => {
+          const t = c.tasks.find((x) => x.id === taskId);
+          if (t) {
+            t.lastError = 'AI prompt is empty';
+            t.lastResult = 'skipped: empty prompt';
+            t.updatedAt = new Date().toISOString();
+          }
+        });
+        rt.phase = 'waiting';
+        return;
+      }
+
+      // 选择供应商：task.model 存 providerId；未指定则取第一个启用的
+      let providerId = task.model || null;
+      if (!providerId) {
+        const providers = loadAiProviders().filter((p) => p.enabled && p.apiKey);
+        if (providers.length === 0) {
+          console.warn(`[Post] 任务 ${taskId} AI 模式但无可用供应商，跳过`);
+          await updatePostConfig((c) => {
+            const t = c.tasks.find((x) => x.id === taskId);
+            if (t) {
+              t.lastError = 'No enabled AI provider';
+              t.lastResult = 'skipped: no provider';
+              t.updatedAt = new Date().toISOString();
+            }
+          });
+          rt.phase = 'waiting';
+          return;
         }
+        providerId = providers[0].id;
+      }
+
+      rt.phase = 'generating';
+      console.log(`[Post] 任务 ${taskId} 调用 AI (provider=${providerId})…`);
+
+      const aiResult = await generateTweetText({
+        providerId,
+        prompt,
+        maxTokens: cfg.ai?.maxTokens || 200,
+        temperature: cfg.ai?.temperature ?? 0.8,
+        systemPrompt: cfg.ai?.systemPrompt || undefined,
       });
-      rt.phase = 'waiting';
+
+      if (!aiResult.ok || !aiResult.text) {
+        rt.consecutiveErrors++;
+        const errMsg = aiResult.error || 'AI generation failed';
+        console.error(`[Post] 任务 ${taskId} AI 生成失败: ${errMsg}`);
+        await updatePostConfig((c) => {
+          const t = c.tasks.find((x) => x.id === taskId);
+          if (t) {
+            t.lastError = errMsg;
+            t.lastResult = 'ai-error';
+            t.updatedAt = new Date().toISOString();
+          }
+        });
+        rt.phase = 'waiting';
+        return;
+      }
+
+      // AI 返回的文本作为最终推文内容（仍然拼 anti-dupe 后缀）
+      const suffix = antiDupeSuffix(new Date(), DEFAULT_TIMEZONE);
+      const body = clampTweetBody(aiResult.text, suffix);
+      const postText = body + suffix;
+
+      rt.phase = 'queued';
+      console.log(`[Post] AI 生成完成 (${aiResult.text.length} chars), 准备发送…`);
+
+      try {
+        rt.phase = 'posting';
+        const result = await (this.service['xClient'] as BrowserClient).postTweet(postText);
+        if (result.ok) {
+          const now = new Date().toISOString();
+          await updatePostConfig((c) => {
+            const t = c.tasks.find((x) => x.id === taskId);
+            if (t) {
+              t.lastPostAt = now;
+              t.postCount = (t.postCount || 0) + 1;
+              t.lastResult = 'ok';
+              t.lastError = null;
+              t.updatedAt = now;
+            }
+          });
+          rt.consecutiveErrors = 0;
+          console.log(`[Post] AI 推文发送成功 (ai-mode)`);
+        } else if (result.skipped) {
+          await updatePostConfig((c) => {
+            const t = c.tasks.find((x) => x.id === taskId);
+            if (t) {
+              t.lastResult = 'skipped: inactive hours';
+              t.updatedAt = new Date().toISOString();
+            }
+          });
+          console.log(`[Post] AI 推文非活跃时段跳过 (ai-mode)`);
+        } else {
+          rt.consecutiveErrors++;
+          await updatePostConfig((c) => {
+            const t = c.tasks.find((x) => x.id === taskId);
+            if (t) {
+              t.lastError = 'post failed';
+              t.lastResult = 'failed';
+              t.updatedAt = new Date().toISOString();
+            }
+          });
+          console.warn(`[Post] AI 推文发送失败 (ai-mode)`);
+        }
+      } catch (err) {
+        rt.consecutiveErrors++;
+        const msg = (err as Error).message || String(err);
+        await updatePostConfig((c) => {
+          const t = c.tasks.find((x) => x.id === taskId);
+          if (t) {
+            t.lastError = msg;
+            t.lastResult = 'error';
+            t.updatedAt = new Date().toISOString();
+          }
+        });
+        console.error('[Post] AI 推文发送异常:', err);
+      } finally {
+        rt.phase = 'waiting';
+      }
       return;
     }
 
@@ -697,7 +819,11 @@ export class TaskManager {
       throw new Error('启用任务时内容不能为空');
     }
     if (contentMode === 'ai') {
-      // PR3 前允许创建但启用时提示；创建时允许保存草稿
+      // AI 模式：content 作为提示词保存，需至少有一个启用的供应商
+      const aiProviders = loadAiProviders().filter((p) => p.enabled && p.apiKey);
+      if (wantEnabled && aiProviders.length === 0) {
+        throw new Error('启用 AI 模式需要至少配置一个启用的 AI 供应商');
+      }
     }
     let created!: PostTaskConfig;
     await updatePostConfig((cfg) => {
@@ -734,6 +860,7 @@ export class TaskManager {
       intervalMinutes?: number;
       enabled?: boolean;
       contentMode?: 'static' | 'ai';
+      model?: string | null;
     },
   ): Promise<PostTaskConfig> {
     const before = this.getPostTask(taskId);
@@ -756,11 +883,28 @@ export class TaskManager {
       if (patch.contentMode !== undefined) {
         t.contentMode = patch.contentMode === 'ai' ? 'ai' : 'static';
       }
+      if (patch.model !== undefined) {
+        // 空字符串视为未选择
+        t.model = patch.model ? String(patch.model) : null;
+      }
       if (patch.enabled !== undefined) {
         if (patch.enabled && !String(t.content || '').trim()) {
           throw new Error('启用任务时内容不能为空');
         }
         t.enabled = !!patch.enabled;
+      }
+      // AI 模式启用时：至少需要供应商配置；优先使用任务选定的 model
+      if (t.enabled && t.contentMode === 'ai') {
+        const providers = loadAiProviders().filter((p) => p.enabled && p.apiKey);
+        if (providers.length === 0) {
+          throw new Error('启用 AI 模式需要至少配置一个启用的 AI 供应商');
+        }
+        if (t.model && !providers.some((p) => p.id === t.model)) {
+          throw new Error('所选 AI 供应商不存在或未启用');
+        }
+        if (!t.model) {
+          throw new Error('AI 模式需要选择一个供应商');
+        }
       }
       t.updatedAt = new Date().toISOString();
     });
@@ -809,9 +953,47 @@ export class TaskManager {
     if (!task) throw new Error('任务不存在');
     const content = String(task.content || '').trim();
     if (!content) throw new Error('内容为空');
+
     if (task.contentMode === 'ai') {
-      throw new Error('AI 模式尚未启用，请使用 static 文案或等待 AI 功能');
+      // AI 模式：content 是提示词
+      let providerId = task.model || null;
+      if (!providerId) {
+        const providers = loadAiProviders().filter((p) => p.enabled && p.apiKey);
+        if (providers.length === 0) throw new Error('没有可用的 AI 供应商');
+        providerId = providers[0].id;
+      }
+      const cfg = loadPostConfig();
+      const aiResult = await generateTweetText({
+        providerId,
+        prompt: content,
+        maxTokens: cfg.ai?.maxTokens || 200,
+        temperature: cfg.ai?.temperature ?? 0.8,
+        systemPrompt: cfg.ai?.systemPrompt || undefined,
+      });
+      if (!aiResult.ok || !aiResult.text) {
+        throw new Error(aiResult.error || 'AI 生成失败');
+      }
+      if (aiResult.text.length > 280) {
+        throw new Error(`AI 生成内容超长 (${aiResult.text.length} > 280)`);
+      }
+      const result = await this.postNow(aiResult.text);
+      if (result.ok) {
+        const now = new Date().toISOString();
+        await updatePostConfig((cfg) => {
+          const t = cfg.tasks.find((x) => x.id === taskId);
+          if (t) {
+            t.lastPostAt = now;
+            t.postCount = (t.postCount || 0) + 1;
+            t.lastResult = 'ok (run-once ai)';
+            t.lastError = null;
+            t.updatedAt = now;
+          }
+        });
+      }
+      return { ...result, text: aiResult.text };
     }
+
+    // static 模式
     if (content.length > 280) throw new Error('超过 280 字符限制');
     const result = await this.postNow(content);
     if (result.ok) {
@@ -1253,6 +1435,7 @@ export class TaskManager {
             intervalMinutes: t.intervalMinutes,
             contentMode: t.contentMode,
             contentPreview: (t.content || '').substring(0, 80),
+            model: t.model || null,
             phase: t.enabled ? rt.phase : 'idle',
             nextRunAt: rt.nextRunAt,
             lastPostAt: t.lastPostAt,

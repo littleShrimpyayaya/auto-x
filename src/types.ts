@@ -83,3 +83,48 @@ export interface PendingStats {
   unfollowCompleted: number;
   unfollowFailed: number;
 }
+
+// ── AI 供应商配置 ──────────────────────────────────────
+
+export type AiProviderType = 'openai-compatible' | 'anthropic';
+
+export interface AiProvider {
+  id: string;
+  name: string;
+  type: AiProviderType;
+  apiKey: string;
+  baseUrl: string;
+  defaultModel: string;
+  enabled: boolean;
+  createdAt: string;
+  updatedAt: string;
+}
+
+/** 对外暴露的供应商信息（脱敏） */
+export interface AiProviderSafe {
+  id: string;
+  name: string;
+  type: AiProviderType;
+  baseUrl: string;
+  defaultModel: string;
+  enabled: boolean;
+  hasApiKey: boolean;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface AiGenerateRequest {
+  providerId: string;
+  model?: string;
+  prompt: string;
+  systemPrompt?: string;
+  maxTokens?: number;
+  temperature?: number;
+}
+
+export interface AiGenerateResponse {
+  ok: boolean;
+  text?: string;
+  model?: string;
+  error?: string;
+}

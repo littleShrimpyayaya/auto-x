@@ -1,0 +1,437 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>AI 供应商配置 - Auto-X</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+      background: #f5f5f5; color: #333; padding: 20px;
+    }
+    .container { max-width: 900px; margin: 0 auto; }
+    .header {
+      display: flex; align-items: center; gap: 16px; margin-bottom: 24px;
+    }
+    .header a { color: #1d9bf0; text-decoration: none; font-size: 14px; }
+    .header a:hover { text-decoration: underline; }
+    h1 { font-size: 24px; }
+    .card {
+      background: #fff; border-radius: 8px; padding: 20px; margin-bottom: 16px;
+      box-shadow: 0 1px 3px rgba(0,0,0,0.1);
+    }
+    .card h2 { font-size: 16px; color: #666; margin-bottom: 12px; }
+
+    /* Provider list */
+    .provider-list { display: flex; flex-direction: column; gap: 12px; }
+    .provider-item {
+      display: flex; align-items: center; justify-content: space-between;
+      padding: 14px 16px; border: 1px solid #eee; border-radius: 8px;
+      transition: border-color 0.2s;
+    }
+    .provider-item:hover { border-color: #1d9bf0; }
+    .provider-item.disabled { opacity: 0.5; }
+    .provider-info { flex: 1; }
+    .provider-name { font-weight: 600; font-size: 15px; }
+    .provider-detail { font-size: 12px; color: #888; margin-top: 4px; }
+    .provider-actions { display: flex; gap: 8px; flex-shrink: 0; }
+
+    /* Buttons */
+    button {
+      padding: 8px 16px; border: none; border-radius: 6px; cursor: pointer;
+      font-size: 13px; font-weight: 500; transition: all 0.2s;
+    }
+    button:hover:not(:disabled) { opacity: 0.85; }
+    button:disabled { opacity: 0.4; cursor: not-allowed; }
+    .btn-primary { background: #1d9bf0; color: #fff; }
+    .btn-success { background: #00ba7c; color: #fff; }
+    .btn-danger { background: #f4212e; color: #fff; }
+    .btn-secondary { background: #536471; color: #fff; }
+    .btn-outline { background: transparent; color: #1d9bf0; border: 1.5px solid #1d9bf0; }
+    .btn-sm { padding: 4px 10px; font-size: 12px; }
+
+    /* Form */
+    .form-group { margin-bottom: 14px; }
+    .form-group label {
+      display: block; font-size: 13px; font-weight: 600; color: #555; margin-bottom: 4px;
+    }
+    .form-group input, .form-group select {
+      width: 100%; padding: 10px 12px; border: 1px solid #ddd; border-radius: 6px;
+      font-size: 14px; transition: border-color 0.2s;
+    }
+    .form-group input:focus, .form-group select:focus {
+      outline: none; border-color: #1d9bf0; box-shadow: 0 0 0 3px rgba(29,155,240,0.1);
+    }
+    .form-group .hint { font-size: 11px; color: #999; margin-top: 3px; }
+    .form-row { display: flex; gap: 12px; }
+    .form-row .form-group { flex: 1; }
+
+    /* Toggle */
+    .toggle-row { display: flex; align-items: center; gap: 10px; margin-bottom: 14px; }
+    .toggle-row label { font-size: 13px; font-weight: 600; color: #555; }
+    .toggle {
+      position: relative; width: 44px; height: 24px; flex-shrink: 0;
+    }
+    .toggle input { display: none; }
+    .toggle .slider {
+      position: absolute; inset: 0; background: #ccc; border-radius: 24px;
+      cursor: pointer; transition: background 0.2s;
+    }
+    .toggle .slider::after {
+      content: ''; position: absolute; top: 2px; left: 2px;
+      width: 20px; height: 20px; background: #fff; border-radius: 50%;
+      transition: transform 0.2s;
+    }
+    .toggle input:checked + .slider { background: #00ba7c; }
+    .toggle input:checked + .slider::after { transform: translateX(20px); }
+
+    /* Messages */
+    .toast {
+      position: fixed; top: 20px; right: 20px; z-index: 1000;
+      padding: 12px 20px; border-radius: 8px; color: #fff; font-size: 14px;
+      max-width: 400px; box-shadow: 0 4px 12px rgba(0,0,0,0.15);
+      animation: slideIn 0.3s ease;
+    }
+    .toast.success { background: #00ba7c; }
+    .toast.error { background: #f4212e; }
+    .toast.info { background: #1d9bf0; }
+    @keyframes slideIn { from { transform: translateX(100%); opacity: 0; } to { transform: translateX(0); opacity: 1; } }
+
+    .empty-state { text-align: center; padding: 40px 20px; color: #999; }
+    .empty-state p { margin-bottom: 16px; }
+
+    .badge {
+      display: inline-block; padding: 2px 8px; border-radius: 10px;
+      font-size: 11px; font-weight: 600;
+    }
+    .badge-on { background: #e6f7ef; color: #00ba7c; }
+    .badge-off { background: #f8f8f8; color: #999; }
+
+    /* Test result */
+    .test-result {
+      margin-top: 8px; padding: 8px 12px; border-radius: 6px; font-size: 13px;
+      display: none;
+    }
+    .test-result.show { display: block; }
+    .test-result.ok { background: #e6f7ef; color: #00ba7c; }
+    .test-result.fail { background: #fef0f0; color: #f4212e; }
+  </style>
+</head>
+<body>
+<div class="container">
+  <div class="header">
+    <h1>🤖 AI 供应商配置</h1>
+    <a href="/" onclick="if(window.parent!==window){window.parent.closeAiConfigModal();return false;}">← 返回控制台</a>
+  </div>
+
+  <!-- 供应商列表 -->
+  <div class="card">
+    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px;">
+      <h2 style="margin-bottom:0;">已配置的供应商</h2>
+      <button class="btn-primary" onclick="showAddForm()">+ 添加供应商</button>
+    </div>
+    <div id="providerList" class="provider-list">
+      <div class="empty-state"><p>加载中…</p></div>
+    </div>
+  </div>
+
+  <!-- 添加/编辑表单 -->
+  <div class="card" id="formCard" style="display:none;">
+    <h2 id="formTitle">添加供应商</h2>
+    <form id="providerForm" onsubmit="handleSubmit(event)">
+      <input type="hidden" id="editId">
+      <div class="form-group">
+        <label>名称 *</label>
+        <input type="text" id="name" placeholder="如：OpenAI、DeepSeek、Grok…" maxlength="64" required>
+      </div>
+      <div class="form-row">
+        <div class="form-group">
+          <label>类型</label>
+          <select id="type">
+            <option value="openai-compatible">OpenAI 兼容</option>
+            <option value="anthropic">Anthropic 兼容</option>
+          </select>
+        </div>
+        <div class="form-group">
+          <label>默认模型 *</label>
+          <input type="text" id="defaultModel" placeholder="如：gpt-4o-mini、deepseek-chat…" required>
+        </div>
+      </div>
+      <div class="form-group">
+        <label>API Base URL *</label>
+        <input type="url" id="baseUrl" placeholder="https://api.openai.com" required>
+        <div class="hint">支持 OpenAI 兼容 API 的任何服务（/v1 会自动补全）</div>
+      </div>
+      <div class="form-group">
+        <label>API Key *</label>
+        <input type="password" id="apiKey" placeholder="sk-…" required>
+        <div class="hint">密钥仅保存在服务器端，前端不会明文展示</div>
+      </div>
+      <div class="toggle-row">
+        <label class="toggle">
+          <input type="checkbox" id="enabled" checked>
+          <span class="slider"></span>
+        </label>
+        <label for="enabled" style="cursor:pointer;">启用</label>
+      </div>
+      <div style="display:flex;gap:8px;">
+        <button type="submit" class="btn-primary" id="submitBtn">保存</button>
+        <button type="button" class="btn-secondary" onclick="hideForm()">取消</button>
+      </div>
+    </form>
+  </div>
+
+  <!-- 关于 -->
+  <div class="card">
+    <h2>使用说明</h2>
+    <p style="font-size:13px;color:#666;line-height:1.6;">
+      1. 在此页面添加至少一个 AI 供应商（OpenAI、DeepSeek、Grok 等均支持 OpenAI 兼容 API）。<br>
+      2. 在发推任务中，将内容模式切换为「AI 模式」，并选择供应商。<br>
+      3. 输入的推文内容将作为 AI 的提示词，AI 生成的文本即为最终发送的推文。<br>
+      4. AI 模式不会影响原有的静态文案发推功能——两者完全独立。
+    </p>
+  </div>
+</div>
+
+<div id="toastContainer"></div>
+
+<script>
+const API_BASE = '/api/ai';
+
+// ── Auth protected fetch ─────────────────────────────
+async function apiFetch(url, opts = {}) {
+  const res = await fetch(url, opts);
+  if (res.status === 401) {
+    // 需要登录，显示登录遮罩
+    showLoginOverlay();
+    throw new Error('需要访问密钥，请在下方输入');
+  }
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({}));
+    throw new Error(body.error || `请求失败 (${res.status})`);
+  }
+  return res.json();
+}
+
+// ── Login overlay ────────────────────────────────────
+function showLoginOverlay() {
+  if (document.getElementById('loginOverlay')) return;
+  const overlay = document.createElement('div');
+  overlay.id = 'loginOverlay';
+  overlay.innerHTML = `
+    <div style="position:fixed;inset:0;background:rgba(0,0,0,0.5);z-index:999;display:flex;align-items:center;justify-content:center;">
+      <div style="background:#fff;border-radius:12px;padding:32px;max-width:400px;width:90%;box-shadow:0 8px 32px rgba(0,0,0,0.2);">
+        <h3 style="margin-bottom:8px;">🔐 需要访问密钥</h3>
+        <p style="font-size:13px;color:#888;margin-bottom:16px;">此页面需要输入访问密钥后才能操作</p>
+        <input type="password" id="loginKey" placeholder="请输入访问密钥" style="width:100%;padding:10px 12px;border:1px solid #ddd;border-radius:6px;font-size:14px;margin-bottom:12px;">
+        <div id="loginError" style="color:#f4212e;font-size:12px;margin-bottom:12px;display:none;"></div>
+        <button id="loginBtn" class="btn-primary" style="width:100%;">解锁</button>
+      </div>
+    </div>
+  `;
+  document.body.appendChild(overlay);
+  document.getElementById('loginBtn').onclick = doLogin;
+  document.getElementById('loginKey').onkeydown = (e) => { if (e.key === 'Enter') doLogin(); };
+  document.getElementById('loginKey').focus();
+}
+
+async function doLogin() {
+  const key = document.getElementById('loginKey').value;
+  const errEl = document.getElementById('loginError');
+  errEl.style.display = 'none';
+  try {
+    const res = await fetch('/api/auth/login', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ key }),
+    });
+    const data = await res.json();
+    if (!data.ok) {
+      errEl.textContent = data.error || '密钥错误';
+      errEl.style.display = '';
+      return;
+    }
+    // 登录成功，移除遮罩
+    document.getElementById('loginOverlay').remove();
+    toast('已解锁', 'success');
+    // 重新加载数据
+    loadProviders();
+  } catch (e) {
+    errEl.textContent = '网络错误，请重试';
+    errEl.style.display = '';
+  }
+}
+
+// ── Toast ────────────────────────────────────────────
+function toast(msg, type = 'info') {
+  const el = document.createElement('div');
+  el.className = `toast ${type}`;
+  el.textContent = msg;
+  document.getElementById('toastContainer').appendChild(el);
+  setTimeout(() => el.remove(), 3000);
+}
+
+// ── Load providers ───────────────────────────────────
+async function loadProviders() {
+  const list = document.getElementById('providerList');
+  try {
+    const data = await apiFetch(`${API_BASE}/providers`);
+    const providers = data.providers || [];
+
+    if (providers.length === 0) {
+      list.innerHTML = `
+        <div class="empty-state">
+          <p>还没有配置 AI 供应商</p>
+          <button class="btn-primary" onclick="showAddForm()">+ 添加第一个供应商</button>
+        </div>`;
+      return;
+    }
+
+    list.innerHTML = providers.map(p => `
+      <div class="provider-item ${p.enabled ? '' : 'disabled'}">
+        <div class="provider-info">
+          <div class="provider-name">
+            ${esc(p.name)}
+            <span class="badge ${p.enabled ? 'badge-on' : 'badge-off'}">${p.enabled ? '启用' : '禁用'}</span>
+          </div>
+          <div class="provider-detail">
+            ${esc(p.type)} &nbsp;|&nbsp; ${esc(p.defaultModel)} &nbsp;|&nbsp; ${esc(p.baseUrl)}
+            ${p.hasApiKey ? ' &nbsp;|&nbsp; 🔑 已配置密钥' : ' &nbsp;|&nbsp; ⚠️ 未配置密钥'}
+          </div>
+          <div class="provider-detail">创建于 ${formatDate(p.createdAt)}</div>
+          <div id="test-${p.id}" class="test-result"></div>
+        </div>
+        <div class="provider-actions">
+          <button class="btn-sm btn-outline" onclick="testProvider('${p.id}')">测试</button>
+          <button class="btn-sm btn-secondary" onclick="editProvider('${p.id}')">编辑</button>
+          <button class="btn-sm btn-danger" onclick="deleteProvider('${p.id}')">删除</button>
+        </div>
+      </div>
+    `).join('');
+  } catch (err) {
+    list.innerHTML = `<div class="empty-state"><p>加载失败: ${esc(err.message)}</p></div>`;
+  }
+}
+
+// ── Form ─────────────────────────────────────────────
+function showAddForm() {
+  document.getElementById('formCard').style.display = '';
+  document.getElementById('formTitle').textContent = '添加供应商';
+  document.getElementById('submitBtn').textContent = '保存';
+  document.getElementById('providerForm').reset();
+  document.getElementById('editId').value = '';
+  document.getElementById('enabled').checked = true;
+  document.getElementById('formCard').scrollIntoView({ behavior: 'smooth' });
+}
+
+function hideForm() {
+  document.getElementById('formCard').style.display = 'none';
+}
+
+async function editProvider(id) {
+  try {
+    const data = await apiFetch(`${API_BASE}/providers/${id}`);
+    const p = data.provider;
+    document.getElementById('formCard').style.display = '';
+    document.getElementById('formTitle').textContent = '编辑供应商';
+    document.getElementById('submitBtn').textContent = '更新';
+    document.getElementById('editId').value = p.id;
+    document.getElementById('name').value = p.name;
+    document.getElementById('type').value = p.type;
+    document.getElementById('defaultModel').value = p.defaultModel;
+    document.getElementById('baseUrl').value = p.baseUrl;
+    document.getElementById('apiKey').value = '';  // 不回显
+    document.getElementById('apiKey').required = false;
+    document.getElementById('enabled').checked = p.enabled;
+    document.getElementById('formCard').scrollIntoView({ behavior: 'smooth' });
+  } catch (err) {
+    toast('加载供应商失败: ' + err.message, 'error');
+  }
+}
+
+async function handleSubmit(e) {
+  e.preventDefault();
+  const id = document.getElementById('editId').value;
+  const body = {
+    name: document.getElementById('name').value.trim(),
+    type: document.getElementById('type').value,
+    defaultModel: document.getElementById('defaultModel').value.trim(),
+    baseUrl: document.getElementById('baseUrl').value.trim(),
+    apiKey: document.getElementById('apiKey').value.trim(),
+    enabled: document.getElementById('enabled').checked,
+  };
+
+  // 编辑时若未填 key，不发送
+  if (id && !body.apiKey) delete body.apiKey;
+
+  try {
+    const url = id ? `${API_BASE}/providers/${id}` : `${API_BASE}/providers`;
+    const method = id ? 'PUT' : 'POST';
+    const data = await apiFetch(url, {
+      method,
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+    toast(id ? '供应商已更新' : '供应商已创建', 'success');
+    hideForm();
+    await loadProviders();
+  } catch (err) {
+    toast(err.message, 'error');
+  }
+}
+
+// ── Delete ───────────────────────────────────────────
+async function deleteProvider(id) {
+  if (!confirm('确定要删除此供应商吗？已关联的发推任务将无法使用 AI 模式。')) return;
+  try {
+    await apiFetch(`${API_BASE}/providers/${id}`, { method: 'DELETE' });
+    toast('供应商已删除', 'success');
+    await loadProviders();
+  } catch (err) {
+    toast(err.message, 'error');
+  }
+}
+
+// ── Test ─────────────────────────────────────────────
+async function testProvider(id) {
+  const resultEl = document.getElementById(`test-${id}`);
+  resultEl.className = 'test-result show';
+  resultEl.textContent = '测试中…';
+  resultEl.style.color = '#1d9bf0';
+
+  try {
+    const data = await apiFetch(`${API_BASE}/providers/${id}/test`, { method: 'POST' });
+    if (data.ok) {
+      resultEl.className = 'test-result show ok';
+      resultEl.textContent = '✓ ' + data.message;
+    } else {
+      resultEl.className = 'test-result show fail';
+      resultEl.textContent = '✗ ' + (data.message || data.error || '测试失败');
+    }
+  } catch (err) {
+    resultEl.className = 'test-result show fail';
+    resultEl.textContent = '✗ ' + err.message;
+  }
+}
+
+// ── Helpers ──────────────────────────────────────────
+function esc(s) {
+  if (!s) return '';
+  const d = document.createElement('div');
+  d.textContent = String(s);
+  return d.innerHTML;
+}
+
+function formatDate(iso) {
+  if (!iso) return '-';
+  try {
+    return new Date(iso).toLocaleString('zh-CN');
+  } catch { return iso; }
+}
+
+// ── Init ─────────────────────────────────────────────
+loadProviders();
+</script>
+</body>
+</html>

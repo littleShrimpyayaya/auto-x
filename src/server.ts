@@ -18,6 +18,15 @@ import {
   type AutomationConfig,
   type PostConfig,
 } from './auto-config.js';
+import {
+  listSafeProviders,
+  createAiProvider,
+  updateAiProvider,
+  deleteAiProvider,
+  getSafeProvider,
+  loadAiProviders,
+} from './ai-config.js';
+import { generateTweetText, testProviderConnection } from './ai-service.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -837,6 +846,7 @@ export function createServer(taskManager: TaskManager): express.Express {
         intervalMinutes: body.intervalMinutes,
         enabled: body.enabled,
         contentMode: body.contentMode,
+        model: body.model,
       });
       res.json({ ok: true, task });
     } catch (err: any) {
@@ -884,6 +894,131 @@ export function createServer(taskManager: TaskManager): express.Express {
     } catch (err: any) {
       const msg = err.message || String(err);
       res.status(msg.includes('不存在') ? 404 : 400).json({ error: msg });
+    }
+  });
+
+  // ── AI 配置页面（独立 HTML，不受 Flutter SPA 路由影响）────
+  app.get('/ai-config', (_req, res) => {
+    res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate');
+    res.sendFile(path.join(__dirname, 'public', 'ai-config.html'));
+  });
+
+  // ── AI 供应商 CRUD ──────────────────────────────────
+
+  app.get('/api/ai/providers', (_req, res) => {
+    try {
+      res.json({ ok: true, providers: listSafeProviders() });
+    } catch (err: any) {
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  app.get('/api/ai/providers/:id', (req, res) => {
+    try {
+      const p = getSafeProvider(req.params.id);
+      if (!p) {
+        res.status(404).json({ error: '供应商不存在' });
+        return;
+      }
+      res.json({ ok: true, provider: p });
+    } catch (err: any) {
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  app.post('/api/ai/providers', async (req, res) => {
+    try {
+      const { name, type, apiKey, baseUrl, defaultModel, enabled } = req.body || {};
+      const provider = await createAiProvider({
+        name,
+        type,
+        apiKey,
+        baseUrl,
+        defaultModel,
+        enabled,
+      });
+      res.json({ ok: true, provider: { ...provider, apiKey: '••••••••' } });
+    } catch (err: any) {
+      res.status(400).json({ error: err.message });
+    }
+  });
+
+  app.put('/api/ai/providers/:id', async (req, res) => {
+    try {
+      const { name, type, apiKey, baseUrl, defaultModel, enabled } = req.body || {};
+      const provider = await updateAiProvider(req.params.id, {
+        name,
+        type,
+        apiKey,
+        baseUrl,
+        defaultModel,
+        enabled,
+      });
+      res.json({ ok: true, provider: { ...provider, apiKey: '••••••••' } });
+    } catch (err: any) {
+      const status = (err.message || '').includes('不存在') ? 404 : 400;
+      res.status(status).json({ error: err.message });
+    }
+  });
+
+  app.delete('/api/ai/providers/:id', async (req, res) => {
+    try {
+      await deleteAiProvider(req.params.id);
+      res.json({ ok: true, message: '已删除' });
+    } catch (err: any) {
+      const status = (err.message || '').includes('不存在') ? 404 : 400;
+      res.status(status).json({ error: err.message });
+    }
+  });
+
+  app.post('/api/ai/providers/:id/test', async (req, res) => {
+    try {
+      const result = await testProviderConnection(req.params.id);
+      res.json({ ok: result.ok, message: result.message });
+    } catch (err: any) {
+      res.status(500).json({ ok: false, error: err.message });
+    }
+  });
+
+  // ── AI 生成（手动测试 / 即兴发推预览）───────────────
+
+  app.post('/api/ai/generate', async (req, res) => {
+    try {
+      const { providerId, model, prompt, systemPrompt, maxTokens, temperature } = req.body || {};
+
+      if (!providerId) {
+        // 未指定则用第一个启用的供应商
+        const providers = loadAiProviders().filter((p) => p.enabled && p.apiKey);
+        if (providers.length === 0) {
+          res.status(400).json({ error: '没有可用的 AI 供应商' });
+          return;
+        }
+        // 使用默认第一个
+      }
+
+      if (!prompt || !String(prompt).trim()) {
+        res.status(400).json({ error: 'prompt 不能为空' });
+        return;
+      }
+
+      const pid = providerId || loadAiProviders().filter((p) => p.enabled && p.apiKey)[0]?.id;
+      if (!pid) {
+        res.status(400).json({ error: '没有可用的 AI 供应商' });
+        return;
+      }
+
+      const result = await generateTweetText({
+        providerId: pid,
+        model,
+        prompt: String(prompt).trim(),
+        systemPrompt,
+        maxTokens,
+        temperature,
+      });
+
+      res.json(result);
+    } catch (err: any) {
+      res.status(500).json({ ok: false, error: err.message });
     }
   });
 

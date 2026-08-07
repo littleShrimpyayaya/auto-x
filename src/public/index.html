@@ -265,7 +265,8 @@
       <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-bottom:8px;">
         <h2 style="margin:0;">📋 发推任务</h2>
         <span style="font-size:12px;color:#888;" id="post-tasks-count">0 / 10</span>
-        <button class="btn-primary" id="btn-add-post-task" onclick="createPostTask()" style="margin-left:auto;font-size:13px;padding:8px 16px;">+ 添加任务</button>
+        <button class="btn-outline" onclick="openAiConfigModal()" style="font-size:13px;padding:8px 12px;" title="配置 AI 供应商">🤖 AI 配置</button>
+        <button class="btn-primary" id="btn-add-post-task" onclick="createPostTask()" style="font-size:13px;padding:8px 16px;">+ 添加任务</button>
       </div>
       <div style="font-size:13px;color:#666;margin-bottom:10px;line-height:1.5;">
         添加独立自动发推任务（不同文案 / 周期，最多 10 个）。展开后修改文案点<strong>保存</strong>会立即写入，下次定时发送会用最新内容。无活跃时段限制，到点即发。
@@ -456,12 +457,18 @@
         // 已启动过：仅恢复轮询
         if (!statusPollTimer) statusPollTimer = setInterval(refreshStatus, 10000);
         refreshStatus();
-        loadPostTasksList();
+        // 任务列表与供应商并行加载，完成后统一渲染，避免下拉为空
+        Promise.all([loadPostTasksList(), loadAiProviders()]).then(() => {
+          renderPostTasksList();
+        });
         loadAutoConfig();
         return;
       }
       appBooted = true;
-      loadPostTasksList();
+      // 首次启动也要拉 AI 供应商；与任务列表并行，完成后重渲染保证模型回填
+      Promise.all([loadPostTasksList(), loadAiProviders()]).then(() => {
+        renderPostTasksList();
+      });
       loadAutoConfig();
       refreshStatus();
       statusPollTimer = setInterval(refreshStatus, 10000);
@@ -1691,12 +1698,18 @@
     let postTasksCache = [];
     let postTaskExpanded = new Set();
     let postTaskEditingId = null;
+    /** 启用且有 Key 的供应商（下拉可选） */
+    let aiProvidersCache = [];
+    /** 全部供应商（用于回显已保存但当前不可用的项） */
+    let aiProvidersAllCache = [];
 
     function mergePostTasksFromStatus(statusTasks) {
       // 用 status 更新摘要字段，保留展开态
       if (!postTasksCache.length && statusTasks.length) {
-        // 首次：拉完整配置
-        loadPostTasksList();
+        // 首次：拉完整配置 + 供应商（并行后统一渲染）
+        Promise.all([loadPostTasksList(), loadAiProviders()]).then(() => {
+          renderPostTasksList();
+        });
         return;
       }
       const byId = new Map(statusTasks.map(t => [t.id, t]));
@@ -1707,6 +1720,10 @@
           ...t,
           enabled: s.enabled,
           intervalMinutes: s.intervalMinutes,
+          contentMode: s.contentMode || t.contentMode || 'static',
+          // status 始终带 model；缺字段时保留本地缓存
+          model: s.model !== undefined ? s.model : (t.model || null),
+          contentPreview: s.contentPreview,
           lastPostAt: s.lastPostAt,
           lastResult: s.lastResult,
           lastError: s.lastError,
@@ -1724,6 +1741,7 @@
             enabled: s.enabled,
             intervalMinutes: s.intervalMinutes,
             contentMode: s.contentMode || 'static',
+            model: s.model || null,
             content: s.contentPreview || '',
             lastPostAt: s.lastPostAt,
             lastResult: s.lastResult,
@@ -1745,9 +1763,83 @@
         const data = await res.json();
         if (data.ok && Array.isArray(data.tasks)) {
           postTasksCache = data.tasks;
-          renderPostTasksList();
+          // 不在此处强制 render：调用方在供应商就绪后统一渲染，避免空下拉闪一下
         }
       } catch { /* ignore */ }
+    }
+
+    async function loadAiProviders() {
+      try {
+        const res = await fetch('/api/ai/providers');
+        const data = await res.json();
+        if (data.ok && Array.isArray(data.providers)) {
+          // 任务配置下拉：启用且有 Key 的供应商；保存的 model 即使后来被禁用也要能回显
+          aiProvidersCache = data.providers.filter(p => p.enabled && p.hasApiKey);
+          aiProvidersAllCache = data.providers;
+          console.log('[AI] 供应商已加载:', aiProvidersCache.length, '个可用 / 共', data.providers.length);
+        } else {
+          console.warn('[AI] 加载供应商失败:', data.error || '未知');
+        }
+      } catch (e) {
+        console.warn('[AI] 加载供应商异常:', e.message);
+      }
+    }
+
+    /** 构建任务「供应商」下拉 options，优先选中 savedModelId */
+    function buildProviderOptionsHtml(savedModelId) {
+      const modelId = savedModelId || '';
+      const available = aiProvidersCache.slice();
+      // 若已保存的供应商当前不在「可用」列表（被禁用/无 key），仍插入一项以便回显
+      if (modelId && !available.some(p => p.id === modelId)) {
+        const orphan = (typeof aiProvidersAllCache !== 'undefined' ? aiProvidersAllCache : [])
+          .find(p => p.id === modelId);
+        if (orphan) {
+          available.unshift(orphan);
+        } else {
+          available.unshift({
+            id: modelId,
+            name: '已保存供应商（当前不可用）',
+            defaultModel: modelId.slice(0, 12),
+          });
+        }
+      }
+      if (available.length === 0) {
+        return '<option value="">— 无可用供应商 —</option>';
+      }
+      let html = '<option value="">— 请选择供应商 —</option>';
+      html += available.map(p =>
+        '<option value="' + escHtml(p.id) + '"' + (modelId === p.id ? ' selected' : '') + '>' +
+        escHtml(p.name) + ' (' + escHtml(p.defaultModel || '') + ')</option>'
+      ).join('');
+      return html;
+    }
+
+    // ── AI 配置弹窗 ─────────────────────────────────────
+
+    async function openAiConfigModal() {
+      const modal = document.getElementById('ai-config-modal');
+      if (!modal) return;
+      modal.style.display = 'flex';
+      // 用 srcdoc 加载页面内容（绕过 nginx X-Frame-Options: DENY）
+      const iframe = document.getElementById('ai-config-iframe');
+      if (!iframe) return;
+      try {
+        const res = await fetch('/ai-config');
+        const html = await res.text();
+        iframe.srcdoc = html;
+      } catch (e) {
+        iframe.srcdoc = '<p style="padding:20px;color:red;">加载失败: ' + e.message + '</p>';
+      }
+    }
+
+    function closeAiConfigModal() {
+      const modal = document.getElementById('ai-config-modal');
+      if (!modal) return;
+      modal.style.display = 'none';
+      // 关闭后刷新供应商列表，并重新渲染任务列表（保留已选 model）
+      loadAiProviders().then(() => {
+        renderPostTasksList();
+      });
     }
 
     function renderPostTasksStatus(tasks, pageQueue) {
@@ -1809,6 +1901,13 @@
 
         const contentVal = escHtml(t.content || '');
         const nameVal = escHtml(t.name || '');
+        const contentMode = t.contentMode === 'ai' ? 'ai' : 'static';
+        const modelId = t.model || '';
+        const providerOpts = buildProviderOptionsHtml(modelId);
+        // display 只能写一份：先前 display:none + display:flex 会导致静态模式也始终显示供应商
+        const providerWrapStyle = contentMode === 'ai'
+          ? 'display:flex;align-items:center;gap:4px;'
+          : 'display:none;align-items:center;gap:4px;';
 
         const body =
           '<div style="padding:0 12px 12px 12px;border-top:1px solid #eee;background:#fff;" onclick="event.stopPropagation()">' +
@@ -1823,10 +1922,30 @@
           '<input type="checkbox" id="pt-enabled-' + escHtml(t.id) + '" ' + (t.enabled ? 'checked' : '') +
           '> 启用定时</label>' +
           '</div>' +
-          '<textarea id="pt-content-' + escHtml(t.id) + '" maxlength="280" rows="3" placeholder="推文内容" ' +
+          // ── AI 模式切换 ──
+          '<div style="display:flex;flex-wrap:wrap;gap:8px;margin:4px 0 8px;align-items:center;">' +
+          '<label style="font-size:12px;color:#666;">内容模式</label>' +
+          '<select id="pt-mode-' + escHtml(t.id) + '" onchange="onPostModeChange(\'' + escHtml(t.id) + '\')" ' +
+          'style="padding:5px 8px;border:1px solid #ddd;border-radius:5px;font-size:13px;">' +
+          '<option value="static"' + (contentMode === 'static' ? ' selected' : '') + '>📝 静态文案</option>' +
+          '<option value="ai"' + (contentMode === 'ai' ? ' selected' : '') + '>🤖 AI 生成</option>' +
+          '</select>' +
+          '<span id="pt-provider-wrap-' + escHtml(t.id) + '" style="' + providerWrapStyle + '">' +
+          '<label style="font-size:12px;color:#666;">供应商</label>' +
+          '<select id="pt-model-' + escHtml(t.id) + '" style="padding:5px 8px;border:1px solid #ddd;border-radius:5px;font-size:13px;">' +
+          providerOpts + '</select>' +
+          '</span>' +
+          (aiProvidersCache.length === 0 ? '<span style="font-size:11px;color:#f4212e;">⚠ 未配置 AI 供应商，<a href="javascript:openAiConfigModal()" style="color:#1d9bf0;">去配置 →</a></span>' : '') +
+          '</div>' +
+          // ── 文案/提示词输入 ──
+          '<textarea id="pt-content-' + escHtml(t.id) + '"' +
+          (contentMode === 'ai' ? '' : ' maxlength="280"') +
+          ' rows="3" placeholder="' + (contentMode === 'ai' ? '给 AI 的提示词，如：写一条关于 xxx 的推文，风格幽默' : '推文内容') + '" ' +
           'style="width:100%;padding:10px;border:1px solid #ddd;border-radius:6px;font-size:13px;box-sizing:border-box;resize:vertical;">' +
           contentVal + '</textarea>' +
-          '<div style="font-size:11px;color:#888;margin:4px 0 8px;">上次: ' +
+          '<div style="font-size:11px;color:#888;margin:4px 0 8px;">' +
+          (contentMode === 'ai' ? '🤖 <span style="color:#1d9bf0;">提示词不限字数，AI 生成的推文会控制在 280 字以内发送</span> · ' : '') +
+          '上次: ' +
           (t.lastPostAt ? escHtml(formatBeijing(t.lastPostAt)) : '—') +
           (t.lastResult ? ' · ' + escHtml(String(t.lastResult).slice(0, 50)) : '') +
           (t._nextRunAt ? ' · 下次 ' + escHtml(formatBeijing(t._nextRunAt)) : '') +
@@ -1842,11 +1961,45 @@
       }).join('');
     }
 
-    function togglePostTaskExpand(id) {
-      if (postTaskExpanded.has(id)) postTaskExpanded.delete(id);
-      else postTaskExpanded.add(id);
+    async function togglePostTaskExpand(id) {
+      if (postTaskExpanded.has(id)) {
+        postTaskExpanded.delete(id);
+      } else {
+        postTaskExpanded.add(id);
+        // 展开编辑时确保供应商已加载，否则 AI 模式下拉为空
+        if (!aiProvidersAllCache.length && !aiProvidersCache.length) {
+          await loadAiProviders();
+        }
+      }
       postTaskEditingId = postTaskExpanded.size ? id : null;
       renderPostTasksList();
+    }
+
+    async function onPostModeChange(id) {
+      const modeEl = document.getElementById('pt-mode-' + id);
+      const wrapEl = document.getElementById('pt-provider-wrap-' + id);
+      const contentEl = document.getElementById('pt-content-' + id);
+      if (!modeEl || !wrapEl || !contentEl) return;
+      const isAi = modeEl.value === 'ai';
+      if (isAi && aiProvidersCache.length === 0 && aiProvidersAllCache.length === 0) {
+        await loadAiProviders();
+      }
+      // 刷新供应商下拉，并回填该任务已保存的 model
+      if (isAi) {
+        const modelEl = document.getElementById('pt-model-' + id);
+        const task = postTasksCache.find(t => t.id === id);
+        const savedModel = (task && task.model) || (modelEl && modelEl.value) || '';
+        if (modelEl) {
+          modelEl.innerHTML = buildProviderOptionsHtml(savedModel);
+        }
+      }
+      wrapEl.style.display = isAi ? 'flex' : 'none';
+      if (isAi) {
+        contentEl.removeAttribute('maxlength');
+      } else {
+        contentEl.maxLength = 280;
+      }
+      contentEl.placeholder = isAi ? '给 AI 的提示词，如：写一条关于 xxx 的推文，风格幽默' : '推文内容';
     }
 
     async function createPostTask() {
@@ -1889,32 +2042,43 @@
       const intervalEl = document.getElementById('pt-interval-' + id);
       const enabledEl = document.getElementById('pt-enabled-' + id);
       const contentEl = document.getElementById('pt-content-' + id);
+      const modeEl = document.getElementById('pt-mode-' + id);
+      const modelEl = document.getElementById('pt-model-' + id);
       const st = document.getElementById('pt-status-' + id);
       if (!contentEl) return;
       const content = contentEl.value;
+      const contentMode = modeEl ? modeEl.value : 'static';
+      // AI 模式才提交 model；静态模式不传 model，避免把已选供应商清掉
+      const model = (contentMode === 'ai' && modelEl) ? (modelEl.value || null) : undefined;
       const intervalMinutes = parseInt(intervalEl && intervalEl.value, 10) || 60;
       const enabled = !!(enabledEl && enabledEl.checked);
       if (enabled && !content.trim()) {
         showToast('启用时内容不能为空', 'error');
         return;
       }
-      if (content.length > 280) {
+      if (contentMode !== 'ai' && content.length > 280) {
         showToast('超过 280 字符', 'error');
+        return;
+      }
+      if (contentMode === 'ai' && enabled && !model) {
+        showToast('AI 模式需要选择一个供应商', 'error');
         return;
       }
       if (st) { st.textContent = 'Saving...'; st.style.color = '#888'; }
       postTaskEditingId = id;
       try {
+        const payload = {
+          name: nameEl ? nameEl.value : undefined,
+          content,
+          intervalMinutes,
+          enabled,
+          contentMode,
+        };
+        if (model !== undefined) payload.model = model;
         const res = await fetch('/api/post/tasks/' + encodeURIComponent(id), {
           method: 'PATCH',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            name: nameEl ? nameEl.value : undefined,
-            content,
-            intervalMinutes,
-            enabled,
-            contentMode: 'static',
-          }),
+          body: JSON.stringify(payload),
         });
         const data = await res.json();
         if (!res.ok || !data.ok) {
@@ -1966,6 +2130,7 @@
         showToast('已删除', 'success');
         addLog('已删除发推任务: ' + id);
         await loadPostTasksList();
+        renderPostTasksList();
         refreshStatus();
       } catch {
         showToast('删除失败', 'error');
@@ -2004,5 +2169,16 @@
       if (ok) bootApp();
     })();
   </script>
+
+  <!-- AI 配置弹窗 -->
+  <div id="ai-config-modal" style="display:none;position:fixed;inset:0;z-index:9999;background:rgba(0,0,0,0.5);align-items:center;justify-content:center;">
+    <div style="background:#fff;border-radius:12px;width:95%;max-width:960px;max-height:90vh;display:flex;flex-direction:column;box-shadow:0 8px 32px rgba(0,0,0,0.2);">
+      <div style="display:flex;align-items:center;justify-content:space-between;padding:16px 20px;border-bottom:1px solid #eee;">
+        <h3 style="margin:0;font-size:18px;">🤖 AI 供应商配置</h3>
+        <button onclick="closeAiConfigModal()" style="background:none;border:none;font-size:24px;cursor:pointer;color:#888;padding:0 4px;">&times;</button>
+      </div>
+      <iframe id="ai-config-iframe" src="about:blank" style="flex:1;border:none;min-height:500px;"></iframe>
+    </div>
+  </div>
 </body>
 </html>
