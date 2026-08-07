@@ -849,6 +849,20 @@ export class TaskManager {
         this.followBackScanResults = results;
         this.followBackScanStatus = 'done';
         console.log(`[TaskManager] 后台扫描完成: ${results.length} 个待回关（仅内存，未落库）`);
+        if (results.length > 0) {
+          console.log(`[TaskManager] 待回关用户:`);
+          for (const u of results) {
+            const src =
+              u.source === 'verified_followers'
+                ? '认证'
+                : u.source === 'followers'
+                  ? '关注者'
+                  : '?';
+            console.log(
+              `[TaskManager]   @${u.username}  name="${u.name || ''}"  id=${u.userId}  [${src}]`,
+            );
+          }
+        }
       })
       .catch((err) => {
         this.followBackScanStatus = 'error';
@@ -982,6 +996,20 @@ export class TaskManager {
       this.followBackScanResults = results;
       this.followBackScanStatus = 'done';
       console.log(`[AutoFollowBack] 扫描完成: ${results.length} 个待回关`);
+      if (results.length > 0) {
+        console.log(`[AutoFollowBack] 待回关用户清单:`);
+        for (const u of results) {
+          const src =
+            u.source === 'verified_followers'
+              ? '认证'
+              : u.source === 'followers'
+                ? '关注者'
+                : '?';
+          console.log(
+            `[AutoFollowBack]   @${u.username}  name="${u.name || ''}"  id=${u.userId}  [${src}]`,
+          );
+        }
+      }
 
       if (results.length === 0) {
         this.followBackAutoLastResult = '扫描完成：0 个待回关';

@@ -989,6 +989,26 @@ export class BrowserClient {
         ` + 关注者页 ${needFollow.filter((u) => u.source === 'followers').length}` +
         `；两页共查看约 ${totalSeenAll} 人）`,
     );
+    // 汇总清单：方便在长滚动日志后一眼看到全部待回关用户
+    if (needFollow.length > 0) {
+      console.log(`[BrowserClient] ========== 待回关清单（共 ${needFollow.length} 人）==========`);
+      needFollow.forEach((u, i) => {
+        const src =
+          u.source === 'verified_followers'
+            ? '认证关注者'
+            : u.source === 'followers'
+              ? '关注者'
+              : '?';
+        console.log(
+          `[BrowserClient]   ${i + 1}. @${u.username}` +
+            `  name="${u.name || ''}"` +
+            `  userId=${u.userId}` +
+            `  source=${src}` +
+            `  img=${u.profileImageUrl ? 'yes' : 'no'}`,
+        );
+      });
+      console.log(`[BrowserClient] ========== 待回关清单结束 ==========`);
+    }
     return needFollow;
   }
 
