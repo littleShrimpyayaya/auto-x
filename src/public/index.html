@@ -198,6 +198,13 @@
             <input type="number" id="auto-action-max" min="1" max="60" value="25" style="width: 55px; font-size: 12px; padding: 4px;">
             <span style="font-size: 12px;">sec</span>
           </div>
+          <div class="section-row" style="margin-top: 8px;">
+            <span style="font-size: 12px; min-width: 75px;">Active:</span>
+            <input type="number" id="auto-active-start" min="0" max="23" value="9" style="width: 55px; font-size: 12px; padding: 4px;">
+            <span style="font-size: 12px;">~</span>
+            <input type="number" id="auto-active-end" min="0" max="24" value="23" style="width: 55px; font-size: 12px; padding: 4px;">
+            <span style="font-size: 12px;">o'clock</span>
+          </div>
           <button class="btn-primary" onclick="saveAutoConfig()" style="margin-top: 8px; font-size: 12px; padding: 4px 12px;">Save</button>
         </div>
       </div>
@@ -659,6 +666,8 @@
         document.getElementById('auto-interval-max').value = cfg.batchIntervalMaxMinutes;
         document.getElementById('auto-action-min').value = cfg.actionIntervalMinSeconds;
         document.getElementById('auto-action-max').value = cfg.actionIntervalMaxSeconds;
+        document.getElementById('auto-active-start').value = cfg.activeHoursStart ?? 9;
+        document.getElementById('auto-active-end').value = cfg.activeHoursEnd ?? 23;
       } catch { /* server not ready */ }
     }
 
@@ -677,6 +686,8 @@
             batchIntervalMaxMinutes: parseInt(document.getElementById('auto-interval-max').value),
             actionIntervalMinSeconds: parseInt(document.getElementById('auto-action-min').value),
             actionIntervalMaxSeconds: parseInt(document.getElementById('auto-action-max').value),
+            activeHoursStart: parseInt(document.getElementById('auto-active-start').value),
+            activeHoursEnd: parseInt(document.getElementById('auto-active-end').value),
           }),
         });
         const data = await res.json();
