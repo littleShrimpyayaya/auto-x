@@ -520,15 +520,6 @@ export class BrowserClient {
     for (let i = 0; i < MAX_SCROLLS; i++) {
       // 扫描当前视口：只收「需要回关」的 UserCell，同时统计所有出现过的粉丝
       const batch = await this.page!.evaluate(() => {
-        type CellResult = {
-          username: string;
-          name: string;
-          profileImageUrl?: string;
-          needsFollowBack: boolean;
-          buttonHint: string;
-          userId: string;
-        };
-
         const SKIP = new Set(['home', 'explore', 'notifications', 'messages', 'i', 'settings', 'compose']);
 
         /** 从各种 DOM 属性中提取用户数字 ID */
@@ -601,15 +592,20 @@ export class BrowserClient {
           return '';
         }
 
-        /** 是否为「可关注」按钮 — 排除已关注/请求中/取关，其余 Follow 系列都视为候选。
-         *  后续用 GraphQL 的 followedBy / following 字段过滤掉推荐用户和已关注者。 */
-        function isFollowBackButton(btn: Element): boolean {
+        /**
+         * 按钮分类：
+         * - follow_back: 「回关 / Follow back」—— 明确是粉丝待回关
+         * - follow:      「关注 / Follow」—— 粉丝页也可能出现，但推荐区更常见，需二次确认
+         * - none:        已关注 / 无关按钮
+         */
+        function classifyFollowButton(btn: Element): 'follow_back' | 'follow' | 'none' {
           const rawText = (btn.textContent || '').replace(/\s+/g, ' ').trim();
           const text = rawText.toLowerCase();
           const aria = ((btn as HTMLElement).getAttribute('aria-label') || '').toLowerCase();
           const testId = ((btn as HTMLElement).getAttribute('data-testid') || '').toLowerCase();
+          const spanText = (btn.querySelector('span')?.textContent || '').replace(/\s+/g, ' ').trim().toLowerCase();
 
-          // 已关注 / 请求中 / 取关 —— 明确排除
+          // 已关注 / 请求中 / 取关
           if (
             text === 'following' ||
             text === 'pending' ||
@@ -617,41 +613,86 @@ export class BrowserClient {
             text === '正在关注' ||
             text === '已请求' ||
             text === '取消关注' ||
+            spanText === 'following' ||
+            spanText === '正在关注' ||
             testId.includes('unfollow') ||
             aria.includes('following @') ||
             aria.includes('unfollow @') ||
             aria.includes('正在关注')
           ) {
-            return false;
+            return 'none';
           }
 
-          // Follow / 关注 / Follow back / 回关 —— 全部视为候选
-          // （粉丝列表页面上，非互关粉丝的按钮就是普通的 "Follow"，不是 "Follow back"）
+          // 明确「回关」
+          if (
+            text === 'follow back' ||
+            text === '回关' ||
+            spanText === 'follow back' ||
+            spanText === '回关' ||
+            /^follow\s+back\s+@/.test(aria) ||
+            aria.startsWith('回关')
+          ) {
+            return 'follow_back';
+          }
+
+          // 普通「关注 / Follow」（可能是推荐）
           if (
             text === 'follow' ||
-            text === 'follow back' ||
             text === '关注' ||
-            text === '回关'
+            spanText === 'follow' ||
+            spanText === '关注' ||
+            /^follow\s+@/.test(aria) ||
+            aria.startsWith('关注') ||
+            /-follow$/.test(testId)
           ) {
-            return true;
+            return 'follow';
           }
 
-          // data-testid 形如 "123456-follow"
-          if (/-follow$/.test(testId)) {
-            return true;
-          }
+          return 'none';
+        }
 
-          // aria-label: "Follow @user" / "Follow back @user" / "回关 @user"
-          if (
-            /^follow(\s+back)?\s+@/.test(aria) ||
-            aria.startsWith('回关') ||
-            aria.startsWith('关注')
-          ) {
-            return true;
+        /** 是否落在「推荐关注 / Who to follow」等非粉丝列表区域 */
+        function isInSuggestedSection(cell: Element): boolean {
+          // 向上找标题文案
+          let el: Element | null = cell;
+          for (let d = 0; d < 12 && el; d++, el = el.parentElement) {
+            const aria = (el.getAttribute('aria-label') || '').toLowerCase();
+            if (
+              aria.includes('who to follow') ||
+              aria.includes('suggested') ||
+              aria.includes('推荐') ||
+              aria.includes('你可能喜欢')
+            ) {
+              return true;
+            }
           }
-
+          // 附近的 section 标题
+          const section = cell.closest('section') || cell.closest('[role="region"]');
+          if (section) {
+            const heading = (section.querySelector('h1, h2, span')?.textContent || '').toLowerCase();
+            if (
+              heading.includes('who to follow') ||
+              heading.includes('suggested') ||
+              heading.includes('推荐关注') ||
+              heading.includes('你可能喜欢') ||
+              heading.includes('to follow')
+            ) {
+              return true;
+            }
+          }
           return false;
         }
+
+        type CellResult = {
+          username: string;
+          name: string;
+          profileImageUrl?: string;
+          needsFollowBack: boolean;
+          buttonKind: 'follow_back' | 'follow' | 'none';
+          buttonHint: string;
+          userId: string;
+          suggested: boolean;
+        };
 
         const results: CellResult[] = [];
         const cells = document.querySelectorAll('[data-testid="UserCell"]');
@@ -678,9 +719,11 @@ export class BrowserClient {
             cell.querySelector('img[src*="twimg.com"]');
           const profileImageUrl = img?.getAttribute('src') || undefined;
 
+          const suggested = isInSuggestedSection(cell);
+
           // 找关注相关按钮，同时提取用户 ID
           const allBtns = cell.querySelectorAll('button, [role="button"], [data-testid*="follow"]');
-          let needsFollowBack = false;
+          let buttonKind: 'follow_back' | 'follow' | 'none' = 'none';
           let buttonHint = '';
           let domUserId = '';
           for (const btn of allBtns) {
@@ -693,9 +736,11 @@ export class BrowserClient {
             if (!domUserId) {
               domUserId = extractUserId(cell, btn);
             }
-            if (isFollowBackButton(btn)) {
-              needsFollowBack = true;
-              break;
+            const kind = classifyFollowButton(btn);
+            if (kind !== 'none') {
+              buttonKind = kind;
+              // 优先记回关按钮
+              if (kind === 'follow_back') break;
             }
           }
 
@@ -707,13 +752,18 @@ export class BrowserClient {
             }
           }
 
+          // 初步：明确回关 / 普通关注都先标 needs，后面用 GraphQL + suggested 再滤
+          const needsFollowBack = buttonKind === 'follow_back' || buttonKind === 'follow';
+
           results.push({
             username,
             name: name || username,
             profileImageUrl,
             needsFollowBack,
+            buttonKind,
             buttonHint,
             userId: domUserId,
+            suggested,
           });
         }
         return results;
@@ -725,7 +775,6 @@ export class BrowserClient {
 
         if (!user.needsFollowBack) continue;
         if (needFollowKeys.has(key)) continue;
-        needFollowKeys.add(key);
 
         const gql = gqlByUsername.get(key);
         // GraphQL 若明确说已经 following，以 GraphQL 为准跳过（避免误检）
@@ -734,12 +783,35 @@ export class BrowserClient {
           continue;
         }
 
-        // 用 GraphQL 的 followedBy 字段过滤推荐用户（非粉丝混入粉丝列表）
-        // followedBy === false 意味着对方没有关注我们 → 不是粉丝，跳过
-        if (gql?.followedBy === false) {
-          console.log(`[BrowserClient] ⏭ 跳过 @${user.username} — GraphQL 显示非粉丝 (followedBy=false)，可能为推荐用户`);
+        // 推荐区直接跳过
+        if (user.suggested) {
+          console.log(`[BrowserClient] ⏭ 跳过 @${user.username} — 位于推荐/Suggested 区域`);
           continue;
         }
+
+        // 按钮策略：
+        // - 「回关 / Follow back」：收入（对方已关注你）
+        // - 「关注 / Follow」：仅当 GraphQL 确认 followedBy===true 才收入
+        //   （否则多半是混入的推荐用户，日志里 @SamsungSG 等即此类）
+        if (user.buttonKind === 'follow') {
+          if (gql?.followedBy !== true) {
+            console.log(
+              `[BrowserClient] ⏭ 跳过 @${user.username} — 按钮是「关注/Follow」且无 followedBy 证据` +
+              ` (gql.followedBy=${gql?.followedBy ?? 'n/a'})，疑似推荐`,
+            );
+            continue;
+          }
+        } else if (user.buttonKind === 'follow_back') {
+          // 回关若 GraphQL 明确非粉丝则跳过（极少见）
+          if (gql?.followedBy === false) {
+            console.log(`[BrowserClient] ⏭ 跳过 @${user.username} — 回关按钮但 GraphQL followedBy=false`);
+            continue;
+          }
+        } else {
+          continue;
+        }
+
+        needFollowKeys.add(key);
 
         // ID 优先级：GraphQL → idCache → DOM 提取 → '0'
         const userIdSource = gql?.id ? 'gql' : this.idCache.get(user.username) ? 'cache' : user.userId ? 'dom' : 'none';
@@ -749,9 +821,15 @@ export class BrowserClient {
           gql?.profileImageUrl ||
           undefined;
 
+        // 关键缓存，后续 batch-follow 必须用 username 打开主页
+        if (userId && userId !== '0') {
+          this.usernameCache.set(userId, user.username);
+          this.idCache.set(user.username, userId);
+        }
+
         console.log(
           `[BrowserClient] ✅ @${user.username}  name="${user.name}"  userId=${userId}(${userIdSource})  ` +
-          `btn=${user.buttonHint}  img=${profileImageUrl ? 'yes' : 'no'}`,
+          `kind=${user.buttonKind}  btn=${user.buttonHint}  img=${profileImageUrl ? 'yes' : 'no'}`,
         );
 
         needFollow.push({
@@ -1088,18 +1166,328 @@ export class BrowserClient {
 
   // ── 关注 / 取关 ─────────────────────────────────────
 
-  async follow(_myUserId: string, targetUserId: string): Promise<FollowResult> {
+  /**
+   * 批量回关（推荐路径）：
+   * 停留在「我的关注者」列表，对每个目标 UserCell 精准点「回关」按钮，
+   * 等待按钮变成「正在关注」即成功。不会全量重扫，也不会逐个开主页。
+   */
+  async batchFollowFromFollowersList(
+    targets: Array<{ userId: string; username?: string }>,
+  ): Promise<Array<{ userId: string; username?: string; ok: boolean }>> {
     this.ensureReady();
-    const username = this.resolveUsername(targetUserId);
+    const me = this.myUsername;
+    if (!me) throw new Error('未登录');
 
-    console.log(`[BrowserClient] 关注 @${username}`);
+    const results: Array<{ userId: string; username?: string; ok: boolean }> = [];
+    if (targets.length === 0) return results;
+
+    // 进入粉丝列表（若已在则不重复 goto）
+    const followersUrl = `https://x.com/${me}/followers`;
+    const onList = this.page!.url().includes(`/${me}/followers`);
+    if (!onList) {
+      console.log(`[BrowserClient] 打开粉丝列表做精准回关: ${followersUrl}`);
+      await this.page!.goto(followersUrl, { waitUntil: 'domcontentloaded', timeout: 30000 });
+      await this.page!.waitForTimeout(1500);
+      try {
+        await this.page!.waitForSelector('[data-testid="UserCell"]', { timeout: 8000 });
+      } catch {
+        console.warn('[BrowserClient] 粉丝列表未加载，回关中止');
+        return targets.map((t) => ({ userId: t.userId, username: t.username, ok: false }));
+      }
+    } else {
+      console.log('[BrowserClient] 已在粉丝列表，直接精准回关');
+    }
+
+    for (const t of targets) {
+      const username =
+        (t.username && t.username.trim()) ||
+        this.resolveUsername(t.userId);
+
+      if (!username || /^\d+$/.test(username)) {
+        console.warn(`[BrowserClient] 跳过：无 username (id=${t.userId})`);
+        results.push({ userId: t.userId, username: t.username, ok: false });
+        continue;
+      }
+
+      if (t.userId && /^\d+$/.test(t.userId)) {
+        this.usernameCache.set(t.userId, username);
+        this.idCache.set(username, t.userId);
+      }
+
+      const ok = await this.clickFollowBackInList(username);
+      results.push({ userId: t.userId, username, ok });
+
+      // 操作间隔，模拟真人
+      const delay = actionInterval(this.config);
+      console.log(
+        `[BrowserClient] 列表回关 @${username}: ${ok ? '成功' : '失败'}，等待 ${(delay / 1000).toFixed(1)}s`,
+      );
+      await this.page!.waitForTimeout(delay);
+    }
+
+    const done = results.filter((r) => r.ok).length;
+    console.log(`[BrowserClient] 列表精准回关完成: ${done}/${results.length} 成功`);
+    return results;
+  }
+
+  /**
+   * 在粉丝列表中定位 @username 的 UserCell，点击回关/关注按钮，
+   * 等待按钮变为 Following/正在关注 视为成功（不弹回）。
+   */
+  private async clickFollowBackInList(username: string): Promise<boolean> {
+    const uname = username.replace(/^@/, '');
+    console.log(`[BrowserClient] 列表定位并回关 @${uname}`);
+
+    // 最多滚动若干次寻找该 cell（通常扫描后用户还在视口附近；靠前的粉丝优先）
+    const MAX_FIND_SCROLLS = 50;
+
+    for (let attempt = 0; attempt < MAX_FIND_SCROLLS; attempt++) {
+      const action = await this.page!.evaluate((u) => {
+        const target = u.toLowerCase();
+        const cells = document.querySelectorAll('[data-testid="UserCell"]');
+
+        for (const cell of cells) {
+          // 匹配 /username 链接
+          let match = false;
+          const links = cell.querySelectorAll('a[href]');
+          for (const link of links) {
+            const href = (link.getAttribute('href') || '').split('?')[0];
+            if (href.toLowerCase() === `/${target}`) {
+              match = true;
+              break;
+            }
+          }
+          if (!match) continue;
+
+          // 找到 cell，滚动到可见
+          (cell as HTMLElement).scrollIntoView({ block: 'center', inline: 'nearest' });
+
+          const buttons = cell.querySelectorAll('button, [role="button"], [data-testid*="follow"]');
+          for (const btn of buttons) {
+            const text = (btn.textContent || '').replace(/\s+/g, ' ').trim();
+            const textLower = text.toLowerCase();
+            const aria = ((btn as HTMLElement).getAttribute('aria-label') || '').toLowerCase();
+            const testId = ((btn as HTMLElement).getAttribute('data-testid') || '').toLowerCase();
+            const span = (btn.querySelector('span')?.textContent || '').replace(/\s+/g, ' ').trim();
+            const spanLower = span.toLowerCase();
+
+            // 已经是「正在关注」→ 成功
+            if (
+              textLower === 'following' ||
+              text === '正在关注' ||
+              spanLower === 'following' ||
+              span === '正在关注' ||
+              testId.includes('unfollow') ||
+              aria.includes('following @') ||
+              aria.includes('正在关注')
+            ) {
+              return { found: true, status: 'already' as const };
+            }
+
+            // 待回关 / 可关注
+            const isFollow =
+              textLower === 'follow' ||
+              textLower === 'follow back' ||
+              text === '回关' ||
+              text === '关注' ||
+              spanLower === 'follow' ||
+              spanLower === 'follow back' ||
+              span === '回关' ||
+              span === '关注' ||
+              /^follow(\s+back)?\s+@/.test(aria) ||
+              aria.startsWith('回关') ||
+              aria.startsWith('关注') ||
+              /-follow$/.test(testId);
+
+            if (isFollow) {
+              (btn as HTMLElement).click();
+              return { found: true, status: 'clicked' as const, btnText: text || span };
+            }
+          }
+
+          return { found: true, status: 'no_button' as const };
+        }
+
+        return { found: false, status: 'missing' as const };
+      }, uname);
+
+      if (action.found && action.status === 'already') {
+        console.log(`[BrowserClient] @${uname} 列表上已是「正在关注」`);
+        return true;
+      }
+
+      if (action.found && action.status === 'clicked') {
+        // 确认弹窗（若有）
+        await this.page!.waitForTimeout(400);
+        const confirmBtn = await this.page!.$('[data-testid="confirmationSheetConfirm"]');
+        if (confirmBtn) {
+          await confirmBtn.click();
+          await this.page!.waitForTimeout(600);
+        }
+
+        // 等按钮状态稳定：变成 Following 且不回弹
+        await this.page!.waitForTimeout(800);
+        const verified = await this.page!.evaluate((u) => {
+          const target = u.toLowerCase();
+          const cells = document.querySelectorAll('[data-testid="UserCell"]');
+          for (const cell of cells) {
+            let match = false;
+            for (const link of cell.querySelectorAll('a[href]')) {
+              const href = (link.getAttribute('href') || '').split('?')[0];
+              if (href.toLowerCase() === `/${target}`) {
+                match = true;
+                break;
+              }
+            }
+            if (!match) continue;
+
+            const buttons = cell.querySelectorAll('button, [role="button"], [data-testid*="follow"]');
+            for (const btn of buttons) {
+              const text = (btn.textContent || '').replace(/\s+/g, ' ').trim();
+              const textLower = text.toLowerCase();
+              const aria = ((btn as HTMLElement).getAttribute('aria-label') || '').toLowerCase();
+              const testId = ((btn as HTMLElement).getAttribute('data-testid') || '').toLowerCase();
+              if (
+                textLower === 'following' ||
+                text === '正在关注' ||
+                testId.includes('unfollow') ||
+                aria.includes('following @') ||
+                aria.includes('正在关注')
+              ) {
+                return 'following';
+              }
+              if (
+                textLower === 'follow' ||
+                textLower === 'follow back' ||
+                text === '回关' ||
+                text === '关注'
+              ) {
+                return 'bounced'; // 点了又弹回 Follow → 失败
+              }
+            }
+            return 'unknown';
+          }
+          return 'gone'; // cell 可能被移除（较少见）
+        }, uname);
+
+        if (verified === 'following' || verified === 'gone') {
+          console.log(`[BrowserClient] @${uname} 回关成功（按钮状态=${verified}）`);
+          return true;
+        }
+        if (verified === 'bounced') {
+          console.warn(`[BrowserClient] @${uname} 回关后按钮回弹为 Follow，判定失败`);
+          return false;
+        }
+        // unknown：再等一会二次确认
+        await this.page!.waitForTimeout(1000);
+        const again = await this.page!.evaluate((u) => {
+          const target = u.toLowerCase();
+          for (const cell of document.querySelectorAll('[data-testid="UserCell"]')) {
+            let match = false;
+            for (const link of cell.querySelectorAll('a[href]')) {
+              const href = (link.getAttribute('href') || '').split('?')[0];
+              if (href.toLowerCase() === `/${target}`) { match = true; break; }
+            }
+            if (!match) continue;
+            for (const btn of cell.querySelectorAll('button, [role="button"]')) {
+              const text = (btn.textContent || '').replace(/\s+/g, ' ').trim().toLowerCase();
+              const testId = ((btn as HTMLElement).getAttribute('data-testid') || '').toLowerCase();
+              if (text === 'following' || text === '正在关注' || testId.includes('unfollow')) return true;
+            }
+          }
+          return false;
+        }, uname);
+        if (again) {
+          console.log(`[BrowserClient] @${uname} 二次确认成功`);
+          return true;
+        }
+        console.warn(`[BrowserClient] @${uname} 点击后状态不明，记为失败`);
+        return false;
+      }
+
+      if (action.found && action.status === 'no_button') {
+        console.warn(`[BrowserClient] @${uname} 找到 UserCell 但无回关按钮`);
+        return false;
+      }
+
+      // 当前视口没有该用户 → 向下滚一点继续找
+      await this.scrollUserList();
+      await this.page!.waitForTimeout(250 + Math.random() * 150);
+    }
+
+    console.warn(`[BrowserClient] @${uname} 在粉丝列表中未找到（已滚 ${MAX_FIND_SCROLLS} 轮）`);
+    return false;
+  }
+
+  /**
+   * 单用户关注（兼容旧路径）：优先用列表回关，列表找不到再回退打开主页。
+   */
+  async follow(
+    _myUserId: string,
+    targetUserId: string,
+    preferUsername?: string,
+  ): Promise<FollowResult> {
+    this.ensureReady();
+
+    let username =
+      (preferUsername && preferUsername.trim()) ||
+      this.resolveUsername(targetUserId);
+
+    if (/^\d+$/.test(username)) {
+      console.error(
+        `[BrowserClient] 无法关注 userId=${targetUserId}：没有 username（缓存未命中），跳过`,
+      );
+      return { following: false, pending: false };
+    }
+
+    if (targetUserId && /^\d+$/.test(targetUserId)) {
+      this.usernameCache.set(targetUserId, username);
+      this.idCache.set(username, targetUserId);
+    }
+
+    // 优先：粉丝列表上精准点按钮
+    try {
+      const me = this.myUsername;
+      if (me) {
+        const onList = this.page!.url().includes(`/${me}/followers`);
+        if (!onList) {
+          await this.page!.goto(`https://x.com/${me}/followers`, {
+            waitUntil: 'domcontentloaded',
+            timeout: 30000,
+          });
+          await this.page!.waitForTimeout(1200);
+        }
+        const ok = await this.clickFollowBackInList(username);
+        if (ok) {
+          const delay = actionInterval(this.config);
+          await this.page!.waitForTimeout(delay);
+          return { following: true, pending: false };
+        }
+      }
+    } catch (err) {
+      console.warn(`[BrowserClient] 列表回关失败，回退主页关注:`, (err as Error).message);
+    }
+
+    // 回退：打开个人主页点关注
+    console.log(`[BrowserClient] 主页回退关注 @${username} (id=${targetUserId || '?'})`);
 
     await this.page!.goto(`https://x.com/${username}`, { waitUntil: 'domcontentloaded', timeout: 30000 });
     await this.page!.waitForTimeout(2000 + Math.random() * 2000);
 
+    const pageOk = await this.page!.evaluate((u) => {
+      const path = location.pathname.toLowerCase();
+      return path === `/${u.toLowerCase()}` || path.startsWith(`/${u.toLowerCase()}/`);
+    }, username);
+    if (!pageOk) {
+      console.warn(`[BrowserClient] 打开 @${username} 主页失败，当前 URL=${this.page!.url()}`);
+      return { following: false, pending: false };
+    }
+
     const result = await this.page!.evaluate(() => {
-      // 查找 Follow / 回关 / 关注 按钮
-      const buttons = document.querySelectorAll('[role="button"], button, [data-testid*="follow"]');
+      const root =
+        document.querySelector('[data-testid="primaryColumn"]') ||
+        document.body;
+      const buttons = root.querySelectorAll('[role="button"], button, [data-testid*="follow"]');
       for (const btn of buttons) {
         const text = (btn.textContent || '').replace(/\s+/g, ' ').trim();
         const textLower = text.toLowerCase();
@@ -1107,14 +1495,13 @@ export class BrowserClient {
         const testId = (btn.getAttribute('data-testid') || '').toLowerCase();
         const spanText = (btn.querySelector('span')?.textContent || '').trim();
 
-        // 已经关注了
         if (
           textLower === 'following' ||
           text === '正在关注' ||
           aria.includes('following @') ||
           testId.includes('unfollow')
         ) {
-          return { following: true, pending: false };
+          return { following: true, pending: false, already: true };
         }
 
         const isFollow =
@@ -1128,17 +1515,22 @@ export class BrowserClient {
           spanText === '关注' ||
           /^follow(\s+back)?\s+@/.test(aria) ||
           aria.startsWith('回关') ||
+          aria.startsWith('关注') ||
           /-follow$/.test(testId);
 
         if (isFollow) {
           (btn as HTMLButtonElement).click();
-          return { following: true, pending: false };
+          return { following: true, pending: false, already: false };
         }
       }
-      return { following: false, pending: false };
+      return { following: false, pending: false, already: false };
     });
 
-    // 检查是否有确认对话框
+    if (!result.following) {
+      console.warn(`[BrowserClient] @${username} 未找到关注/回关按钮`);
+      return { following: false, pending: false };
+    }
+
     await this.page!.waitForTimeout(500);
     const confirmBtn = await this.page!.$('[data-testid="confirmationSheetConfirm"]');
     if (confirmBtn) {
@@ -1146,12 +1538,13 @@ export class BrowserClient {
       await this.page!.waitForTimeout(1000);
     }
 
-    // 加入随机延迟
     const delay = actionInterval(this.config);
-    console.log(`[BrowserClient] 关注完成，等待 ${(delay / 1000).toFixed(1)}s`);
+    console.log(
+      `[BrowserClient] 主页关注${result.already ? '（已是关注状态）' : '完成'} @${username}，等待 ${(delay / 1000).toFixed(1)}s`,
+    );
     await this.page!.waitForTimeout(delay);
 
-    return result;
+    return { following: true, pending: !!result.pending };
   }
 
   async unfollow(_myUserId: string, targetUserId: string): Promise<UnfollowResult> {

@@ -193,22 +193,59 @@ export class Service {
     return result;
   }
 
-  async batchFollow(userId: string, targetUserIds: string[]): Promise<{ done: number; failed: number }> {
+  /**
+   * 批量回关。
+   * 浏览器模式：在粉丝列表上精准点每个 UserCell 的「回关」按钮（不逐个开主页、不全量重扫）。
+   * targets 可为纯 userId 字符串，或 { userId, username }。
+   */
+  async batchFollow(
+    userId: string,
+    targets: Array<string | { userId: string; username?: string }>,
+  ): Promise<{ done: number; failed: number; results: Array<{ userId: string; username?: string; ok: boolean }> }> {
+    const normalized = targets.map((raw) =>
+      typeof raw === 'string'
+        ? { userId: raw, username: undefined as string | undefined }
+        : { userId: raw.userId, username: raw.username },
+    ).filter((t) => t.userId);
+
+    // 浏览器：列表精准回关
+    if (this.xClient instanceof BrowserClient) {
+      const results = await (this.xClient as BrowserClient).batchFollowFromFollowersList(normalized);
+      let done = 0;
+      let failed = 0;
+      for (const r of results) {
+        if (r.ok) {
+          done++;
+          try {
+            await this.repo.upsertRelationships(
+              userId,
+              [{ id: r.userId, name: '', username: r.username || '' }],
+              'following',
+            );
+          } catch { /* ignore */ }
+        } else {
+          failed++;
+        }
+      }
+      return { done, failed, results };
+    }
+
+    // API 模式：逐个 follow
     let done = 0;
     let failed = 0;
-    for (const tid of targetUserIds) {
+    const results: Array<{ userId: string; username?: string; ok: boolean }> = [];
+    for (const t of normalized) {
       try {
-        await this.xClient.follow(userId, tid);
-        // 关系可选写入；待回关列表本身不再依赖 pending_follow
-        try {
-          await this.repo.upsertRelationships(userId, [{ id: tid, name: '', username: '' }], 'following');
-        } catch { /* ignore */ }
+        await this.xClient.follow(userId, t.userId);
         done++;
-      } catch {
+        results.push({ userId: t.userId, username: t.username, ok: true });
+      } catch (err) {
+        console.warn(`[Service] batchFollow 失败 ${t.username || t.userId}:`, (err as Error).message);
         failed++;
+        results.push({ userId: t.userId, username: t.username, ok: false });
       }
     }
-    return { done, failed };
+    return { done, failed, results };
   }
 
   async batchUnfollow(userId: string, targetUserIds: string[]): Promise<{ done: number; failed: number }> {

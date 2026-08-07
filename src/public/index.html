@@ -378,6 +378,17 @@
       return userIds;
     }
 
+    /** 勾选用户带 username，批量回关时必须传给后端 */
+    function getSelectedUsers(type) {
+      const users = [];
+      document.querySelectorAll('.' + type + '-checkbox:checked').forEach(cb => {
+        const idx = parseInt(cb.dataset.idx, 10);
+        const u = followListData[idx];
+        if (u) users.push({ userId: u.userId, username: u.username, name: u.name });
+      });
+      return users;
+    }
+
     let followBackPollTimer = null;
     let lastFollowBackScanStatus = 'idle';
     let followBackPollCount = 0;
@@ -493,18 +504,48 @@
     }
 
     async function batchFollow() {
-      const userIds = getSelectedUserIds('follow');
-      if (!userIds.length) { showToast('No users selected', 'error'); return; }
-      addLog('Batch following ' + userIds.length + ' users...');
-      const res = await fetch('/api/batch-follow', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ userIds }),
-      });
-      const data = await res.json();
-      if (data.ok) {
-        showToast('Done: ' + data.done + ', Failed: ' + data.failed, data.failed ? 'error' : 'success');
-        computeFollowBack(); // refresh list
+      const users = getSelectedUsers('follow');
+      if (!users.length) { showToast('请先勾选用户', 'error'); return; }
+      const btn = document.querySelector('#follow-list button.btn-success');
+      if (btn) { btn.disabled = true; btn.textContent = '回关中…'; }
+      addLog('批量回关 ' + users.length + ' 人…');
+      showToast('回关中，请稍候…', 'info');
+      try {
+        const res = await fetch('/api/batch-follow', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ users }),
+        });
+        const data = await res.json();
+        if (data.ok) {
+          const doneIds = new Set(
+            (data.results || []).filter(r => r.ok).map(r => String(r.userId))
+          );
+          // 本地立刻从列表移除成功的，不再全量重扫（重扫很慢且 UI 会卡住）
+          if (doneIds.size > 0) {
+            followListData = followListData.filter(u => !doneIds.has(String(u.userId)));
+            renderUserList('follow-list-items', followListData, 'follow');
+            document.getElementById('follow-list').style.display = 'block';
+            document.getElementById('follow-queue-count').textContent = '待回关: ' + followListData.length;
+            // 同步 lastData 内存扫描结果
+            if (lastData && lastData.computedFollowBack) {
+              lastData.computedFollowBack.users = followListData;
+              lastData.computedFollowBack.count = followListData.length;
+              lastData.computedFollowBack.status = 'done';
+            }
+          }
+          const msg = '成功 ' + (data.done || 0) + '，失败 ' + (data.failed || 0) + '，剩余 ' + followListData.length;
+          addLog(msg);
+          showToast(msg, data.failed ? 'error' : 'success');
+        } else {
+          showToast(data.error || '回关失败', 'error');
+          addLog('回关失败: ' + (data.error || ''));
+        }
+      } catch (e) {
+        showToast('网络错误', 'error');
+        addLog('回关请求失败: ' + e.message);
+      } finally {
+        if (btn) { btn.disabled = false; btn.textContent = 'Follow Selected'; }
       }
     }
 
