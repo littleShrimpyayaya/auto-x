@@ -106,7 +106,13 @@ export interface StatusInfo {
   connected: boolean;
   computedFollowBack: {
     status: string;
-    users: Array<{ userId: string; username: string; name: string; profileImageUrl?: string }> | null;
+    users: Array<{
+      userId: string;
+      username: string;
+      name: string;
+      profileImageUrl?: string;
+      source?: 'verified_followers' | 'followers';
+    }> | null;
     count: number;
     error: string | null;
   };
@@ -117,6 +123,7 @@ type FollowBackUserBrief = {
   username: string;
   name: string;
   profileImageUrl?: string;
+  source?: 'verified_followers' | 'followers';
 };
 
 export class TaskManager {
@@ -133,6 +140,7 @@ export class TaskManager {
     username: string;
     name: string;
     profileImageUrl?: string;
+    source?: 'verified_followers' | 'followers';
   }> | null = null;
   private followBackScanStatus: 'idle' | 'scanning' | 'done' | 'error' = 'idle';
   private followBackScanError: string | null = null;
@@ -985,6 +993,7 @@ export class TaskManager {
           username: u.username,
           name: u.name || u.username,
           profileImageUrl: u.profileImageUrl,
+          source: u.source,
         }));
         this.followBackAutoPhase = 'following';
         this.followBackAutoProcessing = [...targets];
@@ -1008,7 +1017,7 @@ export class TaskManager {
           };
           try {
             const r = await this.service.batchFollow(this.userId, [
-              { userId: t.userId, username: t.username },
+              { userId: t.userId, username: t.username, source: t.source },
             ]);
             const ok =
               r.done > 0 ||
@@ -1087,6 +1096,7 @@ export class TaskManager {
     username: string;
     name: string;
     profileImageUrl?: string;
+    source?: 'verified_followers' | 'followers';
   }>> {
     return this.service.computeFollowBackWithDetails(this.userId);
   }
@@ -1096,7 +1106,9 @@ export class TaskManager {
   }
 
   async batchFollow(
-    targets: Array<string | { userId: string; username?: string }>,
+    targets: Array<
+      string | { userId: string; username?: string; source?: 'verified_followers' | 'followers' }
+    >,
   ): Promise<{ done: number; failed: number; results: Array<{ userId: string; username?: string; ok: boolean }> }> {
     // 自动周期内跑的 batch 不拦；仅拦前端手动触发（由 server 在 auto 开启时拒绝）
     return this.service.batchFollow(this.userId, targets);

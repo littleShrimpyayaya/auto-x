@@ -844,18 +844,32 @@
       return userIds;
     }
 
-    /** 勾选用户带 username；优先用内存 selectedFollowIds，不被 DOM 重绘影响 */
+    /** 勾选用户带 username/source；优先用内存 selectedFollowIds，不被 DOM 重绘影响 */
     function getSelectedUsers(type) {
       if (type === 'follow' && selectedFollowIds.size) {
         return followListData
           .filter(u => selectedFollowIds.has(String(u.userId)))
-          .map(u => ({ userId: u.userId, username: u.username, name: u.name, profileImageUrl: u.profileImageUrl }));
+          .map(u => ({
+            userId: u.userId,
+            username: u.username,
+            name: u.name,
+            profileImageUrl: u.profileImageUrl,
+            source: u.source,
+          }));
       }
       const users = [];
       document.querySelectorAll('.' + type + '-checkbox:checked').forEach(cb => {
         const idx = parseInt(cb.dataset.idx, 10);
         const u = followListData[idx];
-        if (u) users.push({ userId: u.userId, username: u.username, name: u.name, profileImageUrl: u.profileImageUrl });
+        if (u) {
+          users.push({
+            userId: u.userId,
+            username: u.username,
+            name: u.name,
+            profileImageUrl: u.profileImageUrl,
+            source: u.source,
+          });
+        }
       });
       return users;
     }
@@ -1055,7 +1069,9 @@
           const res = await fetch('/api/batch-follow', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ users: [{ userId: u.userId, username: u.username }] }),
+            body: JSON.stringify({
+              users: [{ userId: u.userId, username: u.username, source: u.source }],
+            }),
           });
           const data = await res.json();
           const ok = data.ok && ((data.done > 0) || (data.results && data.results.some(r => r.ok)));

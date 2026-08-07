@@ -375,10 +375,16 @@ export function createServer(taskManager: TaskManager): express.Express {
       }
       const { userIds, users } = req.body as {
         userIds?: string[];
-        users?: Array<{ userId: string; username?: string }>;
+        users?: Array<{
+          userId: string;
+          username?: string;
+          source?: 'verified_followers' | 'followers';
+        }>;
       };
-      // 优先 users（带 username），兼容旧的 userIds
-      let targets: Array<string | { userId: string; username?: string }> = [];
+      // 优先 users（带 username/source），兼容旧的 userIds
+      let targets: Array<
+        string | { userId: string; username?: string; source?: 'verified_followers' | 'followers' }
+      > = [];
       if (Array.isArray(users) && users.length > 0) {
         targets = users.filter((u) => u && u.userId);
       } else if (Array.isArray(userIds) && userIds.length > 0) {

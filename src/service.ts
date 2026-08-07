@@ -140,8 +140,9 @@ export class Service {
     username: string;
     name: string;
     profileImageUrl?: string;
+    source?: 'verified_followers' | 'followers';
   }>> {
-    // 浏览器模式：进入「我的关注者」页面，只收集带回关/Follow 按钮的用户
+    // 浏览器模式：认证关注者 + 关注者 两页收集（逻辑相同，仅 URL 不同），按 username 去重
     if (this.xClient instanceof BrowserClient) {
       const result = await (this.xClient as BrowserClient).scanFollowBack();
 
@@ -195,17 +196,23 @@ export class Service {
 
   /**
    * 批量回关。
-   * 浏览器模式：在粉丝列表上精准点每个 UserCell 的「回关」按钮（不逐个开主页、不全量重扫）。
-   * targets 可为纯 userId 字符串，或 { userId, username }。
+   * 浏览器模式：在认证关注者/关注者列表上精准点「回关」（先收集再模拟人逐个点，不改原节奏）。
+   * targets 可为纯 userId 字符串，或 { userId, username, source }。
    */
   async batchFollow(
     userId: string,
-    targets: Array<string | { userId: string; username?: string }>,
+    targets: Array<
+      string | { userId: string; username?: string; source?: 'verified_followers' | 'followers' }
+    >,
   ): Promise<{ done: number; failed: number; results: Array<{ userId: string; username?: string; ok: boolean }> }> {
     const normalized = targets.map((raw) =>
       typeof raw === 'string'
-        ? { userId: raw, username: undefined as string | undefined }
-        : { userId: raw.userId, username: raw.username },
+        ? {
+            userId: raw,
+            username: undefined as string | undefined,
+            source: undefined as 'verified_followers' | 'followers' | undefined,
+          }
+        : { userId: raw.userId, username: raw.username, source: raw.source },
     ).filter((t) => t.userId);
 
     // 浏览器：列表精准回关

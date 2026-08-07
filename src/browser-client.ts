@@ -114,12 +114,17 @@ function extractGraphQLUsers(json: any): GqlUserInfo[] {
   return users;
 }
 
+/** 待回关用户所在列表页（扫描/回关时只换 URL，处理逻辑相同） */
+export type FollowBackListSource = 'verified_followers' | 'followers';
+
 /** 待回关用户（粉丝列表中带 Follow/回关 按钮） */
 export interface FollowBackCandidate {
   userId: string;
   username: string;
   name: string;
   profileImageUrl?: string;
+  /** 在哪个列表页收集到的；回关时打开同一页 */
+  source?: FollowBackListSource;
 }
 
 export class BrowserClient {
@@ -519,7 +524,8 @@ export class BrowserClient {
   // ── 扫描待回关用户 ──────────────────────────────────
 
   /**
-   * 扫描「我的关注者」页面，只收集带「回关 / Follow / Follow back」按钮的用户。
+   * 扫描待回关用户：先「认证关注者」再「关注者」。
+   * 两页 DOM/处理逻辑完全相同，仅 URL 不同；按 username 去重。
    * 已关注（Following / 正在关注）的粉丝不计入待回关。
    */
   async scanFollowBack(): Promise<FollowBackCandidate[]> {
@@ -531,10 +537,7 @@ export class BrowserClient {
     const username = this.myUsername;
     if (!username) throw new Error('未登录');
 
-    const url = `https://x.com/${username}/followers`;
-    console.log(`[BrowserClient] 扫描待回关: ${url}`);
-
-    // GraphQL：补全 userId / 头像 / following 状态
+    // GraphQL：补全 userId / 头像 / following 状态（两页共用）
     const gqlByUsername = new Map<string, GqlUserInfo>();
     const onResponse = async (response: any) => {
       const reqUrl = response.url();
@@ -552,34 +555,44 @@ export class BrowserClient {
     };
     this.page!.on('response', onResponse);
 
+    const needFollow: FollowBackCandidate[] = [];
+    const needFollowKeys = new Set<string>(); // 跨页去重 username lowercased
+    const skippedLogged = new Set<string>();
+    let totalSeenAll = 0;
+    const MAX_SCROLLS = 800;
+    const MAX_NO_NEW = 6;
+
+    const logSkipOnce = (uname: string, reason: string) => {
+      const k = uname.toLowerCase() + '|' + reason;
+      if (skippedLogged.has(k)) return;
+      skippedLogged.add(k);
+      // 推荐区噪声大且无诊断价值，默认不打日志
+      if (reason === 'suggested') return;
+      console.log(`[BrowserClient] ⏭ 跳过 @${uname} — ${reason}`);
+    };
+
+    // 先认证关注者、再关注者；每页：收集逻辑与原先 /followers 完全一致
+    const listPaths: FollowBackListSource[] = ['verified_followers', 'followers'];
+
+    for (const listPath of listPaths) {
+    const url = `https://x.com/${username}/${listPath}`;
+    const pageLabel = listPath === 'verified_followers' ? '认证关注者' : '关注者';
+    console.log(`[BrowserClient] 扫描待回关（${pageLabel}）: ${url}`);
+
     await this.page!.goto(url, { waitUntil: 'domcontentloaded', timeout: 30000 });
     await this.page!.waitForTimeout(2000);
 
     try {
       await this.page!.waitForSelector('[data-testid="UserCell"]', { timeout: 8000 });
     } catch {
-      this.page!.off('response', onResponse);
-      console.warn('[BrowserClient] 粉丝列表未加载');
-      return [];
+      console.warn(`[BrowserClient] ${pageLabel}列表未加载，跳过该页`);
+      continue;
     }
 
-    const needFollow: FollowBackCandidate[] = [];
-    const needFollowKeys = new Set<string>(); // username lowercased
-    const seenAllUsers = new Set<string>();   // 页面上见过的所有粉丝（含已关注）
-    const skippedLogged = new Set<string>();  // 跳过原因只打一次，避免滚动刷屏
+    const seenAllUsers = new Set<string>();   // 本页见过的所有粉丝（含已关注）
     let prevSeenAll = 0;
     let noNewCount = 0;
-    const MAX_SCROLLS = 800;
-    const MAX_NO_NEW = 6;
-
-    const logSkipOnce = (username: string, reason: string) => {
-      const k = username.toLowerCase() + '|' + reason;
-      if (skippedLogged.has(k)) return;
-      skippedLogged.add(k);
-      // 推荐区噪声大且无诊断价值，默认不打日志
-      if (reason === 'suggested') return;
-      console.log(`[BrowserClient] ⏭ 跳过 @${username} — ${reason}`);
-    };
+    const pageStartCount = needFollow.length;
 
     for (let i = 0; i < MAX_SCROLLS; i++) {
       // 扫描当前视口：只收「需要回关」的 UserCell，同时统计所有出现过的粉丝
@@ -890,7 +903,7 @@ export class BrowserClient {
         }
 
         console.log(
-          `[BrowserClient] ✅ @${user.username}  name="${user.name}"  userId=${userId}(${userIdSource})  ` +
+          `[BrowserClient] ✅ [${pageLabel}] @${user.username}  name="${user.name}"  userId=${userId}(${userIdSource})  ` +
           `kind=${user.buttonKind}  btn=${user.buttonHint}  img=${profileImageUrl ? 'yes' : 'no'}`,
         );
 
@@ -899,6 +912,7 @@ export class BrowserClient {
           username: user.username,
           name: gql?.name || user.name,
           profileImageUrl,
+          source: listPath,
         });
       }
 
@@ -906,7 +920,7 @@ export class BrowserClient {
       if (seenAllUsers.size <= prevSeenAll) {
         noNewCount++;
         if (noNewCount >= MAX_NO_NEW) {
-          console.log(`[BrowserClient] 粉丝列表滚动结束（连续 ${MAX_NO_NEW} 轮无新用户）`);
+          console.log(`[BrowserClient] ${pageLabel}列表滚动结束（连续 ${MAX_NO_NEW} 轮无新用户）`);
           break;
         }
       } else {
@@ -925,15 +939,21 @@ export class BrowserClient {
         const sample = batch.slice(0, 5).map((u) =>
           `@${u.username} need=${u.needsFollowBack} ${u.buttonHint}`
         ).join(' | ');
-        console.log(`[BrowserClient] 首屏按钮样例: ${sample}`);
+        console.log(`[BrowserClient] [${pageLabel}] 首屏按钮样例: ${sample}`);
       }
 
       if (i % 10 === 0) {
         console.log(
-          `[BrowserClient] 扫描进度: ${needFollow.length} 个待回关 / 已查看 ${seenAllUsers.size} 个粉丝`,
+          `[BrowserClient] [${pageLabel}] 扫描进度: ${needFollow.length - pageStartCount} 本页待回关 / 已查看 ${seenAllUsers.size} 个粉丝`,
         );
       }
     }
+
+    totalSeenAll += seenAllUsers.size;
+    console.log(
+      `[BrowserClient] ${pageLabel}页收集完成: 本页新增 ${needFollow.length - pageStartCount} 待回关 / 查看 ${seenAllUsers.size} 人`,
+    );
+    } // end listPaths
 
     this.page!.off('response', onResponse);
 
@@ -964,7 +984,10 @@ export class BrowserClient {
     }
 
     console.log(
-      `[BrowserClient] 扫描完成: ${needFollow.length} 个待回关（共查看 ${seenAllUsers.size} 个粉丝）`,
+      `[BrowserClient] 扫描完成: ${needFollow.length} 个待回关` +
+        `（认证页 ${needFollow.filter((u) => u.source === 'verified_followers').length}` +
+        ` + 关注者页 ${needFollow.filter((u) => u.source === 'followers').length}` +
+        `；两页共查看约 ${totalSeenAll} 人）`,
     );
     return needFollow;
   }
@@ -1257,17 +1280,18 @@ export class BrowserClient {
 
   /**
    * 批量回关（推荐路径）：
-   * 在「我的关注者」列表对每个目标 UserCell 精准点「回关」按钮。
+   * 先在「认证关注者」列表、再在「关注者」列表，对目标 UserCell 精准点「回关」。
+   * 逻辑与原先单页相同：打开列表 → 回顶 → 逐个定位点击 → 模拟真人间隔。
    * 注意：扫描结束后页面在列表底部，必须先回顶再找人，否则永远找不到靠前的用户。
    */
   async batchFollowFromFollowersList(
-    targets: Array<{ userId: string; username?: string }>,
+    targets: Array<{ userId: string; username?: string; source?: FollowBackListSource }>,
   ): Promise<Array<{ userId: string; username?: string; ok: boolean }>> {
     return this.pageOp('batch-follow-list', () => this.batchFollowFromFollowersListImpl(targets));
   }
 
   private async batchFollowFromFollowersListImpl(
-    targets: Array<{ userId: string; username?: string }>,
+    targets: Array<{ userId: string; username?: string; source?: FollowBackListSource }>,
   ): Promise<Array<{ userId: string; username?: string; ok: boolean }>> {
     this.ensureReady();
     const me = this.myUsername;
@@ -1276,44 +1300,63 @@ export class BrowserClient {
     const results: Array<{ userId: string; username?: string; ok: boolean }> = [];
     if (targets.length === 0) return results;
 
-    // 每次批量回关都重新打开粉丝列表（保证从顶部开始，DOM 是首屏）
-    const followersUrl = `https://x.com/${me}/followers`;
-    console.log(`[BrowserClient] 打开粉丝列表做精准回关: ${followersUrl}`);
-    await this.page!.goto(followersUrl, { waitUntil: 'domcontentloaded', timeout: 30000 });
-    await this.page!.waitForTimeout(1500);
-    try {
-      await this.page!.waitForSelector('[data-testid="UserCell"]', { timeout: 8000 });
-    } catch {
-      console.warn('[BrowserClient] 粉丝列表未加载，回关中止');
-      return targets.map((t) => ({ userId: t.userId, username: t.username, ok: false }));
-    }
-    await this.scrollFollowersListToTop();
-
+    // 按扫描来源分组：先认证关注者页，再关注者页（无 source 的走关注者页，兼容旧调用）
+    const listOrder: FollowBackListSource[] = ['verified_followers', 'followers'];
+    const groups = new Map<FollowBackListSource, typeof targets>();
+    for (const listPath of listOrder) groups.set(listPath, []);
     for (const t of targets) {
-      const username =
-        (t.username && t.username.trim()) ||
-        this.resolveUsername(t.userId);
+      const src: FollowBackListSource =
+        t.source === 'verified_followers' ? 'verified_followers' : 'followers';
+      groups.get(src)!.push(t);
+    }
 
-      if (!username || /^\d+$/.test(username)) {
-        console.warn(`[BrowserClient] 跳过：无 username (id=${t.userId})`);
-        results.push({ userId: t.userId, username: t.username, ok: false });
+    for (const listPath of listOrder) {
+      const group = groups.get(listPath)!;
+      if (group.length === 0) continue;
+
+      const pageLabel = listPath === 'verified_followers' ? '认证关注者' : '关注者';
+      const listUrl = `https://x.com/${me}/${listPath}`;
+      console.log(`[BrowserClient] 打开${pageLabel}列表做精准回关: ${listUrl}（${group.length} 人）`);
+      await this.page!.goto(listUrl, { waitUntil: 'domcontentloaded', timeout: 30000 });
+      await this.page!.waitForTimeout(1500);
+      try {
+        await this.page!.waitForSelector('[data-testid="UserCell"]', { timeout: 8000 });
+      } catch {
+        console.warn(`[BrowserClient] ${pageLabel}列表未加载，该页目标记失败`);
+        for (const t of group) {
+          results.push({ userId: t.userId, username: t.username, ok: false });
+        }
         continue;
       }
+      await this.scrollFollowersListToTop();
 
-      if (t.userId && /^\d+$/.test(t.userId)) {
-        this.usernameCache.set(t.userId, username);
-        this.idCache.set(username, t.userId);
+      // 与原先完全相同：逐个定位点击 + 模拟真人间隔
+      for (const t of group) {
+        const username =
+          (t.username && t.username.trim()) ||
+          this.resolveUsername(t.userId);
+
+        if (!username || /^\d+$/.test(username)) {
+          console.warn(`[BrowserClient] 跳过：无 username (id=${t.userId})`);
+          results.push({ userId: t.userId, username: t.username, ok: false });
+          continue;
+        }
+
+        if (t.userId && /^\d+$/.test(t.userId)) {
+          this.usernameCache.set(t.userId, username);
+          this.idCache.set(username, t.userId);
+        }
+
+        const ok = await this.clickFollowBackInList(username);
+        results.push({ userId: t.userId, username, ok });
+
+        // 操作间隔，模拟真人
+        const delay = actionInterval(this.config);
+        console.log(
+          `[BrowserClient] 列表回关 @${username}: ${ok ? '成功' : '失败'}，等待 ${(delay / 1000).toFixed(1)}s`,
+        );
+        await this.page!.waitForTimeout(delay);
       }
-
-      const ok = await this.clickFollowBackInList(username);
-      results.push({ userId: t.userId, username, ok });
-
-      // 操作间隔，模拟真人
-      const delay = actionInterval(this.config);
-      console.log(
-        `[BrowserClient] 列表回关 @${username}: ${ok ? '成功' : '失败'}，等待 ${(delay / 1000).toFixed(1)}s`,
-      );
-      await this.page!.waitForTimeout(delay);
     }
 
     const done = results.filter((r) => r.ok).length;
@@ -1540,21 +1583,23 @@ export class BrowserClient {
       this.idCache.set(username, targetUserId);
     }
 
-    // 优先：粉丝列表上精准点按钮（始终重新打开列表回顶，避免扫描后停在底部找不到人）
+    // 优先：列表上精准点按钮（先关注者再认证关注者，逻辑与原先相同仅换 URL）
     try {
       const me = this.myUsername;
       if (me) {
-        await this.page!.goto(`https://x.com/${me}/followers`, {
-          waitUntil: 'domcontentloaded',
-          timeout: 30000,
-        });
-        await this.page!.waitForTimeout(1200);
-        await this.scrollFollowersListToTop();
-        const ok = await this.clickFollowBackInList(username);
-        if (ok) {
-          const delay = actionInterval(this.config);
-          await this.page!.waitForTimeout(delay);
-          return { following: true, pending: false };
+        for (const listPath of ['followers', 'verified_followers'] as FollowBackListSource[]) {
+          await this.page!.goto(`https://x.com/${me}/${listPath}`, {
+            waitUntil: 'domcontentloaded',
+            timeout: 30000,
+          });
+          await this.page!.waitForTimeout(1200);
+          await this.scrollFollowersListToTop();
+          const ok = await this.clickFollowBackInList(username);
+          if (ok) {
+            const delay = actionInterval(this.config);
+            await this.page!.waitForTimeout(delay);
+            return { following: true, pending: false };
+          }
         }
       }
     } catch (err) {
