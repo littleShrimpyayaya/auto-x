@@ -10,7 +10,6 @@ import {
   loadAutomationConfig,
   formatInTimezone,
   DEFAULT_TIMEZONE,
-  isActiveHours,
   MIN_FOLLOW_BACK_AUTO_INTERVAL,
   type PostConfig,
 } from './auto-config.js';
@@ -60,6 +59,20 @@ export interface StatusInfo {
     lastRunAt: string | null;
     running: boolean;
     lastResult: string | null;
+    /** idle | scanning | following */
+    phase: 'idle' | 'scanning' | 'following';
+    /** 本轮正在/即将回关的用户（前端勾选同步） */
+    processingUsers: Array<{ userId: string; username: string; name: string; profileImageUrl?: string }>;
+    /** 回关进度文案，如 3/10 @user */
+    progress: { current: number; total: number; label: string } | null;
+    /** 本进程会话内成功回关的用户（前端成功列表增量同步） */
+    sessionSucceeded: Array<{
+      userId: string;
+      username: string;
+      name: string;
+      profileImageUrl?: string;
+      at: string;
+    }>;
   };
   connected: boolean;
   computedFollowBack: {
@@ -69,6 +82,13 @@ export interface StatusInfo {
     error: string | null;
   };
 }
+
+type FollowBackUserBrief = {
+  userId: string;
+  username: string;
+  name: string;
+  profileImageUrl?: string;
+};
 
 export class TaskManager {
   private currentController: AbortController | null = null;
@@ -115,6 +135,12 @@ export class TaskManager {
   private followBackAutoRunning = false;
   private followBackAutoEnabled = false;
   private followBackAutoLastResult: string | null = null;
+  private followBackAutoPhase: 'idle' | 'scanning' | 'following' = 'idle';
+  /** 本轮自动回关目标（扫描后、逐个回关前设置；回关成功后逐个剔除） */
+  private followBackAutoProcessing: FollowBackUserBrief[] = [];
+  private followBackAutoProgress: { current: number; total: number; label: string } | null = null;
+  /** 本进程会话成功回关（供前端「已回关」列表同步，最多保留 200） */
+  private followBackSessionSucceeded: Array<FollowBackUserBrief & { at: string }> = [];
 
   private me: XUser | null = null;
   private connected = false;
@@ -556,7 +582,26 @@ export class TaskManager {
     }, delayMs);
   }
 
-  /** 一轮：扫描待回关 → 自动批量回关（受 batchSize / 活跃时段约束） */
+  private pushSessionSucceeded(u: FollowBackUserBrief): void {
+    const id = String(u.userId || '');
+    if (!id) return;
+    // 去重：同一用户只保留最新一条在顶部
+    this.followBackSessionSucceeded = this.followBackSessionSucceeded.filter(
+      (x) => String(x.userId) !== id,
+    );
+    this.followBackSessionSucceeded.unshift({
+      userId: u.userId,
+      username: u.username,
+      name: u.name || u.username,
+      profileImageUrl: u.profileImageUrl,
+      at: new Date().toISOString(),
+    });
+    if (this.followBackSessionSucceeded.length > 200) {
+      this.followBackSessionSucceeded = this.followBackSessionSucceeded.slice(0, 200);
+    }
+  }
+
+  /** 一轮：扫描待回关 → 自动逐个回关（不受活跃时段限制；仅受 batchSize 约束；进度可被 UI 轮询） */
   private async runFollowBackAutoCycle(): Promise<void> {
     if (this.followBackAutoRunning) {
       console.warn('[AutoFollowBack] 上一轮仍在进行，跳过');
@@ -568,24 +613,21 @@ export class TaskManager {
     }
 
     this.followBackAutoRunning = true;
+    this.followBackAutoPhase = 'idle';
+    this.followBackAutoProcessing = [];
+    this.followBackAutoProgress = null;
     const cfg = loadAutomationConfig();
 
     try {
-      // 刷新活跃时段配置
+      // 刷新 batchSize / 操作间隔等配置（回关不看活跃时段）
       try {
         if (this.service['xClient'] instanceof BrowserClient) {
           (this.service['xClient'] as BrowserClient).reloadConfig();
         }
       } catch { /* ignore */ }
 
-      if (!isActiveHours(cfg)) {
-        const msg = `非活跃时段（${cfg.activeHoursStart}:00-${cfg.activeHoursEnd}:00 ${cfg.timezone || 'Asia/Shanghai'}），跳过本轮`;
-        console.log(`[AutoFollowBack] ${msg}`);
-        this.followBackAutoLastResult = msg;
-        return;
-      }
-
       console.log('[AutoFollowBack] 开始自动扫描待回关…');
+      this.followBackAutoPhase = 'scanning';
       this.followBackScanStatus = 'scanning';
       this.followBackScanResults = null;
       this.followBackScanError = null;
@@ -599,17 +641,75 @@ export class TaskManager {
         this.followBackAutoLastResult = '扫描完成：0 个待回关';
       } else {
         const maxBatch = Math.max(1, cfg.batchSizeMax || 18);
-        const targets = results.slice(0, maxBatch).map((u) => ({
+        // 保留完整用户信息，便于 UI 勾选同步与成功列表
+        const targets: FollowBackUserBrief[] = results.slice(0, maxBatch).map((u) => ({
           userId: u.userId,
           username: u.username,
+          name: u.name || u.username,
+          profileImageUrl: u.profileImageUrl,
         }));
+        this.followBackAutoPhase = 'following';
+        this.followBackAutoProcessing = [...targets];
+        this.followBackAutoProgress = {
+          current: 0,
+          total: targets.length,
+          label: '准备回关…',
+        };
         console.log(`[AutoFollowBack] 开始自动回关 ${targets.length}/${results.length} 人…`);
-        const r = await this.service.batchFollow(this.userId, targets);
-        const okIds = (r.results || []).filter((x) => x.ok).map((x) => x.userId);
-        this.removeFromFollowBackScan(okIds);
+
+        let done = 0;
+        let failed = 0;
+        // 逐个回关：每成功一人立刻从待回关队列剔除并记入会话成功列表，前端轮询可同步
+        for (let i = 0; i < targets.length; i++) {
+          const t = targets[i];
+          const label = t.username ? `@${t.username}` : t.userId;
+          this.followBackAutoProgress = {
+            current: i + 1,
+            total: targets.length,
+            label,
+          };
+          try {
+            const r = await this.service.batchFollow(this.userId, [
+              { userId: t.userId, username: t.username },
+            ]);
+            const ok =
+              r.done > 0 ||
+              (r.results || []).some((x) => x.ok && String(x.userId) === String(t.userId));
+            if (ok) {
+              done++;
+              this.removeFromFollowBackScan([t.userId]);
+              this.pushSessionSucceeded(t);
+              // 处理中列表同步去掉已成功的
+              this.followBackAutoProcessing = this.followBackAutoProcessing.filter(
+                (u) => String(u.userId) !== String(t.userId),
+              );
+              console.log(`[AutoFollowBack] ✓ ${label} (${done + failed}/${targets.length})`);
+            } else {
+              failed++;
+              console.warn(`[AutoFollowBack] ✗ ${label}`);
+            }
+          } catch (err) {
+            failed++;
+            console.warn(
+              `[AutoFollowBack] ✗ ${label}:`,
+              (err as Error).message,
+            );
+          }
+        }
+
         this.followBackAutoLastResult =
-          `扫描 ${results.length}，回关成功 ${r.done}，失败 ${r.failed}`;
+          `扫描 ${results.length}，回关成功 ${done}，失败 ${failed}`;
         console.log(`[AutoFollowBack] ${this.followBackAutoLastResult}`);
+
+        // 有成功回关时刷新账号粉丝/关注数（等同 UI Refresh Stats）
+        if (done > 0) {
+          try {
+            await this.refreshMe();
+            console.log('[AutoFollowBack] 已刷新 Account stats');
+          } catch (err) {
+            console.warn('[AutoFollowBack] 刷新 Account 失败:', (err as Error).message);
+          }
+        }
       }
 
       const now = new Date().toISOString();
@@ -626,6 +726,9 @@ export class TaskManager {
       console.error('[AutoFollowBack] 本轮失败:', err);
     } finally {
       this.followBackAutoRunning = false;
+      this.followBackAutoPhase = 'idle';
+      this.followBackAutoProcessing = [];
+      this.followBackAutoProgress = null;
     }
   }
 
@@ -674,6 +777,25 @@ export class TaskManager {
     if (!this.followBackScanResults || userIds.length === 0) return;
     const drop = new Set(userIds.map(String));
     this.followBackScanResults = this.followBackScanResults.filter((u) => !drop.has(String(u.userId)));
+  }
+
+  /** 手动/自动回关成功后写入会话成功列表（供 /api/status 给前端成功区） */
+  recordFollowBackSuccesses(
+    users: Array<{ userId: string; username?: string; name?: string; profileImageUrl?: string }>,
+  ): void {
+    for (const u of users) {
+      if (!u?.userId) continue;
+      // 尽量从扫描结果补全 name / 头像
+      const fromScan = this.followBackScanResults?.find(
+        (x) => String(x.userId) === String(u.userId),
+      );
+      this.pushSessionSucceeded({
+        userId: u.userId,
+        username: u.username || fromScan?.username || u.userId,
+        name: u.name || fromScan?.name || u.username || u.userId,
+        profileImageUrl: u.profileImageUrl || fromScan?.profileImageUrl,
+      });
+    }
   }
 
   async batchUnfollow(targetUserIds: string[]): Promise<{ done: number; failed: number }> {
@@ -744,6 +866,10 @@ export class TaskManager {
         lastRunAt: this.followBackAutoLastRunAt,
         running: this.followBackAutoRunning,
         lastResult: this.followBackAutoLastResult,
+        phase: this.followBackAutoPhase,
+        processingUsers: this.followBackAutoProcessing,
+        progress: this.followBackAutoProgress,
+        sessionSucceeded: this.followBackSessionSucceeded,
       },
       connected: this.connected,
       computedFollowBack: {

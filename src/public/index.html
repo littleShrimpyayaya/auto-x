@@ -351,10 +351,22 @@
     /** 批量回关进行中时，禁止轮询重绘列表 / 禁止再勾选 */
     let batchFollowInProgress = false;
     let lastFollowListSig = '';
+    /** 已同步到前端成功列表的服务端 sessionSucceeded userId */
+    let syncedSessionSucceededIds = new Set();
+    /** 上一次自动任务是否在跑（用于检测本轮结束并收尾 UI） */
+    let lastFollowAutoRunning = false;
 
     function followListSignature(users) {
       if (!users || !users.length) return '';
       return users.map(u => String(u.userId) + '@' + (u.username || '')).join('|');
+    }
+
+    function userIdSet(users) {
+      const s = new Set();
+      (users || []).forEach(u => {
+        if (u && u.userId != null) s.add(String(u.userId));
+      });
+      return s;
     }
 
     function captureFollowSelection() {
@@ -448,16 +460,36 @@
       }).join('');
     }
 
-    function addToDoneList(u) {
+    function formatDoneAt(isoOrLocal) {
+      if (!isoOrLocal) {
+        return new Date().toLocaleTimeString('zh-CN', {
+          hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false,
+        });
+      }
+      // 已是本地 HH:MM:SS
+      if (/^\d{1,2}:\d{2}/.test(String(isoOrLocal)) && !String(isoOrLocal).includes('T')) {
+        return String(isoOrLocal);
+      }
+      try {
+        return new Date(isoOrLocal).toLocaleTimeString('zh-CN', {
+          hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false,
+        });
+      } catch {
+        return String(isoOrLocal);
+      }
+    }
+
+    function addToDoneList(u, opts) {
       const id = String(u.userId || '');
       if (id && followDoneList.some(x => String(x.userId) === id)) return;
       followDoneList.unshift({
         userId: u.userId,
         username: u.username,
         name: u.name || u.username,
-        at: new Date().toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false }),
+        at: formatDoneAt(u.at || (opts && opts.at)),
       });
-      renderDoneList();
+      if (id) syncedSessionSucceededIds.add(id);
+      if (!opts || opts.render !== false) renderDoneList();
     }
 
     function removeFromPendingList(userId) {
@@ -472,6 +504,91 @@
         lastData.computedFollowBack.count = followListData.length;
         lastData.computedFollowBack.status = 'done';
       }
+    }
+
+    /**
+     * 将服务端 computedFollowBack.users 同步到待回关列表。
+     * autoMode：自动化驱动时强制勾选 processingUsers，并从列表中剔除已成功用户。
+     */
+    function syncFollowBackQueueFromServer(scan, autoInfo, opts) {
+      const force = opts && opts.force;
+      const users = Array.isArray(scan && scan.users) ? scan.users : [];
+      const sig = followListSignature(users);
+      const processing = (autoInfo && autoInfo.processingUsers) || [];
+      const processingIds = userIdSet(processing);
+      const autoRunning = !!(autoInfo && autoInfo.running);
+      const phase = (autoInfo && autoInfo.phase) || 'idle';
+
+      // 会话成功列表：增量写入「本会话已回关」
+      const sessionOk = (autoInfo && autoInfo.sessionSucceeded) || [];
+      let doneChanged = false;
+      sessionOk.forEach(u => {
+        const id = String(u.userId || '');
+        if (!id || syncedSessionSucceededIds.has(id)) return;
+        addToDoneList(u, { render: false });
+        doneChanged = true;
+      });
+      if (doneChanged) renderDoneList();
+
+      // 已成功的用户绝不能再出现在可勾选列表（即使服务端偶发残留）
+      const doneIds = new Set(followDoneList.map(u => String(u.userId)));
+      const pendingUsers = users.filter(u => !doneIds.has(String(u.userId)));
+      const pendingSig = followListSignature(pendingUsers);
+
+      const listVisible = document.getElementById('follow-list').style.display !== 'none';
+      const needRender =
+        force ||
+        pendingSig !== lastFollowListSig ||
+        !listVisible ||
+        (pendingUsers.length > 0 && !document.querySelector('.follow-checkbox'));
+
+      if (needRender) {
+        followListData = pendingUsers;
+        // 自动化回关中：勾选框同步为「本轮处理中的用户」
+        if (autoRunning && (phase === 'following' || processingIds.size)) {
+          selectedFollowIds = new Set(
+            followListData
+              .map(u => String(u.userId))
+              .filter(id => processingIds.has(id)),
+          );
+          // 若 processing 尚未写入（刚扫完准备回关），勾选本批全部待回关（截到列表内）
+          if (!selectedFollowIds.size && phase === 'following') {
+            followListData.forEach(u => selectedFollowIds.add(String(u.userId)));
+          }
+        }
+        renderUserList('follow-list-items', followListData, 'follow', { preserveSelection: true });
+        document.getElementById('follow-list').style.display = 'block';
+      } else if (autoRunning && (phase === 'following' || processingIds.size)) {
+        // 列表未重绘时，仍更新勾选状态
+        selectedFollowIds = new Set(
+          followListData
+            .map(u => String(u.userId))
+            .filter(id => processingIds.has(id)),
+        );
+        if (!selectedFollowIds.size && phase === 'following') {
+          followListData.forEach(u => selectedFollowIds.add(String(u.userId)));
+        }
+        restoreFollowSelection();
+      }
+
+      document.getElementById('follow-queue-count').textContent =
+        '待回关: ' + followListData.length;
+
+      // 进度条：自动化 following 时展示
+      const progress = autoInfo && autoInfo.progress;
+      if (autoRunning && phase === 'following' && progress) {
+        updateBatchProgressUI(
+          '自动回关 ' + progress.current + '/' + progress.total +
+          (progress.label ? ' ' + progress.label : ''),
+          true,
+        );
+      } else if (autoRunning && phase === 'scanning') {
+        updateBatchProgressUI('自动扫描待回关中…', true);
+      } else if (!batchFollowInProgress && !autoRunning) {
+        updateBatchProgressUI('', false);
+      }
+
+      applyFollowAutoManualLock();
     }
 
     function renderUserList(containerId, users, type, opts) {
@@ -606,7 +723,7 @@
 
     async function checkFollowBackScan() {
       if (followBackBusy) return;
-      // 用户正在勾选/批量回关时，不要用 status 轮询冲掉列表
+      // 用户正在手动批量回关时，不要用 status 轮询冲掉列表
       if (batchFollowInProgress) return;
       followBackBusy = true;
       const btn = document.getElementById('btn-compute-follow');
@@ -619,72 +736,108 @@
         const scan = data.computedFollowBack;
         if (!scan) return;
 
+        // 同步自动状态（便于勾选/成功列表）
+        if (data.followBackAuto) {
+          serverFollowBackAuto = {
+            enabled: !!data.followBackAuto.enabled,
+            intervalMinutes: data.followBackAuto.intervalMinutes || 30,
+            nextRunAt: data.followBackAuto.nextRunAt || null,
+            lastRunAt: data.followBackAuto.lastRunAt || null,
+            running: !!data.followBackAuto.running,
+            lastResult: data.followBackAuto.lastResult || null,
+            phase: data.followBackAuto.phase || 'idle',
+            processingUsers: data.followBackAuto.processingUsers || [],
+            progress: data.followBackAuto.progress || null,
+            sessionSucceeded: data.followBackAuto.sessionSucceeded || [],
+          };
+        }
+
         if (scan.status === 'done') {
-          if (followBackPollTimer) { clearInterval(followBackPollTimer); followBackPollTimer = null; }
+          // 自动化仍在 following 时保持快轮询；纯手动扫描完成可停
+          const autoBusy = serverFollowBackAuto.running;
+          if (!autoBusy && followBackPollTimer) {
+            clearInterval(followBackPollTimer);
+            followBackPollTimer = null;
+          }
 
-          const users = Array.isArray(scan.users) ? scan.users : [];
-          const sig = followListSignature(users);
           const justFinished = lastFollowBackScanStatus === 'scanning';
-          // 仅：扫描刚完成 / 列表内容真的变了 / 尚未渲染过 → 才重绘
-          // 已展示且内容相同 → 绝不重绘，保护用户勾选
-          const needRender = justFinished || sig !== lastFollowListSig || !document.querySelector('.follow-checkbox');
+          if (justFinished && !autoBusy) selectedFollowIds.clear();
 
-          if (needRender) {
-            followListData = users;
-            // 新扫描刚完成：清空勾选；列表内容变化：保留勾选
-            if (justFinished) selectedFollowIds.clear();
-            try {
-              renderUserList('follow-list-items', followListData, 'follow', {
-                preserveSelection: !justFinished,
-              });
-            } catch (renderErr) {
-              console.error('renderUserList failed', renderErr);
-              document.getElementById('follow-list-items').innerHTML =
-                '<div style="padding:12px;color:#f4212e;font-size:13px;">列表渲染失败: ' + escHtml(renderErr.message || renderErr) + '</div>';
-            }
+          try {
+            syncFollowBackQueueFromServer(scan, serverFollowBackAuto, {
+              force: justFinished,
+            });
+          } catch (renderErr) {
+            console.error('syncFollowBackQueueFromServer failed', renderErr);
+            document.getElementById('follow-list-items').innerHTML =
+              '<div style="padding:12px;color:#f4212e;font-size:13px;">列表渲染失败: ' +
+              escHtml(renderErr.message || renderErr) + '</div>';
           }
 
-          document.getElementById('follow-list').style.display = 'block';
-          document.getElementById('follow-queue-count').textContent =
-            '待回关: ' + (followListData.length || scan.count || 0);
-          statusEl.textContent = '找到 ' + (followListData.length || scan.count || 0) + ' 个待回关粉丝';
+          statusEl.textContent = '找到 ' + followListData.length + ' 个待回关粉丝' +
+            (autoBusy && serverFollowBackAuto.phase === 'following'
+              ? ' · 自动回关进行中…'
+              : '');
           statusEl.style.color = '#00ba7c';
-          if (justFinished) {
-            showToast('待回关: ' + (followListData.length || scan.count || 0) + ' 人', 'success');
-            addLog('扫描完成: ' + (followListData.length || scan.count || 0) + ' 个待回关');
+          if (justFinished && !autoBusy) {
+            showToast('待回关: ' + followListData.length + ' 人', 'success');
+            addLog('扫描完成: ' + followListData.length + ' 个待回关');
           }
-          btn.textContent = '计算待回关';
-          btn.disabled = false;
+          if (!serverFollowBackAuto.enabled) {
+            btn.textContent = '计算待回关';
+            btn.disabled = false;
+          }
         } else if (scan.status === 'error') {
-          if (followBackPollTimer) { clearInterval(followBackPollTimer); followBackPollTimer = null; }
+          if (followBackPollTimer && !serverFollowBackAuto.running) {
+            clearInterval(followBackPollTimer);
+            followBackPollTimer = null;
+          }
           statusEl.textContent = scan.error || '扫描失败';
           statusEl.style.color = '#f4212e';
           if (lastFollowBackScanStatus === 'scanning') {
             showToast(scan.error || '扫描失败', 'error');
           }
-          btn.textContent = '计算待回关';
-          btn.disabled = false;
+          if (!serverFollowBackAuto.enabled) {
+            btn.textContent = '计算待回关';
+            btn.disabled = false;
+          }
         } else if (scan.status === 'scanning') {
           followBackPollCount++;
-          statusEl.textContent = '后台扫描中…（轮询 #' + followBackPollCount + '）';
+          statusEl.textContent = (serverFollowBackAuto.running ? '自动' : '后台') +
+            '扫描中…（轮询 #' + followBackPollCount + '）';
           statusEl.style.color = '#1d9bf0';
           if (followBackPollCount > 450) {
             statusEl.textContent = '扫描超时，请刷新页面后重试';
             statusEl.style.color = '#f4212e';
             if (followBackPollTimer) { clearInterval(followBackPollTimer); followBackPollTimer = null; }
-            btn.textContent = '计算待回关';
-            btn.disabled = false;
+            if (!serverFollowBackAuto.enabled) {
+              btn.textContent = '计算待回关';
+              btn.disabled = false;
+            }
           }
         } else if (scan.status === 'idle') {
           if (lastFollowBackScanStatus === 'scanning' && followBackPollCount > 2) {
             statusEl.textContent = '扫描状态已重置';
             statusEl.style.color = '#888';
             if (followBackPollTimer) { clearInterval(followBackPollTimer); followBackPollTimer = null; }
-            btn.textContent = '计算待回关';
-            btn.disabled = false;
+            if (!serverFollowBackAuto.enabled) {
+              btn.textContent = '计算待回关';
+              btn.disabled = false;
+            }
           }
         }
         lastFollowBackScanStatus = scan.status;
+
+        // 自动任务结束后停止快轮询（避免一直 2s 打 status）
+        if (followBackFastPollActive && !serverFollowBackAuto.running && scan.status !== 'scanning') {
+          const wasAuto = lastFollowAutoRunning || followBackFastPollActive;
+          ensureFollowBackFastPoll(false);
+          updateBatchProgressUI('', false);
+          applyFollowAutoManualLock();
+          if (wasAuto && serverFollowBackAuto.lastRunAt) {
+            refreshAccountAfterAutoFollow();
+          }
+        }
       } catch (e) {
         console.warn('checkFollowBackScan error', e);
       } finally {
@@ -746,29 +899,56 @@
       addLog(msg);
       showToast(msg, failed ? 'error' : 'success');
       document.getElementById('follow-list').style.display = 'block';
+      // 回关结束后刷新 Account 粉丝/关注数（同 Refresh Stats）
+      if (done > 0) refreshAccount({ quiet: true, reason: '手动回关完成' });
     }
 
     // ── Account Refresh ────────────────────────────────────
 
-    async function refreshAccount() {
+    /** 防止自动回关结束时多路轮询重复触发 refresh */
+    let lastAccountRefreshKey = '';
+
+    async function refreshAccount(opts) {
+      const quiet = !!(opts && opts.quiet);
+      const reason = (opts && opts.reason) || '';
       const statusEl = document.getElementById('account-refresh-status');
-      statusEl.textContent = 'Refreshing...';
+      if (statusEl) {
+        statusEl.textContent = 'Refreshing...';
+        statusEl.style.color = '#888';
+      }
       try {
         const res = await fetch('/api/account/refresh', { method: 'POST' });
         const data = await res.json();
         if (data.ok) {
-          statusEl.textContent = '✓ Refreshed';
-          statusEl.style.color = '#00ba7c';
+          if (statusEl) {
+            statusEl.textContent = '✓ Refreshed';
+            statusEl.style.color = '#00ba7c';
+          }
+          if (reason) addLog('Account 已刷新' + (reason ? '（' + reason + '）' : ''));
           refreshStatus();
         } else {
-          statusEl.textContent = '✗ ' + (data.error || 'Failed');
-          statusEl.style.color = '#f4212e';
+          if (statusEl) {
+            statusEl.textContent = '✗ ' + (data.error || 'Failed');
+            statusEl.style.color = '#f4212e';
+          }
+          if (!quiet) showToast(data.error || 'Refresh failed', 'error');
         }
       } catch {
-        statusEl.textContent = '✗ Error';
-        statusEl.style.color = '#f4212e';
+        if (statusEl) {
+          statusEl.textContent = '✗ Error';
+          statusEl.style.color = '#f4212e';
+        }
+        if (!quiet) showToast('Refresh failed', 'error');
       }
-      setTimeout(() => { statusEl.textContent = ''; }, 3000);
+      if (statusEl) setTimeout(() => { statusEl.textContent = ''; }, 3000);
+    }
+
+    /** 自动回关一轮结束后触发一次 Account 刷新（按 lastRunAt 去重） */
+    function refreshAccountAfterAutoFollow() {
+      const key = serverFollowBackAuto.lastRunAt || serverFollowBackAuto.lastResult || String(Date.now());
+      if (key && key === lastAccountRefreshKey) return;
+      lastAccountRefreshKey = key;
+      refreshAccount({ quiet: true, reason: '自动回关完成' });
     }
 
     // ── Account Connect ────────────────────────────────────
@@ -929,15 +1109,6 @@
           disconnectedDiv.style.display = 'block';
         }
 
-        // Dashboard queue count — merge DB pending + scan results
-        if (data.pending) {
-          const scanExtra = (data.computedFollowBack && data.computedFollowBack.status === 'done' && data.computedFollowBack.count > 0)
-            ? ` | Scanned: ${data.computedFollowBack.count}`
-            : '';
-          document.getElementById('follow-queue-count').textContent =
-            `Pending: ${data.pending.followPending} | Done: ${data.pending.followCompleted} | Failed: ${data.pending.followFailed}${scanExtra}`;
-        }
-
         // Task status
         const dot = document.getElementById('status-dot');
         dot.className = 'status-dot ' + data.task.status;
@@ -947,7 +1118,9 @@
         updatePostScheduleUI(data);
 
         // 自动扫描回关状态（服务端定时，与 UI 是否打开无关）
+        let wasRunning = lastFollowAutoRunning;
         if (data.followBackAuto) {
+          wasRunning = lastFollowAutoRunning;
           serverFollowBackAuto = {
             enabled: !!data.followBackAuto.enabled,
             intervalMinutes: data.followBackAuto.intervalMinutes || 30,
@@ -955,7 +1128,12 @@
             lastRunAt: data.followBackAuto.lastRunAt || null,
             running: !!data.followBackAuto.running,
             lastResult: data.followBackAuto.lastResult || null,
+            phase: data.followBackAuto.phase || 'idle',
+            processingUsers: data.followBackAuto.processingUsers || [],
+            progress: data.followBackAuto.progress || null,
+            sessionSucceeded: data.followBackAuto.sessionSucceeded || [],
           };
+          lastFollowAutoRunning = serverFollowBackAuto.running;
           const en = document.getElementById('follow-auto-enabled');
           const iv = document.getElementById('follow-auto-interval');
           // 仅当用户未在编辑意图时同步勾选（避免打断正在改的勾选）
@@ -967,25 +1145,103 @@
           }
           updateFollowAutoCountdown();
           applyFollowAutoManualLock();
+
+          // 自动任务进行中：加快列表同步（勾选 + 成功列表）
+          if (serverFollowBackAuto.running || wasRunning) {
+            ensureFollowBackFastPoll(true);
+          } else {
+            ensureFollowBackFastPoll(false);
+          }
         }
 
-        // Follow-back scan：仅 scanning 时轮询；done 且尚未渲染过才补一次
-        // 已展示列表时不要反复 check，否则会冲掉用户勾选
+        // Follow-back 列表同步：
+        // - 手动扫描：scanning / 刚 done 时更新
+        // - 自动化：running 期间持续同步；done 后若列表变化（成功剔除）也同步
         const fb = data.computedFollowBack;
-        if (fb) {
-          if (fb.status === 'scanning') {
-            checkFollowBackScan();
-          } else if (fb.status === 'done' && lastFollowBackScanStatus !== 'done') {
-            checkFollowBackScan();
-          } else if (fb.status === 'error' && lastFollowBackScanStatus === 'scanning') {
-            checkFollowBackScan();
-          }
-          // 队列数字：用本地列表长度（可能已被批量回关裁剪），不要被服务端旧 count 盖掉
-          if (fb.status === 'done' && followListData.length >= 0 && document.getElementById('follow-list').style.display !== 'none') {
-            const countEl = document.getElementById('follow-queue-count');
-            if (countEl && !countEl.textContent.startsWith('Pending:')) {
-              countEl.textContent = '待回关: ' + followListData.length;
+        if (fb && !batchFollowInProgress) {
+          const autoBusy = serverFollowBackAuto.running;
+          const serverUsers = Array.isArray(fb.users) ? fb.users : [];
+          // 与本地比较时排除已在成功列表中的用户
+          const doneIds = new Set(followDoneList.map(u => String(u.userId)));
+          const serverPending = serverUsers.filter(u => !doneIds.has(String(u.userId)));
+          const serverSig = followListSignature(serverPending);
+          const listDrift = fb.status === 'done' && serverSig !== lastFollowListSig;
+          const justDone = fb.status === 'done' && lastFollowBackScanStatus !== 'done';
+          const justErr = fb.status === 'error' && lastFollowBackScanStatus === 'scanning';
+
+          if (fb.status === 'scanning' || autoBusy || justDone || justErr || listDrift) {
+            if (fb.status === 'scanning') {
+              // 扫描中不要用 null/空列表冲掉上一轮展示；只更新状态文案
+              lastFollowBackScanStatus = 'scanning';
+              const statusEl = document.getElementById('compute-follow-status');
+              if (statusEl) {
+                statusEl.textContent = (autoBusy ? '自动' : '后台') + '扫描中…';
+                statusEl.style.color = '#1d9bf0';
+              }
+              if (autoBusy) updateBatchProgressUI('自动扫描待回关中…', true);
+              // 仍同步会话成功列表（不改 pending 勾选列表）
+              const sessionOk = serverFollowBackAuto.sessionSucceeded || [];
+              let doneChanged = false;
+              sessionOk.forEach(u => {
+                const id = String(u.userId || '');
+                if (!id || syncedSessionSucceededIds.has(id)) return;
+                addToDoneList(u, { render: false });
+                doneChanged = true;
+              });
+              if (doneChanged) renderDoneList();
+            } else if (fb.status === 'done' || listDrift) {
+              // 扫描完成或列表内容变化（含自动回关逐个剔除）：同步 pending + 勾选 + 成功区
+              const justFinishedScan = lastFollowBackScanStatus === 'scanning';
+              if (justFinishedScan && !autoBusy) selectedFollowIds.clear();
+              try {
+                syncFollowBackQueueFromServer(fb, serverFollowBackAuto, {
+                  force: justFinishedScan || (wasRunning && !serverFollowBackAuto.running),
+                });
+              } catch (e) {
+                console.warn('syncFollowBackQueueFromServer', e);
+              }
+              if (justFinishedScan && !autoBusy) {
+                const statusEl = document.getElementById('compute-follow-status');
+                if (statusEl) {
+                  statusEl.textContent = '找到 ' + followListData.length + ' 个待回关粉丝';
+                  statusEl.style.color = '#00ba7c';
+                }
+              }
+              // 本轮自动刚结束：收尾进度条 + toast + 刷新 Account
+              if (wasRunning && !serverFollowBackAuto.running) {
+                updateBatchProgressUI('', false);
+                if (serverFollowBackAuto.lastResult) {
+                  addLog('自动回关: ' + serverFollowBackAuto.lastResult);
+                  showToast(serverFollowBackAuto.lastResult, 'success');
+                }
+                refreshAccountAfterAutoFollow();
+              }
+              lastFollowBackScanStatus = 'done';
+            } else if (justErr) {
+              lastFollowBackScanStatus = 'error';
             }
+          }
+
+          // 队列数字：有扫描列表时优先显示「待回关」
+          const countEl = document.getElementById('follow-queue-count');
+          if (countEl) {
+            if (fb.status === 'done' || followListData.length > 0 || document.getElementById('follow-list').style.display !== 'none') {
+              countEl.textContent = '待回关: ' + followListData.length +
+                (followDoneList.length ? ' · 已回关: ' + followDoneList.length : '');
+            } else if (data.pending) {
+              countEl.textContent =
+                'Pending: ' + data.pending.followPending +
+                ' | Done: ' + data.pending.followCompleted +
+                ' | Failed: ' + data.pending.followFailed;
+            }
+          }
+        } else if (data.pending) {
+          const countEl = document.getElementById('follow-queue-count');
+          if (countEl && document.getElementById('follow-list').style.display === 'none') {
+            countEl.textContent =
+              'Pending: ' + data.pending.followPending +
+              ' | Done: ' + data.pending.followCompleted +
+              ' | Failed: ' + data.pending.followFailed;
           }
         }
       } catch (err) {
@@ -1002,8 +1258,37 @@
       lastRunAt: null,
       running: false,
       lastResult: null,
+      phase: 'idle',
+      processingUsers: [],
+      progress: null,
+      sessionSucceeded: [],
     };
     let followAutoCountdownTimer = null;
+    /** 自动化运行时 2s 快轮询；空闲时交给 10s refreshStatus */
+    let followBackFastPollActive = false;
+
+    function ensureFollowBackFastPoll(active) {
+      if (active) {
+        if (followBackFastPollActive && followBackPollTimer) return;
+        followBackFastPollActive = true;
+        if (followBackPollTimer) clearInterval(followBackPollTimer);
+        // 不在此处同步调用 checkFollowBackScan，避免与 refreshStatus 重入
+        followBackPollTimer = setInterval(checkFollowBackScan, 2000);
+      } else {
+        if (!followBackFastPollActive && !followBackPollTimer) return;
+        followBackFastPollActive = false;
+        // 手动扫描仍为 scanning 时保留轮询；否则停掉
+        if (followBackPollTimer && lastFollowBackScanStatus !== 'scanning') {
+          clearInterval(followBackPollTimer);
+          followBackPollTimer = null;
+        } else if (followBackPollTimer && lastFollowBackScanStatus === 'scanning' && !serverFollowBackAuto.running) {
+          // 手动扫描轮询由 computeFollowBack 启动，此处不误清
+        } else if (followBackPollTimer && !serverFollowBackAuto.running && lastFollowBackScanStatus !== 'scanning') {
+          clearInterval(followBackPollTimer);
+          followBackPollTimer = null;
+        }
+      }
+    }
 
     function toggleAutoSettings() {
       const panel = document.getElementById('auto-settings-panel');
@@ -1043,7 +1328,17 @@
         return;
       }
       if (a.running) {
-        el.textContent = '⚡ 自动任务进行中（扫描/回关）… ' + (a.lastResult ? '上轮: ' + a.lastResult : '');
+        let detail = '';
+        if (a.phase === 'scanning') detail = '正在扫描待回关…';
+        else if (a.phase === 'following' && a.progress) {
+          detail = '正在回关 ' + a.progress.current + '/' + a.progress.total +
+            (a.progress.label ? ' ' + a.progress.label : '');
+        } else if (a.phase === 'following') {
+          detail = '正在回关…';
+        } else {
+          detail = '任务进行中…';
+        }
+        el.textContent = '⚡ ' + detail + (a.lastResult ? ' · 上轮: ' + a.lastResult : '');
         el.style.color = '#1d9bf0';
         return;
       }

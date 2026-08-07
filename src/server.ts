@@ -240,8 +240,10 @@ export function createServer(taskManager: TaskManager): express.Express {
         return;
       }
       const result = await taskManager.batchFollow(targets);
-      // 成功的从内存扫描列表剔除，前端可立即刷新展示
-      const okIds = (result.results || []).filter((r) => r.ok).map((r) => r.userId);
+      // 成功的从内存扫描列表剔除，并记入会话成功列表（前端成功区可同步）
+      const okResults = (result.results || []).filter((r) => r.ok);
+      const okIds = okResults.map((r) => r.userId);
+      taskManager.recordFollowBackSuccesses(okResults);
       taskManager.removeFromFollowBackScan(okIds);
       res.json({ ok: true, ...result });
     } catch (err: any) {
